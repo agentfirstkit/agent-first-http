@@ -22,7 +22,7 @@ jobs:
         include:
           - os: macos-latest
             target: aarch64-apple-darwin
-          - os: macos-13
+          - os: macos-latest
             target: x86_64-apple-darwin
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
@@ -31,6 +31,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - uses: actions/cache@v4
         with:
@@ -41,14 +43,14 @@ jobs:
           key: ${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Build
-        run: cargo build --release
+        run: cargo build --release --target ${{ matrix.target }}
 
       - name: Package
         shell: bash
         run: |
           TAG="${{ github.event.inputs.tag || github.ref_name }}"
           ARCHIVE="afhttp-${TAG}-${{ matrix.target }}.tar.gz"
-          tar -czf "$ARCHIVE" -C target/release afhttp
+          tar -czf "$ARCHIVE" -C "target/${{ matrix.target }}/release" afhttp
           echo "TAG=$TAG" >> "$GITHUB_ENV"
           echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
 
