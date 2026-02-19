@@ -92,6 +92,21 @@ curl https://api.example.com/users   # → JSON output
 
 ## Install
 
+**macOS / Linux — Homebrew**
+
+```bash
+brew install cmnspore/tap/afhttp
+```
+
+**Windows — Scoop**
+
+```powershell
+scoop bucket add cmnspore https://github.com/cmnspore/scoop-bucket
+scoop install afhttp
+```
+
+**Any platform — Cargo**
+
 ```bash
 cargo install agent-first-http
 ```

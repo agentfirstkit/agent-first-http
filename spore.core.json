@@ -8,7 +8,13 @@
     "Bridge the gap between curl (one connection per invocation, human-oriented output) and MCP (protocol-locked, requires JSON-RPC framing) — afh is transport-only, works with any HTTP API, and uses AFD suffix conventions for self-describing fields in every request and response",
     "Provide first-class SSE streaming support where server-sent events arrive as individual JSONL lines on stdout, enabling agents to process streaming responses (LLM tokens, progress updates, real-time feeds) without buffering the entire response"
   ],
-  "changes": [],
+  "changes": [
+    "Add GitHub Actions release workflow that builds pre-compiled binaries for macOS ARM, macOS Intel, Linux, and Windows on every version tag, uploads them to GitHub release assets, and automatically updates Homebrew and Scoop package manifests — enabling one-command installation without requiring Rust or cargo",
+    "Add Homebrew tap (cmnspore/homebrew-tap) with auto-updated formula so macOS and Linux users can install via 'brew install cmnspore/tap/afhttp'",
+    "Add Scoop bucket (cmnspore/scoop-bucket) with auto-updated manifest so Windows users can install via 'scoop install afhttp'",
+    "Update README Install section to document all three installation methods: Homebrew for macOS/Linux, Scoop for Windows, and cargo install for any platform",
+    "Fix BSD sed compatibility bug in release script — replace GNU-only \\+ quantifier with \\* so the version check works on macOS without GNU coreutils"
+  ],
   "license": "MIT",
   "references": [
     {
