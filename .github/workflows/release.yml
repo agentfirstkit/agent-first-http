@@ -147,3 +147,54 @@ jobs:
           git add Formula/afhttp.rb
           git diff --cached --quiet || git commit -m "afhttp $TAG"
           git push
+
+  update-scoop:
+    name: Update Scoop bucket
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout bucket
+        uses: actions/checkout@v4
+        with:
+          repository: cmnspore/scoop-bucket
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Compute sha256 and update manifest
+        shell: bash
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          BASE="https://github.com/cmnspore/agent-first-http/releases/download/${TAG}"
+          ARCHIVE="afhttp-${TAG}-x86_64-pc-windows-msvc.zip"
+
+          SHA=$(curl -fsSL "${BASE}/${ARCHIVE}" | sha256sum | awk '{print $1}')
+
+          python3 - "$VERSION" "$TAG" "$BASE" "$ARCHIVE" "$SHA" <<'PYEOF'
+          import sys, json, os
+          version, tag, base, archive, sha = sys.argv[1:6]
+          manifest = {
+            "version": version,
+            "description": "Persistent HTTP client for AI agents — one request, one JSON line",
+            "homepage": "https://github.com/cmnspore/agent-first-http",
+            "license": "MIT",
+            "url": f"{base}/{archive}",
+            "hash": sha,
+            "bin": "afhttp.exe"
+          }
+          os.makedirs("bucket", exist_ok=True)
+          with open("bucket/afhttp.json", "w") as f:
+              json.dump(manifest, f, indent=2, ensure_ascii=False)
+              f.write("\n")
+          print(f"Updated bucket/afhttp.json to {version}")
+          PYEOF
+
+      - name: Commit and push
+        shell: bash
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add bucket/afhttp.json
+          git diff --cached --quiet || git commit -m "afhttp $TAG"
+          git push
