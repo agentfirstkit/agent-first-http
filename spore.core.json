@@ -1,0 +1,36 @@
+{
+  "id": "agent-first-http",
+  "name": "Agent-First HTTP",
+  "domain": "cmn.dev",
+  "synopsis": "Persistent HTTP client for AI agents — JSONL in, JSONL out, connections managed transparently so agents never think about transport",
+  "intent": [
+    "Give AI agents a persistent HTTP client that maintains connection pools per host, reuses TCP+TLS connections across requests, and multiplexes concurrent streams over HTTP/2 — the agent writes JSON requests to stdin and reads JSON responses from stdout, never managing sockets, TLS handshakes, or connection lifecycles",
+    "Bridge the gap between curl (one connection per invocation, human-oriented output) and MCP (protocol-locked, requires JSON-RPC framing) — afh is transport-only, works with any HTTP API, and uses AFD suffix conventions for self-describing fields in every request and response",
+    "Provide first-class SSE streaming support where server-sent events arrive as individual JSONL lines on stdout, enabling agents to process streaming responses (LLM tokens, progress updates, real-time feeds) without buffering the entire response"
+  ],
+  "changes": [
+    "Implement afhttp CLI mode for single-request agent invocations — one JSON line in, one JSON line out, exit code 0 for any HTTP response so agents distinguish transport errors (exit 1) from HTTP errors (status field) without exception handling",
+    "Implement afhttp --pipe mode for persistent sessions with HTTP connection pooling, concurrent in-flight requests matched by id, and chunked streaming for SSE/NDJSON delivered as individual JSONL lines — eliminating per-request TLS handshake overhead for agents making multiple calls to the same API",
+    "Implement afhttp --mcp mode as a Model Context Protocol server over stdio, exposing http_request and http_config tools so AI assistants like Claude Desktop can make HTTP requests without shell access",
+    "Add curl compatibility mode via 'afhttp curl' subcommand or argv[0] symlink detection, translating curl-style flags into afhttp requests and returning structured JSON instead of raw bytes — enabling agents to reuse existing curl-based tool definitions",
+    "Add WebSocket support in pipe mode for full-duplex connections, delivering server frames as JSONL chunk_data lines and accepting client frames as stdin messages",
+    "Add .gitignore with .DS_Store and .cmn exclusions — .cmn is the hypha spawn working directory created when agents resolve this spore as a dependency"
+  ],
+  "license": "MIT",
+  "references": [
+    {
+      "uri": "cmn://cmn.dev/spore/blake3_5964f09fc2b8a9c8035cd823f431d6a7bcb81d2480f9ddee74beca0b2859020c",
+      "relation": "follows",
+      "reason": "All request/response fields use AFD suffix conventions, stderr logging uses AFD output formats"
+    }
+  ],
+  "tree": {
+    "algorithm": "blob_tree_blake3_nfc",
+    "excludes": [
+      ".git"
+    ],
+    "ignore_rules": [
+      ".gitignore"
+    ]
+  }
+}
