@@ -22,10 +22,16 @@ jobs:
         include:
           - os: macos-latest
             target: aarch64-apple-darwin
+            archive: tar
           - os: macos-latest
             target: x86_64-apple-darwin
+            archive: tar
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
+            archive: tar
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
 
     steps:
       - uses: actions/checkout@v4
@@ -49,8 +55,14 @@ jobs:
         shell: bash
         run: |
           TAG="${{ github.event.inputs.tag || github.ref_name }}"
-          ARCHIVE="afhttp-${TAG}-${{ matrix.target }}.tar.gz"
-          tar -czf "$ARCHIVE" -C "target/${{ matrix.target }}/release" afhttp
+          BIN_DIR="target/${{ matrix.target }}/release"
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            ARCHIVE="afhttp-${TAG}-${{ matrix.target }}.zip"
+            cd "$BIN_DIR" && 7z a "../../../$ARCHIVE" afhttp.exe && cd -
+          else
+            ARCHIVE="afhttp-${TAG}-${{ matrix.target }}.tar.gz"
+            tar -czf "$ARCHIVE" -C "$BIN_DIR" afhttp
+          fi
           echo "TAG=$TAG" >> "$GITHUB_ENV"
           echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
 
