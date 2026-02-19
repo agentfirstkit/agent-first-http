@@ -248,7 +248,7 @@ class TestHandler(http.server.BaseHTTPRequestHandler):
 
         # /unicode — response with unicode content
         if path == "/unicode":
-            body = json.dumps({"text": "hello world 🌍 cafe resume"}).encode()
+            body = json.dumps({"text": "你好世界 🌍 café résumé"}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))

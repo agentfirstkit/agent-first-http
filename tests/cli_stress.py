@@ -735,7 +735,7 @@ def test_unicode():
     out, _ = run_cli(["GET", f"{BASE}/unicode"])
     r = find_by_code(out, "response")
     assert r, "no response"
-    assert "hello world" in r[0]["body"]["text"]
+    assert "你好世界" in r[0]["body"]["text"]
 
 
 # ---------------------------------------------------------------------------

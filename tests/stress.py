@@ -665,7 +665,7 @@ def test_unicode():
     ])
     r = find_by_id(out, "response", "1")
     assert r, "no response"
-    assert "hello world" in r["body"]["text"]
+    assert "你好世界" in r["body"]["text"]
 
 
 @test("parse_json=false returns JSON as string")
