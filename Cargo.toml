@@ -2,6 +2,10 @@
 name = "agent-first-http"
 version = "0.1.0"
 edition = "2021"
+description = "Persistent HTTP client for AI agents — one request, one JSON line"
+license = "MIT"
+repository = "https://github.com/cmnspore/agent-first-http"
+readme = "README.md"
 
 [[bin]]
 name = "afhttp"
