@@ -19,6 +19,7 @@ run_unit_component() {
 
 run_e2e() {
   echo "[e2e] stress suites"
+  (cd "$ROOTPATH" && cargo build)
   (cd "$ROOTPATH" && python3 tests/stress.py)
   (cd "$ROOTPATH" && python3 tests/cli_stress.py)
   (cd "$ROOTPATH" && python3 tests/ws_stress.py)
