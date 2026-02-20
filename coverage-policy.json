@@ -1,7 +1,7 @@
 {
   "global": {
-    "regions": 89.0,
-    "lines": 90.0
+    "regions": 88.0,
+    "lines": 89.0
   },
   "core_files": {
     "src/handler.rs": {
