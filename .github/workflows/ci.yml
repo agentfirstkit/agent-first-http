@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: spores/agent-first-http
+        working-directory: .
 
     steps:
       - uses: actions/checkout@v4
