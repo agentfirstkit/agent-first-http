@@ -343,3 +343,96 @@ async fn cleanup(app: &Arc<App>, id: &str) {
     app.in_flight.write().await.remove(id);
     app.ws_connections.write().await.remove(id);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use tokio_tungstenite::tungstenite;
+
+    #[test]
+    fn build_request_accepts_valid_ws_url_and_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-test", "ok".parse().expect("header value"));
+        let req = build_request("ws://example.com/socket", &headers).expect("request");
+        assert_eq!(req.uri().to_string(), "ws://example.com/socket");
+        assert_eq!(
+            req.headers().get("x-test").and_then(|v| v.to_str().ok()),
+            Some("ok")
+        );
+    }
+
+    #[test]
+    fn build_request_rejects_invalid_url() {
+        let headers = HeaderMap::new();
+        let err = build_request("ws://exa mple.com", &headers).expect_err("invalid url");
+        assert!(err.contains("invalid ws url") || err.contains("build websocket request"));
+    }
+
+    #[test]
+    fn build_message_text_json_binary_and_errors() {
+        match build_message(Some(Value::String("hi".to_string())), None).expect("text") {
+            Message::Text(t) => assert_eq!(t.to_string(), "hi"),
+            other => panic!("unexpected message: {other:?}"),
+        }
+
+        match build_message(Some(json!({"a":1})), None).expect("json text") {
+            Message::Text(t) => assert_eq!(t.to_string(), r#"{"a":1}"#),
+            other => panic!("unexpected message: {other:?}"),
+        }
+
+        match build_message(None, Some("aGk=".to_string())).expect("binary") {
+            Message::Binary(b) => assert_eq!(&b[..], b"hi"),
+            other => panic!("unexpected message: {other:?}"),
+        }
+
+        let err = build_message(None, None).expect_err("missing data");
+        assert!(err.contains("requires data"));
+        let err = build_message(Some(Value::Null), Some("aA==".to_string())).expect_err("both");
+        assert!(err.contains("mutually exclusive"));
+        let err = build_message(None, Some("%%%".to_string())).expect_err("bad b64");
+        assert!(err.contains("decode data_base64"));
+    }
+
+    #[test]
+    fn classify_error_maps_messages() {
+        let dns = tungstenite::Error::Io(std::io::Error::other("dns resolve failure for host"));
+        let info = classify_error(&dns);
+        assert_eq!(info.error_code, "dns_failed");
+        assert!(info.retryable);
+
+        let tls = tungstenite::Error::Io(std::io::Error::other("certificate verify failed"));
+        let info = classify_error(&tls);
+        assert_eq!(info.error_code, "tls_error");
+        assert!(!info.retryable);
+
+        let timeout =
+            tungstenite::Error::Io(std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"));
+        let info = classify_error(&timeout);
+        assert_eq!(info.error_code, "connect_timeout");
+        assert!(info.retryable);
+
+        let other = tungstenite::Error::Io(std::io::Error::other("connection reset"));
+        let info = classify_error(&other);
+        assert_eq!(info.error_code, "connect_refused");
+        assert!(info.retryable);
+    }
+
+    #[test]
+    fn headers_to_map_lowercases_and_rejects_invalid() {
+        let mut headers = tungstenite::http::HeaderMap::new();
+        headers.insert("X-Test", "value".parse().expect("header value"));
+        let mapped = headers_to_map(&headers).expect("map");
+        assert_eq!(
+            mapped.get("x-test"),
+            Some(&Value::String("value".to_string()))
+        );
+
+        let mut bad = tungstenite::http::HeaderMap::new();
+        bad.insert(
+            "X-Bad",
+            tungstenite::http::HeaderValue::from_bytes(&[0xFF]).expect("header bytes"),
+        );
+        assert!(headers_to_map(&bad).is_err());
+    }
+}

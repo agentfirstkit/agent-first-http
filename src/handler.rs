@@ -348,6 +348,16 @@ fn build_body(
 ) -> Result<(Option<Vec<u8>>, Option<&'static str>), String> {
     // Multipart is handled separately (async file reading)
     if body_multipart.is_some() {
+        if body.is_some()
+            || body_base64.is_some()
+            || body_file.is_some()
+            || body_urlencoded.is_some()
+        {
+            return Err(
+                "body, body_base64, body_file, body_multipart, and body_urlencoded are mutually exclusive"
+                    .to_string(),
+            );
+        }
         return Ok((None, None));
     }
 
@@ -1092,4 +1102,326 @@ fn sidecar_path_for(path: &str) -> String {
     let mut sidecar = std::ffi::OsString::from(path);
     sidecar.push(".json");
     PathBuf::from(sidecar).to_string_lossy().into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::RuntimeConfig;
+    use reqwest::header::{HeaderValue, AUTHORIZATION, COOKIE, PROXY_AUTHORIZATION};
+    use tokio::sync::{mpsc, RwLock};
+    use tokio_util::sync::CancellationToken;
+
+    async fn test_app() -> Arc<App> {
+        let save_dir = std::env::temp_dir()
+            .join(format!("afhttp-handler-test-{}", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let config = RuntimeConfig::new(save_dir);
+        let client = config.build_client().expect("build client");
+        let (tx, _rx) = mpsc::channel(16);
+        Arc::new(App {
+            config: RwLock::new(config),
+            client: RwLock::new(client),
+            writer: tx,
+            in_flight: RwLock::new(HashMap::new()),
+            ws_connections: RwLock::new(HashMap::new()),
+            request_count: std::sync::atomic::AtomicU64::new(0),
+            start_time: Instant::now(),
+        })
+    }
+
+    #[test]
+    fn body_builders_cover_variants() {
+        let (body, ct) =
+            build_body(Some(serde_json::json!({"a":1})), None, None, &None, None).expect("json");
+        assert_eq!(body, Some(br#"{"a":1}"#.to_vec()));
+        assert_eq!(ct, Some("application/json"));
+
+        let (body, ct) = build_body(
+            Some(serde_json::Value::String("hello".to_string())),
+            None,
+            None,
+            &None,
+            None,
+        )
+        .expect("string");
+        assert_eq!(body, Some(b"hello".to_vec()));
+        assert_eq!(ct, None);
+
+        let (body, ct) =
+            build_body(Some(serde_json::json!(123)), None, None, &None, None).expect("number");
+        assert_eq!(body, Some(b"123".to_vec()));
+        assert_eq!(ct, Some("application/json"));
+
+        let (body, ct) =
+            build_body(None, Some("aGk=".to_string()), None, &None, None).expect("base64");
+        assert_eq!(body, Some(b"hi".to_vec()));
+        assert_eq!(ct, None);
+
+        let file = std::env::temp_dir()
+            .join(format!("afhttp-body-{}.txt", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        std::fs::write(&file, b"file-bytes").expect("write");
+        let (body, ct) = build_body(None, None, Some(file.clone()), &None, None).expect("file");
+        assert_eq!(body, Some(b"file-bytes".to_vec()));
+        assert_eq!(ct, None);
+        let _ = std::fs::remove_file(file);
+
+        let (body, ct) = build_body(
+            None,
+            None,
+            None,
+            &None,
+            Some(vec![UrlencodedPart {
+                name: "a b".to_string(),
+                value: "x+y".to_string(),
+            }]),
+        )
+        .expect("urlencoded");
+        assert_eq!(body, Some(b"a+b=x%2By".to_vec()));
+        assert_eq!(ct, Some("application/x-www-form-urlencoded"));
+
+        assert!(build_body(
+            Some(serde_json::json!({"x":1})),
+            Some("aA==".to_string()),
+            None,
+            &None,
+            None
+        )
+        .is_err());
+
+        assert!(build_body(
+            Some(serde_json::json!({"x":1})),
+            None,
+            None,
+            &Some(vec![MultipartPart {
+                name: "f".to_string(),
+                value: Some("v".to_string()),
+                value_base64: None,
+                file: None,
+                filename: None,
+                content_type: None,
+            }]),
+            None
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn regression_multipart_body_fields_are_mutually_exclusive() {
+        let err = build_body(
+            Some(serde_json::json!({"x":1})),
+            None,
+            None,
+            &Some(vec![MultipartPart {
+                name: "f".to_string(),
+                value: Some("v".to_string()),
+                value_base64: None,
+                file: None,
+                filename: None,
+                content_type: None,
+            }]),
+            None,
+        )
+        .expect_err("multipart + body must fail");
+        assert!(err.contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn encoding_helpers_work() {
+        assert_eq!(percent_encode_form("abc-_.123"), "abc-_.123");
+        assert_eq!(percent_encode_form("a b+c"), "a+b%2Bc");
+        let encoded = build_urlencoded_bytes(vec![
+            UrlencodedPart {
+                name: "x y".to_string(),
+                value: "1+2".to_string(),
+            },
+            UrlencodedPart {
+                name: "k".to_string(),
+                value: "".to_string(),
+            },
+        ]);
+        assert_eq!(encoded, b"x+y=1%2B2&k=".to_vec());
+    }
+
+    #[tokio::test]
+    async fn build_multipart_handles_text_file_base64_and_errors() {
+        let file = std::env::temp_dir()
+            .join(format!("afhttp-mp-{}.bin", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        tokio::fs::write(&file, b"bytes").await.expect("write");
+        let ok = build_multipart(vec![
+            MultipartPart {
+                name: "t".to_string(),
+                value: Some("hello".to_string()),
+                value_base64: None,
+                file: None,
+                filename: None,
+                content_type: None,
+            },
+            MultipartPart {
+                name: "b".to_string(),
+                value: None,
+                value_base64: Some("aGk=".to_string()),
+                file: None,
+                filename: Some("x.bin".to_string()),
+                content_type: Some("application/octet-stream".to_string()),
+            },
+            MultipartPart {
+                name: "f".to_string(),
+                value: None,
+                value_base64: None,
+                file: Some(file.clone()),
+                filename: None,
+                content_type: None,
+            },
+        ])
+        .await;
+        assert!(ok.is_ok());
+
+        let err = build_multipart(vec![MultipartPart {
+            name: "bad".to_string(),
+            value: None,
+            value_base64: Some("%%%".to_string()),
+            file: None,
+            filename: None,
+            content_type: None,
+        }])
+        .await;
+        assert!(err.is_err());
+
+        let err = build_multipart(vec![MultipartPart {
+            name: "bad".to_string(),
+            value: Some("x".to_string()),
+            value_base64: None,
+            file: None,
+            filename: None,
+            content_type: Some("not-a-mime".to_string()),
+        }])
+        .await;
+        assert!(err.is_err());
+
+        let err = build_multipart(vec![MultipartPart {
+            name: "missing".to_string(),
+            value: None,
+            value_base64: None,
+            file: None,
+            filename: None,
+            content_type: None,
+        }])
+        .await;
+        assert!(err.is_err());
+        let _ = tokio::fs::remove_file(file).await;
+    }
+
+    #[tokio::test]
+    async fn reserve_and_release_request_id() {
+        let app = test_app().await;
+        let tok1 = CancellationToken::new();
+        let tok2 = CancellationToken::new();
+        let r = reserve_request_id(&app, "id1", &tok1, 1).await;
+        assert!(matches!(r, ReserveIdResult::Reserved));
+        let r = reserve_request_id(&app, "id1", &tok2, 1).await;
+        assert!(matches!(r, ReserveIdResult::Duplicate));
+        let r = reserve_request_id(&app, "id2", &tok2, 1).await;
+        assert!(matches!(r, ReserveIdResult::Overloaded));
+        release_request_id(&app, "id1").await;
+        let r = reserve_request_id(&app, "id2", &tok2, 1).await;
+        assert!(matches!(r, ReserveIdResult::Reserved));
+    }
+
+    #[tokio::test]
+    async fn send_error_emits_output_error() {
+        let save_dir = std::env::temp_dir()
+            .join(format!("afhttp-handler-err-{}", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let config = RuntimeConfig::new(save_dir);
+        let client = config.build_client().expect("client");
+        let (tx, mut rx) = mpsc::channel(4);
+        let app = App {
+            config: RwLock::new(config),
+            client: RwLock::new(client),
+            writer: tx,
+            in_flight: RwLock::new(HashMap::new()),
+            ws_connections: RwLock::new(HashMap::new()),
+            request_count: std::sync::atomic::AtomicU64::new(0),
+            start_time: Instant::now(),
+        };
+        send_error(
+            &app,
+            Some("id1".to_string()),
+            Some("tag1".to_string()),
+            ErrorInfo::invalid_request("bad"),
+            Instant::now(),
+        )
+        .await;
+        let out = rx.recv().await.expect("output");
+        assert!(matches!(out, Output::Error { .. }));
+    }
+
+    #[test]
+    fn parse_retry_after_and_backoff_delay() {
+        let hv = HeaderValue::from_static("12");
+        assert_eq!(parse_retry_after(&hv), Some(12_000));
+        let bad = HeaderValue::from_static("abc");
+        assert_eq!(parse_retry_after(&bad), None);
+
+        assert_eq!(backoff_delay_ms(100, 0), 100);
+        assert_eq!(backoff_delay_ms(100, 1), 200);
+        assert_eq!(backoff_delay_ms(100, 10), 102_400);
+        assert_eq!(backoff_delay_ms(100, 100), 102_400);
+        assert_eq!(backoff_delay_ms(1_000_000, 10), 300_000);
+    }
+
+    #[test]
+    fn format_http_version_maps_known_values() {
+        assert_eq!(format_http_version(reqwest::Version::HTTP_2), "h2");
+        assert_eq!(format_http_version(reqwest::Version::HTTP_11), "h1");
+        assert_eq!(format_http_version(reqwest::Version::HTTP_10), "h1");
+        assert_eq!(format_http_version(reqwest::Version::HTTP_3), "h3");
+    }
+
+    #[test]
+    fn cross_origin_detection_and_header_stripping() {
+        let a = reqwest::Url::parse("https://example.com/a").expect("url");
+        let b = reqwest::Url::parse("https://example.com/b").expect("url");
+        let c = reqwest::Url::parse("http://example.com/b").expect("url");
+        let d = reqwest::Url::parse("https://api.example.com/b").expect("url");
+        let e = reqwest::Url::parse("https://example.com:8443/b").expect("url");
+        assert!(!is_cross_origin(&a, &b));
+        assert!(is_cross_origin(&a, &c));
+        assert!(is_cross_origin(&a, &d));
+        assert!(is_cross_origin(&a, &e));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer x"));
+        headers.insert(COOKIE, HeaderValue::from_static("a=1"));
+        headers.insert(PROXY_AUTHORIZATION, HeaderValue::from_static("Basic x"));
+        headers.insert("x-safe", HeaderValue::from_static("ok"));
+        strip_sensitive_redirect_headers(&mut headers);
+        assert!(headers.get(AUTHORIZATION).is_none());
+        assert!(headers.get(COOKIE).is_none());
+        assert!(headers.get(PROXY_AUTHORIZATION).is_none());
+        assert_eq!(
+            headers.get("x-safe").and_then(|v| v.to_str().ok()),
+            Some("ok")
+        );
+    }
+
+    #[test]
+    fn path_helpers_sanitize_and_sidecar() {
+        assert_eq!(sanitize_file_name("abc-_.123"), "abc-_.123");
+        assert_eq!(sanitize_file_name("a/b:c?d"), "a_b_c_d");
+        assert_eq!(sanitize_file_name(""), "request");
+
+        let auto = auto_download_path("/tmp/afh", "a/b");
+        assert!(auto.ends_with("/tmp/afh/a_b"));
+
+        let side = sidecar_path_for("/tmp/x.bin");
+        assert_eq!(side, "/tmp/x.bin.json");
+    }
 }

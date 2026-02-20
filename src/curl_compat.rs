@@ -1,9 +1,10 @@
-use crate::cli::{CliRequest, Mode, OutputFormat};
+use crate::cli::{CliRequest, Mode};
 use crate::types::*;
 /// curl compatibility mode: parse a subset of curl command-line flags and
 /// return a `Mode::Cli(...)` equivalent to what afh would produce natively.
 ///
 /// Supported flags: see docs/cli.md for the complete table.
+use agent_first_data::OutputFormat;
 use base64::Engine;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -60,9 +61,8 @@ pub fn parse_curl_args(args: &[String]) -> Mode {
             macro_rules! next_val {
                 () => {
                     if let Some(v) = inline_val {
-                        i += 1;
                         Some(v.to_string())
-                    } else if i + 1 < args.len() {
+                    } else if i + 1 < args.len() && !args[i + 1].starts_with('-') {
                         i += 1;
                         Some(args[i].clone())
                     } else {
@@ -197,8 +197,13 @@ pub fn parse_curl_args(args: &[String]) -> Mode {
                 "silent" | "compressed" | "fail" | "fail-with-body" | "show-error" | "globoff"
                 | "disable-eprt" | "ipv4" | "ipv6" => {}
                 "continue-at" => {
-                    if let Some(v) = next_val!() {
+                    if let Some(v) = inline_val {
                         if v == "-" {
+                            response_save_resume = true;
+                        }
+                    } else if i + 1 < args.len() {
+                        i += 1;
+                        if args[i] == "-" {
                             response_save_resume = true;
                         }
                     }
@@ -637,5 +642,328 @@ fn push_form_part(s: &str, parts: &mut Vec<MultipartPart>) {
                 content_type: None,
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn to_args(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    fn parse_cli(items: &[&str]) -> CliRequest {
+        match parse_curl_args(&to_args(items)) {
+            Mode::Cli(req) => *req,
+            _ => panic!("expected Mode::Cli"),
+        }
+    }
+
+    #[test]
+    fn parse_curl_defaults_to_get() {
+        let req = parse_cli(&["https://example.com"]);
+        assert_eq!(req.method, "GET");
+        assert_eq!(req.url, "https://example.com");
+        assert!(req.body.is_none());
+    }
+
+    #[test]
+    fn parse_curl_short_flags_with_body_and_headers() {
+        let req = parse_cli(&[
+            "-XPOST",
+            "-H",
+            "X-Test: 1",
+            "-d",
+            "{\"x\":1}",
+            "https://example.com/api",
+        ]);
+        assert_eq!(req.method, "POST");
+        assert_eq!(req.url, "https://example.com/api");
+        assert_eq!(
+            req.headers.get("X-Test"),
+            Some(&Value::String("1".to_string()))
+        );
+        assert_eq!(req.body, Some(serde_json::json!({"x": 1})));
+    }
+
+    #[test]
+    fn parse_curl_data_raw_is_string_and_verbose_sets_logs() {
+        let req = parse_cli(&["--data-raw", "a=1", "-v", "https://example.com"]);
+        assert_eq!(req.method, "POST");
+        assert_eq!(req.body, Some(Value::String("a=1".to_string())));
+        assert!(req.log_categories.iter().any(|c| c == "startup"));
+    }
+
+    #[test]
+    fn parse_curl_upload_file_defaults_to_put() {
+        let req = parse_cli(&["-T", "/tmp/file.bin", "https://example.com/upload"]);
+        assert_eq!(req.method, "PUT");
+        assert_eq!(req.body_file.as_deref(), Some("/tmp/file.bin"));
+    }
+
+    #[test]
+    fn parse_curl_form_and_urlencoded_modes() {
+        let form = parse_cli(&[
+            "-F",
+            "name=roger",
+            "-F",
+            "file=@/tmp/a.txt;filename=x.txt;type=text/plain",
+            "https://example.com",
+        ]);
+        let parts = form.body_multipart.expect("multipart");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].name, "name");
+        assert_eq!(parts[0].value.as_deref(), Some("roger"));
+        assert_eq!(parts[1].file.as_deref(), Some("/tmp/a.txt"));
+        assert_eq!(parts[1].filename.as_deref(), Some("x.txt"));
+        assert_eq!(parts[1].content_type.as_deref(), Some("text/plain"));
+
+        let ue = parse_cli(&[
+            "--data-urlencode",
+            "a=b",
+            "--data-urlencode",
+            "empty",
+            "https://example.com",
+        ]);
+        let parts = ue.body_urlencoded.expect("urlencoded");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].name, "a");
+        assert_eq!(parts[0].value, "b");
+        assert_eq!(parts[1].name, "empty");
+        assert_eq!(parts[1].value, "");
+    }
+
+    #[test]
+    fn parse_curl_remote_name_and_resume_and_redirects() {
+        let req = parse_cli(&[
+            "-O",
+            "--continue-at",
+            "-",
+            "-L",
+            "--max-redirs",
+            "3",
+            "https://example.com/path/file.txt",
+        ]);
+        assert_eq!(req.options.response_save_file.as_deref(), Some("file.txt"));
+        assert_eq!(req.options.response_save_resume, Some(true));
+        assert_eq!(req.options.response_redirect, Some(3));
+    }
+
+    #[test]
+    fn parse_curl_maps_tls_proxy_and_timeouts() {
+        let req = parse_cli(&[
+            "--insecure",
+            "--cacert",
+            "/tmp/ca.pem",
+            "--cert",
+            "/tmp/cert.pem",
+            "--key",
+            "/tmp/key.pem",
+            "--proxy",
+            "http://127.0.0.1:8080",
+            "--connect-timeout",
+            "2.9",
+            "--max-time",
+            "7.1",
+            "--retry",
+            "5",
+            "https://example.com",
+        ]);
+        assert_eq!(
+            req.config_overrides.proxy.as_deref(),
+            Some("http://127.0.0.1:8080")
+        );
+        assert_eq!(req.config_overrides.timeout_connect_s, Some(2));
+        assert_eq!(req.options.timeout_idle_s, Some(7));
+        assert_eq!(req.options.retry, Some(5));
+        let tls = req.options.tls.expect("tls");
+        assert_eq!(tls.insecure, Some(true));
+        assert_eq!(tls.cacert_file.as_deref(), Some("/tmp/ca.pem"));
+        assert_eq!(tls.cert_file.as_deref(), Some("/tmp/cert.pem"));
+        assert_eq!(tls.key_file.as_deref(), Some("/tmp/key.pem"));
+    }
+
+    #[test]
+    fn parse_helpers_cover_edge_cases() {
+        assert_eq!(
+            remote_name_from_url("https://example.com/a/b.txt").as_deref(),
+            Some("b.txt")
+        );
+        assert!(remote_name_from_url("not-url").is_none());
+
+        let mut headers = Vec::new();
+        push_header("X-A: 1", &mut headers);
+        push_header("MalformedHeader", &mut headers);
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].0, "X-A");
+        assert_eq!(headers[0].1, "1");
+
+        let mut auth_headers = Vec::new();
+        push_basic_auth("u:p", &mut auth_headers);
+        assert_eq!(auth_headers[0].0, "Authorization");
+        assert!(auth_headers[0].1.starts_with("Basic "));
+
+        let mut ue = Vec::new();
+        push_urlencode_part("a=1", &mut ue);
+        push_urlencode_part("b", &mut ue);
+        assert_eq!(ue[0].name, "a");
+        assert_eq!(ue[0].value, "1");
+        assert_eq!(ue[1].name, "b");
+        assert_eq!(ue[1].value, "");
+
+        let mut form = Vec::new();
+        push_form_part("field=value", &mut form);
+        push_form_part(
+            "up=@/tmp/x.bin;filename=x.bin;type=application/octet-stream",
+            &mut form,
+        );
+        push_form_part("empty", &mut form);
+        assert_eq!(form.len(), 3);
+        assert_eq!(form[0].value.as_deref(), Some("value"));
+        assert_eq!(form[1].file.as_deref(), Some("/tmp/x.bin"));
+        assert_eq!(form[1].filename.as_deref(), Some("x.bin"));
+        assert_eq!(
+            form[1].content_type.as_deref(),
+            Some("application/octet-stream")
+        );
+        assert_eq!(form[2].value.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn parse_curl_long_equals_and_noop_flags() {
+        let req = parse_cli(&[
+            "--request=patch",
+            "--header=X-A: 1",
+            "--data=hello",
+            "--output=out.txt",
+            "--location",
+            "--max-redirs=2",
+            "--head",
+            "--insecure",
+            "--cacert=/tmp/ca.pem",
+            "--cert=/tmp/cert.pem",
+            "--key=/tmp/key.pem",
+            "--proxy=http://127.0.0.1:8080",
+            "--retry=3",
+            "--connect-timeout=2.5",
+            "--max-time=7.8",
+            "--user-agent=ua",
+            "--user=u:p",
+            "--cookie=a=1",
+            "--referer=https://ref",
+            "--upload-file=/tmp/up.bin",
+            "--no-buffer",
+            "--verbose",
+            "--silent",
+            "--compressed",
+            "--fail",
+            "--fail-with-body",
+            "--show-error",
+            "--globoff",
+            "--disable-eprt",
+            "--ipv4",
+            "--ipv6",
+            "--continue-at=-",
+            "https://example.com/p",
+        ]);
+        assert_eq!(req.method, "HEAD");
+        assert_eq!(req.url, "https://example.com/p");
+        assert_eq!(req.options.response_redirect, Some(2));
+        assert_eq!(req.options.response_save_resume, Some(true));
+        assert_eq!(req.options.timeout_idle_s, Some(7));
+        assert_eq!(req.options.retry, Some(3));
+        assert!(req.options.chunked);
+        assert_eq!(
+            req.config_overrides.proxy.as_deref(),
+            Some("http://127.0.0.1:8080")
+        );
+        assert_eq!(req.config_overrides.timeout_connect_s, Some(2));
+        assert_eq!(
+            req.headers.get("User-Agent"),
+            Some(&Value::String("ua".to_string()))
+        );
+        assert_eq!(
+            req.headers.get("Cookie"),
+            Some(&Value::String("a=1".to_string()))
+        );
+        assert_eq!(
+            req.headers.get("Referer"),
+            Some(&Value::String("https://ref".to_string()))
+        );
+        assert!(req.headers.contains_key("Authorization"));
+        assert_eq!(req.body_file.as_deref(), Some("/tmp/up.bin"));
+
+        let head = parse_cli(&["--head", "https://example.com/head"]);
+        assert_eq!(head.method, "HEAD");
+    }
+
+    #[test]
+    fn parse_curl_short_flags_separate_values_and_unknowns() {
+        let req = parse_cli(&[
+            "-vksLN",
+            "-X",
+            "PUT",
+            "-H",
+            "X-B: 2",
+            "-d",
+            "k=v",
+            "-F",
+            "f=@/tmp/a.txt",
+            "-o",
+            "res.bin",
+            "-x",
+            "http://proxy:8080",
+            "-A",
+            "ua2",
+            "-u",
+            "u2:p2",
+            "-b",
+            "c=1",
+            "-e",
+            "https://r",
+            "-T",
+            "/tmp/body.bin",
+            "-C",
+            "-",
+            "-Z", // unknown
+            "-",
+            "https://example.com/file",
+        ]);
+        assert_eq!(req.method, "PUT");
+        assert_eq!(req.options.response_save_file.as_deref(), Some("res.bin"));
+        assert_eq!(req.options.response_save_resume, Some(true));
+        assert!(req.options.chunked);
+        assert_eq!(
+            req.config_overrides.proxy.as_deref(),
+            Some("http://proxy:8080")
+        );
+        assert_eq!(req.body_file.as_deref(), Some("/tmp/body.bin"));
+        assert_eq!(
+            req.headers.get("User-Agent"),
+            Some(&Value::String("ua2".to_string()))
+        );
+        assert_eq!(
+            req.headers.get("Cookie"),
+            Some(&Value::String("c=1".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_curl_remote_name_fallback_and_missing_values() {
+        let req = parse_cli(&["-O", "https://example.com"]);
+        assert_eq!(req.options.response_save_file.as_deref(), Some("output"));
+
+        let req = parse_cli(&["https://example.com", "--request"]);
+        assert_eq!(req.method, "GET");
+        assert_eq!(req.url, "https://example.com");
+
+        let req = parse_cli(&["--request", "--header", "X-A: 1", "https://example.com"]);
+        assert_eq!(req.method, "GET");
+        assert_eq!(req.url, "https://example.com");
+        assert_eq!(
+            req.headers.get("X-A"),
+            Some(&Value::String("1".to_string()))
+        );
     }
 }

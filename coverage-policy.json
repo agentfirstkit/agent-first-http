@@ -1,0 +1,31 @@
+{
+  "global": {
+    "regions": 89.0,
+    "lines": 90.0
+  },
+  "core_files": {
+    "src/handler.rs": {
+      "regions": 89.0,
+      "lines": 89.0
+    },
+    "src/config.rs": {
+      "regions": 89.0,
+      "lines": 93.0
+    },
+    "src/mcp.rs": {
+      "regions": 95.0,
+      "lines": 97.0
+    }
+  },
+  "exempt_files": [
+    "src/main.rs",
+    "src/chunked.rs",
+    "src/websocket.rs"
+  ],
+  "targets": {
+    "global": {
+      "regions": 95.0,
+      "lines": 95.0
+    }
+  }
+}

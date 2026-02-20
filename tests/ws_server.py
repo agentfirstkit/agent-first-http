@@ -5,10 +5,11 @@ Requires: pip install websockets  (>=10)
 
 import asyncio
 import json
+import os
 import re
 import threading
 
-WS_PORT = 18081
+WS_PORT = int(os.environ.get("AFH_TEST_WS_PORT", "18081"))
 WS_BASE = f"ws://127.0.0.1:{WS_PORT}"
 
 

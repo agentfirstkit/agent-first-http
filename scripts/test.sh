@@ -1,34 +1,57 @@
 #!/bin/bash
-# Run tests for agent-first-http
+set -euo pipefail
 
-set -e
 ROOTPATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TIER="${1:-all}"
 
-echo "Testing agent-first-http..."
-echo ""
+run_static() {
+  echo "[static] fmt/build/clippy"
+  (cd "$ROOTPATH" && cargo fmt --all --check)
+  (cd "$ROOTPATH" && cargo build)
+  (cd "$ROOTPATH" && cargo clippy -- -D warnings)
+}
 
-echo "[1/6] Rust fmt"
-(cd "$ROOTPATH" && cargo fmt --all --check)
+run_unit_component() {
+  echo "[unit+component] Rust tests"
+  (cd "$ROOTPATH" && cargo test --bin afhttp)
+  (cd "$ROOTPATH" && ./scripts/check_regressions.sh)
+}
 
-echo ""
-echo "[2/6] Rust build"
-(cd "$ROOTPATH" && cargo build)
+run_e2e() {
+  echo "[e2e] stress suites"
+  (cd "$ROOTPATH" && python3 tests/stress.py)
+  (cd "$ROOTPATH" && python3 tests/cli_stress.py)
+  (cd "$ROOTPATH" && python3 tests/ws_stress.py)
+}
 
-echo ""
-echo "[3/6] Rust clippy"
-(cd "$ROOTPATH" && cargo clippy -- -D warnings)
+run_coverage_gate() {
+  echo "[coverage] gate"
+  (cd "$ROOTPATH" && python3 scripts/coverage_gate.py)
+}
 
-echo ""
-echo "[4/6] Pipe mode stress"
-(cd "$ROOTPATH" && python3 tests/stress.py)
+case "$TIER" in
+  static)
+    run_static
+    ;;
+  unit)
+    run_unit_component
+    ;;
+  e2e)
+    run_e2e
+    ;;
+  coverage)
+    run_coverage_gate
+    ;;
+  all)
+    run_static
+    run_unit_component
+    run_e2e
+    run_coverage_gate
+    ;;
+  *)
+    echo "Usage: $0 [static|unit|e2e|coverage|all]" >&2
+    exit 2
+    ;;
+esac
 
-echo ""
-echo "[5/6] CLI mode stress"
-(cd "$ROOTPATH" && python3 tests/cli_stress.py)
-
-echo ""
-echo "[6/6] WebSocket stress"
-(cd "$ROOTPATH" && python3 tests/ws_stress.py)
-
-echo ""
-echo "All tests passed!"
+echo "Tier '$TIER' passed."

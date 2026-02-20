@@ -15,8 +15,10 @@ import tempfile
 sys.path.insert(0, os.path.dirname(__file__))
 from server import start_server
 
-AFH = os.path.join(os.path.dirname(__file__), "..", "target", "debug", "afhttp")
-BASE = "http://127.0.0.1:18080"
+AFH = os.environ.get("AFH_BIN") or os.path.join(os.path.dirname(__file__), "..", "target", "debug", "afhttp")
+HTTP_PORT = int(os.environ.get("AFH_TEST_HTTP_PORT", "18080"))
+BASE = f"http://127.0.0.1:{HTTP_PORT}"
+_AFH_VERSION = os.environ.get("AFH_VERSION")
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -32,6 +34,8 @@ def run_cli(args: list[str], timeout_s=30, stdin_data=None) -> tuple[list[dict],
         text=True,
         timeout=timeout_s,
     )
+    if proc.stderr.strip():
+        raise RuntimeError(f"afhttp wrote to stderr: {proc.stderr[:800]}")
     lines = []
     for line in proc.stdout.strip().split("\n"):
         line = line.strip()
@@ -41,6 +45,20 @@ def run_cli(args: list[str], timeout_s=30, stdin_data=None) -> tuple[list[dict],
             except json.JSONDecodeError:
                 lines.append({"_raw": line})
     return lines, proc.returncode
+
+
+def afh_version() -> str:
+    global _AFH_VERSION
+    if _AFH_VERSION:
+        return _AFH_VERSION
+    proc = subprocess.run([AFH, "--version"], capture_output=True, text=True, timeout=5)
+    if proc.returncode != 0:
+        raise RuntimeError(f"afhttp --version failed: {proc.stderr.strip()}")
+    tokens = proc.stdout.strip().split()
+    if not tokens:
+        raise RuntimeError("afhttp --version returned empty output")
+    _AFH_VERSION = tokens[-1]
+    return _AFH_VERSION
 
 
 def find_by_code(outputs, code):
@@ -107,7 +125,7 @@ def test_log_startup():
     startups = find_log_events(out, "startup")
     assert startups, f"no startup log, got: {out}"
     s = startups[0]
-    assert s["version"] == "0.1.0"
+    assert s["version"] == afh_version()
     assert isinstance(s["argv"], list)
     assert "GET" in s["argv"]
     assert s["config"]["timeout_connect_s"] == 10
@@ -723,7 +741,7 @@ def test_help():
 def test_version():
     proc = subprocess.run([AFH, "--version"], capture_output=True, text=True, timeout=5)
     assert proc.returncode == 0
-    assert "0.1.0" in proc.stdout
+    assert afh_version() in proc.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -1006,7 +1024,7 @@ def test_log_request_no_implicit():
     # Explicit Accept-Encoding → no implicit AE. GET has no body → no implicit CT.
     out, _ = run_cli([
         "GET", f"{BASE}/fast", "--log", "request",
-        "-H", "Accept-Encoding: identity",
+        "--header", "Accept-Encoding: identity",
     ])
     logs = find_log_events(out, "request")
     assert len(logs) == 0, f"unexpected request log when headers are explicit: {logs}"
@@ -1019,8 +1037,8 @@ def test_log_request_no_implicit():
 def main():
     global passed, failed
 
-    print("Starting test server on :18080...")
-    server = start_server(18080)
+    print(f"Starting test server on :{HTTP_PORT}...")
+    server = start_server(HTTP_PORT)
     time.sleep(0.3)
 
     import urllib.request
