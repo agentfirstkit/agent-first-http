@@ -3,7 +3,7 @@ use std::io::Write;
 use tokio::sync::mpsc;
 
 /// Stdout writer task. Receives Output values from a channel,
-/// serializes to JSONL via AFD output_json (auto-redacts _secret fields),
+/// serializes to JSONL via Agent-First Data output_json (auto-redacts _secret fields),
 /// writes to stdout. Single task prevents interleaving.
 pub async fn writer_task(mut rx: mpsc::Receiver<Output>) {
     while let Some(output) = rx.recv().await {

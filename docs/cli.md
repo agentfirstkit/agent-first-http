@@ -289,7 +289,7 @@ afhttp --mode pipe --log startup
 ```
 
 ```json
-{"code":"log","event":"startup","version":"<version>","argv":["afhttp","--mode","pipe","--log","startup"],"config":{"response_save_dir":"<system-temp>/afh/a1b2c3d4","response_save_above_bytes":10485760,"request_concurrency_limit":0,"timeout_connect_s":10,"pool_idle_timeout_s":90,"retry_base_delay_ms":100,"tls":{"insecure":false},"log":["startup"],"defaults":{"headers":{"User-Agent":"afhttp/<version>"},"timeout_idle_s":30,"retry":0,"response_redirect":10,"response_parse_json":true,"response_decompress":true,"response_save_resume":false,"retry_on_status":[]}}}
+{"code":"log","event":"startup","version":"<version>","argv":["afhttp","--mode","pipe","--log","startup"],"config":{"response_save_dir":"<system-temp>/afhttp/a1b2c3d4","response_save_above_bytes":10485760,"request_concurrency_limit":0,"timeout_connect_s":10,"pool_idle_timeout_s":90,"retry_base_delay_ms":100,"tls":{"insecure":false},"log":["startup"],"defaults":{"headers_for_any_hosts":{"User-Agent":"afhttp/<version>"},"timeout_idle_s":30,"retry":0,"response_redirect":10,"response_parse_json":true,"response_decompress":true,"response_save_resume":false,"retry_on_status":[]}}}
 ```
 
 ### HTTP Requests
@@ -366,7 +366,7 @@ Configuration changes apply immediately to subsequent requests. The full config 
 #### Set default auth header for all requests
 
 ```json
-→ {"code":"config","defaults":{"headers":{"Authorization":"Bearer sk-xxx"}}}
+→ {"code":"config","defaults":{"headers_for_any_hosts":{"Authorization":"Bearer sk-xxx"}}}
 ← {"code":"config",...}
 ```
 
@@ -377,7 +377,7 @@ Apply headers only to requests matching a specific host. Merge order: global def
 ```json
 → {"code":"config","host_defaults":{
      "api.openai.com":{"headers":{"Authorization":"Bearer sk-openai"}},
-     "api.anthropic.com":{"headers":{"x-api-key":"sk-ant-xxx","anthropic-version":"2023-06-01"}}
+     "api.example.com":{"headers":{"x-api-key":"sk-ant-xxx","api-version":"2023-06-01"}}
    }}
 ```
 

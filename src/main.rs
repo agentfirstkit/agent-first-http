@@ -35,7 +35,7 @@ const OUTPUT_CHANNEL_CAPACITY: usize = 16_384;
 
 fn default_response_save_dir() -> String {
     let dir: PathBuf = std::env::temp_dir()
-        .join("afh")
+        .join("afhttp")
         .join(uuid::Uuid::new_v4().to_string());
     dir.to_string_lossy().into_owned()
 }
@@ -597,7 +597,7 @@ mod tests {
     #[test]
     fn default_response_save_dir_is_temp_afh_path() {
         let path = default_response_save_dir();
-        assert!(path.contains("/afh/"));
+        assert!(path.contains("/afhttp/"));
         assert!(path.starts_with(std::env::temp_dir().to_string_lossy().as_ref()));
     }
 

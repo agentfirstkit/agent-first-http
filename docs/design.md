@@ -35,7 +35,7 @@ Agent                       curl process              Server
 One bash tool call, one request, one JSON response, process exits:
 
 ```
-Agent ──→ afh GET https://api.example.com/users ──→ JSON stdout ──→ Agent
+Agent ──→ afhttp GET https://api.example.com/users ──→ JSON stdout ──→ Agent
 ```
 
 Default output: `response` or `error` — one JSON line, process exits. For streaming: `chunk_start` → `chunk_data...` → `chunk_end`. Use `--verbose` for diagnostic output (startup, request, progress, retry, redirect).
@@ -47,7 +47,7 @@ This is how most agent tool calls work — fire a request, read the result, move
 For workflows that benefit from connection reuse, concurrent requests, or WebSocket:
 
 ```
-Agent ──→ afh --mode pipe (stdin JSONL ←→ stdout JSONL) ──→ Agent
+Agent ──→ afhttp --mode pipe (stdin JSONL ←→ stdout JSONL) ──→ Agent
 ```
 
 A long-lived process. The agent sends request/config/send/cancel/close commands as JSONL to stdin, reads responses from stdout. Connections stay open between requests. Multiple requests in-flight simultaneously. `close` triggers shutdown by cancelling active work, waiting briefly for terminal events, then emitting a final `close` acknowledgement.
@@ -95,7 +95,7 @@ Each request is an independent tokio task. The stdin reader never blocks on HTTP
 
 ### Server errors are errors
 
-If the server violates HTTP protocol (e.g. sends non-ASCII bytes in a header), `afh` surfaces this as `code: "error"` with `error_code: "invalid_response"`. No silent patching, no lossy fallbacks. The agent receives accurate information and decides how to react.
+If the server violates HTTP protocol (e.g. sends non-ASCII bytes in a header), `afhttp` surfaces this as `code: "error"` with `error_code: "invalid_response"`. No silent patching, no lossy fallbacks. The agent receives accurate information and decides how to react.
 
 ### Errors are structured, not human text
 
@@ -107,7 +107,13 @@ All stdout lines go through `agent_first_data::output_json()` for consistent sin
 
 Server response data (response bodies, headers, WebSocket messages) is passed through unmodified. Redaction does not apply to server-originated content.
 
-### AFD naming conventions for fields
+### Header scope safety boundary
+
+`defaults.headers_for_any_hosts` is global and applies to every outbound host. It is restricted to non-sensitive public headers only (for example `User-Agent`, `Accept`).
+
+Any credential material (`Authorization`, API keys, cookies, bearer tokens) must be scoped with `host_defaults[host].headers` so secrets cannot be sent to unrelated domains.
+
+### Agent-First Data naming conventions for fields
 
 Field names carry meaning through suffixes:
 
@@ -153,7 +159,7 @@ CLI mode supports three output formats via `--output json|yaml|plain`:
 | `reqwest` | HTTP client with connection pooling and HTTP/2 |
 | `tokio-tungstenite` | WebSocket client (upgrade handshake, framed read/write) |
 | `clap` | CLI argument parsing (derive API) |
-| `agent-first-data` | AFD output serialization with automatic `_secret` redaction |
+| `agent-first-data` | Agent-First Data output serialization with automatic `_secret` redaction |
 | `serde_json` | JSON parsing and serialization |
 | `base64` | Body encoding/decoding |
 | `uuid` | Process-unique download directory |

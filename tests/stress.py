@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Comprehensive stress + correctness test for afh.
-Starts a local test server, pipes JSONL into afh, validates output.
+Comprehensive stress + correctness test for afhttp.
+Starts a local test server, pipes JSONL into afhttp, validates output.
 """
 
 import json
@@ -20,7 +20,7 @@ import tempfile
 sys.path.insert(0, os.path.dirname(__file__))
 from server import start_server
 
-AFH = os.environ.get("AFH_BIN") or os.path.join(os.path.dirname(__file__), "..", "target", "debug", "afhttp")
+AFHTTP = os.environ.get("AFHTTP_BIN") or os.path.join(os.path.dirname(__file__), "..", "target", "debug", "afhttp")
 HTTP_PORT = int(os.environ.get("AFH_TEST_HTTP_PORT", "18080"))
 HOST_PORT = f"127.0.0.1:{HTTP_PORT}"
 BASE = f"http://{HOST_PORT}"
@@ -59,9 +59,9 @@ def temp_path(prefix: str, suffix: str) -> str:
 
 
 def run_afh(inputs: list[str], timeout_s=30, extra_args: list[str] = None) -> list[dict]:
-    """Send JSONL lines to afh stdin, collect parsed output lines."""
+    """Send JSONL lines to afhttp stdin, collect parsed output lines."""
     payload = "\n".join(inputs) + "\n"
-    cmd = [AFH, "--mode", "pipe"] + (extra_args or [])
+    cmd = [AFHTTP, "--mode", "pipe"] + (extra_args or [])
     proc = subprocess.run(
         cmd,
         input=payload,
@@ -80,7 +80,7 @@ def run_afh_interactive(inputs_with_delays: list, timeout_s=60) -> list[dict]:
     inputs_with_delays: list of (delay_seconds, line_string) tuples.
     """
     proc = subprocess.Popen(
-        [AFH, "--mode", "pipe"],
+        [AFHTTP, "--mode", "pipe"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -117,7 +117,7 @@ def afh_version() -> str:
     if _AFH_VERSION:
         return _AFH_VERSION
     proc = subprocess.run(
-        [AFH, "--version"],
+        [AFHTTP, "--version"],
         capture_output=True,
         text=True,
         timeout=5,
@@ -137,7 +137,7 @@ def run_afh_until_terminal(request_lines: list[str], expected_terminal: int, tim
     This avoids coupling throughput tests to close() cancellation timing.
     """
     proc = subprocess.Popen(
-        [AFH, "--mode", "pipe"],
+        [AFHTTP, "--mode", "pipe"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -430,7 +430,7 @@ def test_header_merge():
 @test("config update merges defaults")
 def test_config_update():
     out = run_afh([
-        json.dumps({"code": "config", "defaults": {"headers": {"Authorization": "Bearer test"},
+        json.dumps({"code": "config", "defaults": {"headers_for_any_hosts": {"Authorization": "Bearer test"},
                                                      "timeout_idle_s": 60}}),
         json.dumps({"code": "request", "id": "1", "method": "GET", "url": f"{BASE}/headers"}),
         json.dumps({"code": "close"}),
@@ -438,8 +438,8 @@ def test_config_update():
     cfg = find_by_code(out, "config")
     assert cfg, "no config echo"
     assert cfg[0]["defaults"]["timeout_idle_s"] == 60
-    assert cfg[0]["defaults"]["headers"]["Authorization"] == "Bearer test"
-    assert cfg[0]["defaults"]["headers"]["User-Agent"] == f"afhttp/{afh_version()}"  # preserved
+    assert cfg[0]["defaults"]["headers_for_any_hosts"]["Authorization"] == "Bearer test"
+    assert cfg[0]["defaults"]["headers_for_any_hosts"]["User-Agent"] == f"afhttp/{afh_version()}"  # preserved
     r = find_by_id(out, "response", "1")
     assert r, "no response"
     auth = get_header_ci(r["body"], "Authorization")
@@ -875,7 +875,7 @@ def test_large_auto_download():
 
 @test("save_to option saves to specified path")
 def test_save_to():
-    save_path = temp_path("afh-test", ".bin")
+    save_path = temp_path("afhttp-test", ".bin")
     try:
         out = run_afh([
             json.dumps({"code": "request", "id": "1", "method": "GET",
@@ -895,7 +895,7 @@ def test_save_to():
 
 @test("download with progress reporting")
 def test_download_progress():
-    save_path = temp_path("afh-test-progress", ".bin")
+    save_path = temp_path("afhttp-test-progress", ".bin")
     try:
         out = run_afh_interactive([
             (0, json.dumps({"code": "config", "log": ["progress"]})),
@@ -1091,9 +1091,9 @@ def test_ping_flood():
 @test("multiple config updates accumulate correctly")
 def test_config_accumulate():
     out = run_afh([
-        json.dumps({"code": "config", "defaults": {"headers": {"X-A": "1"}}}),
-        json.dumps({"code": "config", "defaults": {"headers": {"X-B": "2"}}}),
-        json.dumps({"code": "config", "defaults": {"headers": {"X-A": None}}}),
+        json.dumps({"code": "config", "defaults": {"headers_for_any_hosts": {"X-A": "1"}}}),
+        json.dumps({"code": "config", "defaults": {"headers_for_any_hosts": {"X-B": "2"}}}),
+        json.dumps({"code": "config", "defaults": {"headers_for_any_hosts": {"X-A": None}}}),
         json.dumps({"code": "request", "id": "1", "method": "GET",
                      "url": f"{BASE}/headers"}),
         json.dumps({"code": "close"}),
@@ -1102,9 +1102,9 @@ def test_config_accumulate():
     assert len(configs) == 3
     # After 3 updates: X-A removed, X-B present, User-Agent preserved
     last_config = configs[-1]
-    assert "X-A" not in last_config["defaults"]["headers"]
-    assert last_config["defaults"]["headers"]["X-B"] == "2"
-    assert "User-Agent" in last_config["defaults"]["headers"]
+    assert "X-A" not in last_config["defaults"]["headers_for_any_hosts"]
+    assert last_config["defaults"]["headers_for_any_hosts"]["X-B"] == "2"
+    assert "User-Agent" in last_config["defaults"]["headers_for_any_hosts"]
     r = find_by_id(out, "response", "1")
     assert r, "no response"
     assert get_header_ci(r["body"], "X-A") is None, "X-A should be removed"
@@ -1217,7 +1217,7 @@ def test_multipart():
 
 @test("multipart with file upload")
 def test_multipart_file():
-    tmp_path = temp_path("afh-test-upload", ".txt")
+    tmp_path = temp_path("afhttp-test-upload", ".txt")
     try:
         with open(tmp_path, "w") as f:
             f.write("file content here")
@@ -1333,7 +1333,7 @@ def test_body_urlencoded_mutual_exclusion():
 
 @test("body_file sends file contents as request body")
 def test_body_file():
-    tmp_path = temp_path("afh-test-body", ".json")
+    tmp_path = temp_path("afhttp-test-body", ".json")
     try:
         payload = json.dumps({"from_file": True})
         with open(tmp_path, "w") as f:
@@ -1521,7 +1521,7 @@ def test_100_errors():
 
 @test("concurrent downloads to different files")
 def test_concurrent_downloads():
-    paths = [temp_path(f"afh-dl-{i}", ".bin") for i in range(5)]
+    paths = [temp_path(f"afhttp-dl-{i}", ".bin") for i in range(5)]
     try:
         inputs = []
         for i, p in enumerate(paths):
@@ -1605,7 +1605,7 @@ def test_many_request_headers():
         assert v == f"v{i}", f"header X-H-{i}: expected v{i}, got {v}"
 
 
-@test("error has structured AFD format")
+@test("error has structured Agent-First Data format")
 def test_error_structured():
     out = run_afh([
         json.dumps({"code": "request", "id": "1", "method": "GET",
@@ -1615,7 +1615,7 @@ def test_error_structured():
     ])
     e = find_by_id(out, "error", "1")
     assert e, "no error"
-    # Verify all AFD error fields exist
+    # Verify all Agent-First Data error fields exist
     assert "error_code" in e, f"missing error_code: {e.keys()}"
     assert "error" in e, f"missing error: {e.keys()}"
     assert "retryable" in e, f"missing retryable: {e.keys()}"
@@ -1796,7 +1796,7 @@ def test_content_length_bytes():
 
 @test("content_length_bytes in download chunk_start")
 def test_content_length_bytes_download():
-    save_path = temp_path("afh-test-cl", ".bin")
+    save_path = temp_path("afhttp-test-cl", ".bin")
     try:
         out = run_afh([
             json.dumps({"code": "request", "id": "1", "method": "GET",
@@ -2010,9 +2010,9 @@ def main():
         sys.exit(1)
     print("Test server ready.\n")
 
-    # Verify afh binary exists
-    if not os.path.exists(AFH):
-        print(f"FATAL: afh binary not found at {AFH}")
+    # Verify afhttp binary exists
+    if not os.path.exists(AFHTTP):
+        print(f"FATAL: afhttp binary not found at {AFHTTP}")
         print("Run: cargo build")
         sys.exit(1)
 
@@ -2098,7 +2098,7 @@ def main():
         test_missing_fields,
         test_empty_post,
         test_many_request_headers,
-        # New: AFD error format + features
+        # New: Agent-First Data error format + features
         test_error_structured,
         test_tag_response,
         test_tag_error,

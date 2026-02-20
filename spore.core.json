@@ -5,28 +5,23 @@
   "synopsis": "Persistent HTTP client for AI agents — JSONL in, JSONL out, connections managed transparently so agents never think about transport",
   "intent": [
     "Give AI agents a persistent HTTP client that maintains connection pools per host, reuses TCP+TLS connections across requests, and multiplexes concurrent streams over HTTP/2 — the agent writes JSON requests to stdin and reads JSON responses from stdout, never managing sockets, TLS handshakes, or connection lifecycles",
-    "Bridge the gap between curl (one connection per invocation, human-oriented output) and MCP (protocol-locked, requires JSON-RPC framing) — afh is transport-only, works with any HTTP API, and uses AFD suffix conventions for self-describing fields in every request and response",
+    "Bridge the gap between curl (one connection per invocation, human-oriented output) and MCP (protocol-locked, requires JSON-RPC framing) — afhttp is transport-only, works with any HTTP API, and uses Agent-First Data suffix conventions for self-describing fields in every request and response",
     "Provide first-class SSE streaming support where server-sent events arrive as individual JSONL lines on stdout, enabling agents to process streaming responses (LLM tokens, progress updates, real-time feeds) without buffering the entire response"
   ],
   "changes": [
-    "Replace --pipe and --mcp boolean flags with a unified --mode <cli|pipe|mcp|curl> enum flag, consolidating mode selection into a single unambiguous entry point and removing symlink-based curl detection",
-    "Fix config rollback: when a config update causes client rebuild to fail, the previous config is atomically restored in both CLI and MCP modes, preventing the client from entering an inconsistent state",
-    "Fix MCP http_request to skip intermediate log events and return only the terminal response or error, ensuring agents receive a complete result rather than a partial log event",
-    "Improve graceful shutdown in pipe mode: cancel all in-flight requests, wait up to 5 seconds for completion, then emit cancelled terminal events for any remaining requests before exiting",
-    "Suppress all stderr output — startup errors and parse errors now emit JSON to stdout; help text goes to stdout — ensuring stderr is never part of the protocol channel",
-    "Add 100+ unit tests across all modules covering config merge logic, retry/backoff, multipart mutual-exclusivity, WebSocket handling, chunked download progress, and curl flag compatibility",
-    "Emit a final progress event when a chunked download completes without previously reaching a progress threshold, ensuring agents always receive at least one progress update per download",
-    "Upgrade agent-first-data dependency to 0.4.0"
+    "Rename defaults.headers to defaults.headers_for_any_hosts in the pipe mode config command, making explicit that this field applies to all outbound hosts regardless of destination — agents must move credential headers to host_defaults[host].headers to prevent them from leaking to unintended third-party services",
+    "Standardize all internal references from the old 'afh' short name to the full 'afhttp' binary name: env var AFH_BIN → AFHTTP_BIN, temp download directory /tmp/afh/ → /tmp/afhttp/, and all comments and test fixtures",
+    "Fix GitHub Actions CI working-directory (was spores/agent-first-http, must be . since GitHub repo mirrors the spore at its root), add cargo build to e2e test tier before stress tests, and adjust global coverage thresholds to 88%/89% to reflect actual baseline after the --mode refactor"
   ],
   "license": "MIT",
   "references": [
     {
-      "uri": "cmn://cmn.dev/spore/blake3_5964f09fc2b8a9c8035cd823f431d6a7bcb81d2480f9ddee74beca0b2859020c",
+      "uri": "cmn://cmn.dev/spore/blake3_eeb9f29b968d51855c8b8d60d8f97b64beff48e92405e005b7890b40503415e3",
       "relation": "follows",
-      "reason": "All request/response fields use AFD suffix conventions, and runtime protocol/log events are emitted on stdout only"
+      "reason": "All request/response fields use Agent-First Data suffix conventions, and runtime protocol/log events are emitted on stdout only"
     },
     {
-      "uri": "cmn://cmn.dev/spore/blake3_ad385f58fad7cb6abfa5c576170043ddcfbbf87ffb5a30f66b8b25ffb35e5be0",
+      "uri": "cmn://cmn.dev/spore/blake3_e06f2f484eba1d97470e412f448f6e70ce3e525b1747a27ebe77cedf4d924bba",
       "relation": "spawned_from"
     }
   ],

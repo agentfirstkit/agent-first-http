@@ -76,8 +76,8 @@ struct HttpConfigParams {
     tls_insecure: Option<bool>,
     /// Max concurrent in-flight requests (0 = unlimited)
     request_concurrency_limit: Option<u64>,
-    /// Default request headers as name/value pairs (null value removes a header)
-    headers: Option<Vec<NameValue>>,
+    /// Global default headers for any host as name/value pairs (null removes a header)
+    headers_for_any_hosts: Option<Vec<NameValue>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -99,7 +99,7 @@ impl AfhMcp {
         }
     }
 
-    /// Make an HTTP request and return the structured afh response as JSON.
+    /// Make an HTTP request and return the structured afhttp response as JSON.
     #[tool(
         description = "Make an HTTP request and return the structured response as a JSON object"
     )]
@@ -185,8 +185,8 @@ impl AfhMcp {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    /// Get or update afh configuration defaults. Call with no arguments to view current config.
-    #[tool(description = "Get or update afh HTTP client configuration defaults")]
+    /// Get or update afhttp configuration defaults. Call with no arguments to view current config.
+    #[tool(description = "Get or update afhttp HTTP client configuration defaults")]
     async fn http_config(
         &self,
         params: Parameters<HttpConfigParams>,
@@ -197,7 +197,7 @@ impl AfhMcp {
             || p.timeout_connect_s.is_some()
             || p.tls_insecure.is_some()
             || p.request_concurrency_limit.is_some()
-            || p.headers.is_some()
+            || p.headers_for_any_hosts.is_some()
             || p.timeout_idle_s.is_some()
             || p.retry.is_some()
             || p.response_redirect.is_some()
@@ -212,11 +212,11 @@ impl AfhMcp {
                     || p.response_redirect.is_some()
                     || p.response_parse_json.is_some()
                     || p.response_decompress.is_some()
-                    || p.headers.is_some();
+                    || p.headers_for_any_hosts.is_some();
                 if has_defaults {
-                    let headers = Some(to_header_map(p.headers));
+                    let headers_for_any_hosts = Some(to_header_map(p.headers_for_any_hosts));
                     Some(RequestDefaultsPartial {
-                        headers,
+                        headers_for_any_hosts,
                         timeout_idle_s: p.timeout_idle_s,
                         retry: p.retry,
                         response_redirect: p.response_redirect,
@@ -283,7 +283,7 @@ impl ServerHandler for AfhMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "afh HTTP client — make HTTP requests and configure defaults. \
+                "afhttp HTTP client — make HTTP requests and configure defaults. \
                 Use http_request to make HTTP calls with structured JSON responses. \
                 Use http_config to view or update connection settings."
                     .into(),
@@ -376,7 +376,7 @@ mod tests {
                 response_decompress: None,
                 tls_insecure: None,
                 request_concurrency_limit: None,
-                headers: None,
+                headers_for_any_hosts: None,
             }))
             .await;
         assert!(res.is_ok());
@@ -392,7 +392,7 @@ mod tests {
                 response_decompress: Some(false),
                 tls_insecure: Some(true),
                 request_concurrency_limit: Some(5),
-                headers: Some(vec![NameValue {
+                headers_for_any_hosts: Some(vec![NameValue {
                     name: "X-Test".to_string(),
                     value: Some("yes".to_string()),
                 }]),
@@ -405,7 +405,7 @@ mod tests {
         assert_eq!(cfg.timeout_connect_s, 12);
         assert_eq!(cfg.request_concurrency_limit, 5);
         assert_eq!(
-            cfg.defaults.headers.get("X-Test"),
+            cfg.defaults.headers_for_any_hosts.get("X-Test"),
             Some(&Value::String("yes".to_string()))
         );
     }
@@ -448,7 +448,7 @@ mod tests {
                 response_decompress: None,
                 tls_insecure: None,
                 request_concurrency_limit: None,
-                headers: None,
+                headers_for_any_hosts: None,
             }))
             .await;
 

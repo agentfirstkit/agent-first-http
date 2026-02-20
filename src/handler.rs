@@ -371,7 +371,7 @@ fn build_body(
                 // String body: no default Content-Type — caller must specify
                 Ok((Some(s.as_bytes().to_vec()), None))
             } else {
-                // number, bool — afh serializes as JSON, so Content-Type is unambiguous
+                // number, bool — afhttp serializes as JSON, so Content-Type is unambiguous
                 let json = serde_json::to_vec(&b).map_err(|e| format!("serialize body: {e}"))?;
                 Ok((Some(json), Some("application/json")))
             }
@@ -1418,8 +1418,8 @@ mod tests {
         assert_eq!(sanitize_file_name("a/b:c?d"), "a_b_c_d");
         assert_eq!(sanitize_file_name(""), "request");
 
-        let auto = auto_download_path("/tmp/afh", "a/b");
-        assert!(auto.ends_with("/tmp/afh/a_b"));
+        let auto = auto_download_path("/tmp/afhttpttp", "a/b");
+        assert!(auto.ends_with("/tmp/afhttpttp/a_b"));
 
         let side = sidecar_path_for("/tmp/x.bin");
         assert_eq!(side, "/tmp/x.bin.json");

@@ -471,7 +471,7 @@ pub fn write_cli_output(output: &Output, format: OutputFormat) {
     }
 
     if !matches!(format, OutputFormat::Json) {
-        // Protect server body fields from AFD suffix processing.
+        // Protect server body fields from Agent-First Data suffix processing.
         // Non-string body (parsed JSON objects) is converted to a JSON string
         // so formatters treat them as opaque data.
         protect_server_body(&mut value);
@@ -487,7 +487,7 @@ pub fn write_cli_output(output: &Output, format: OutputFormat) {
     let _ = out.flush();
 }
 
-/// Protect server-originated body fields from AFD suffix processing.
+/// Protect server-originated body fields from Agent-First Data suffix processing.
 /// Converts non-string body/data values to JSON string representation
 /// so yaml/plain formatters treat them as opaque strings.
 fn protect_server_body(value: &mut Value) {
