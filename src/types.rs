@@ -522,3 +522,105 @@ pub fn make_log(event: &str, fields: Vec<(&str, Value)>) -> Output {
             .collect(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_options_default_delimiter_is_newline() {
+        let opts: RequestOptions = serde_json::from_value(serde_json::json!({})).expect("opts");
+        assert_eq!(opts.chunked_delimiter, Value::String("\n".to_string()));
+        assert!(!opts.chunked);
+    }
+
+    #[test]
+    fn trace_error_only_sets_optional_fields_none() {
+        let t = Trace::error_only(12);
+        assert_eq!(t.duration_ms, 12);
+        assert!(t.http_version.is_none());
+        assert!(t.remote_addr.is_none());
+        assert!(t.sent_bytes.is_none());
+        assert!(t.received_bytes.is_none());
+        assert!(t.redirects.is_none());
+        assert!(t.chunks.is_none());
+    }
+
+    #[test]
+    fn error_info_builders_and_output_helpers() {
+        let version = env!("CARGO_PKG_VERSION");
+        let e = ErrorInfo::invalid_request("bad");
+        assert_eq!(e.error_code, "invalid_request");
+        assert!(!e.retryable);
+        let e = ErrorInfo::cancelled();
+        assert_eq!(e.error_code, "cancelled");
+        let e = ErrorInfo::too_many_redirects(5);
+        assert_eq!(e.error, "exceeded 5");
+        let e = ErrorInfo::request_timeout("timeout");
+        assert_eq!(e.error_code, "request_timeout");
+        let e = ErrorInfo::invalid_response("x");
+        assert_eq!(e.error_code, "invalid_response");
+        let e = ErrorInfo::chunk_disconnected("x");
+        assert_eq!(e.error_code, "chunk_disconnected");
+        let e = ErrorInfo::response_too_large(100);
+        assert_eq!(e.error, "exceeded 100 bytes");
+        let e = ErrorInfo::overloaded("busy");
+        assert_eq!(e.error_code, "overloaded");
+        assert!(e.retryable);
+
+        let out = make_error(
+            Some("id1".to_string()),
+            Some("tag1".to_string()),
+            ErrorInfo::invalid_request("bad"),
+            Trace::error_only(1),
+        );
+        match out {
+            Output::Error {
+                id,
+                tag,
+                error_code,
+                ..
+            } => {
+                assert_eq!(id.as_deref(), Some("id1"));
+                assert_eq!(tag.as_deref(), Some("tag1"));
+                assert_eq!(error_code, "invalid_request");
+            }
+            _ => panic!("expected Output::Error"),
+        }
+
+        let log = make_log(
+            "startup",
+            vec![("version", Value::String(version.to_string()))],
+        );
+        match log {
+            Output::Log { event, fields } => {
+                assert_eq!(event, "startup");
+                assert_eq!(fields.get("version"), Some(&Value::String(version.into())));
+            }
+            _ => panic!("expected Output::Log"),
+        }
+    }
+
+    #[tokio::test]
+    async fn from_reqwest_classifies_connect_and_dns_errors() {
+        let client = reqwest::Client::new();
+
+        let connect_err = client
+            .get("http://127.0.0.1:1")
+            .send()
+            .await
+            .expect_err("connect should fail");
+        let info = ErrorInfo::from_reqwest(&connect_err);
+        assert_eq!(info.error_code, "connect_refused");
+        assert!(info.retryable);
+
+        let dns_err = client
+            .get("http://definitely-not-a-real-host.invalid")
+            .send()
+            .await
+            .expect_err("dns should fail");
+        let info = ErrorInfo::from_reqwest(&dns_err);
+        assert!(matches!(info.error_code, "dns_failed" | "connect_refused"));
+        assert!(info.retryable);
+    }
+}

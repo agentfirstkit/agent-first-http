@@ -4,6 +4,12 @@ Persistent HTTP client for AI agents — one request, one JSON line.
 
 Supported platforms: macOS, Linux, Windows.
 
+Modes (single entrypoint):
+- `--mode cli` (default)
+- `--mode pipe`
+- `--mode mcp`
+- `--mode curl`
+
 `curl` opens a new TCP+TLS connection for every request. An agent making 20 calls to the same API pays 20 handshakes — on a 200ms RTT link, that's over 4 seconds of pure overhead before a single byte of useful work. `afhttp` is a long-lived process: connections stay open, concurrent requests share them, and the agent never thinks about transport.
 
 ## CLI Mode
@@ -25,10 +31,10 @@ Exit codes: `0` = got HTTP response (any status), `1` = transport error, `2` = i
 
 ## Pipe Mode
 
-For long-lived sessions with connection reuse, concurrent requests, and WebSocket — use `afhttp --pipe`:
+For long-lived sessions with connection reuse, concurrent requests, and WebSocket — use `afhttp --mode pipe`:
 
 ```bash
-afhttp --pipe <<'EOF'
+afhttp --mode pipe <<'EOF'
 {"code":"config","defaults":{"headers":{"x-api-key":"sk-ant-xxx","anthropic-version":"2023-06-01"}}}
 {"code":"request","id":"models","method":"GET","url":"https://api.anthropic.com/v1/models"}
 {"code":"request","id":"usage","method":"GET","url":"https://api.anthropic.com/v1/usage"}
@@ -60,12 +66,12 @@ What just happened:
 
 ## MCP Mode
 
-`afhttp --mcp` runs as a [Model Context Protocol](https://modelcontextprotocol.io) server, letting AI tools like Claude Desktop make HTTP requests directly:
+`afhttp --mode mcp` runs as a [Model Context Protocol](https://modelcontextprotocol.io) server, letting AI tools like Claude Desktop make HTTP requests directly:
 
 ```json
 {
   "mcpServers": {
-    "afhttp": { "command": "afhttp", "args": ["--mcp"] }
+    "afhttp": { "command": "afhttp", "args": ["--mode", "mcp"] }
   }
 }
 ```
@@ -74,20 +80,13 @@ Claude can then call `http_request` and `http_config` tools. See [docs/mcp.md](d
 
 ## curl Compatibility
 
-Drop-in replacement for curl scripts — afhttp understands curl flags and returns structured JSON instead of raw bytes:
+Use explicit curl mode. afhttp understands a subset of curl flags and returns structured JSON:
 
 ```bash
-afhttp curl -X POST https://api.example.com/users \
+afhttp --mode curl -X POST https://api.example.com/users \
   -H "Authorization: Bearer sk-xxx" \
   -d '{"name":"Alice"}'
 # {"code":"response","status":201,"body":{"id":42},...}
-
-# or via symlink
-# macOS/Linux
-ln -s "$(command -v afhttp)" ~/bin/curl
-# Windows PowerShell
-New-Item -ItemType SymbolicLink -Path "$HOME\\bin\\curl.exe" -Target (Get-Command afhttp).Source
-curl https://api.example.com/users   # → JSON output
 ```
 
 ## Install
@@ -116,6 +115,7 @@ cargo install agent-first-http
 - [CLI Manual](docs/cli.md) — CLI, MCP, and curl compat modes
 - [MCP Reference](docs/mcp.md) — MCP tool reference and Claude Desktop setup
 - [Protocol Reference](docs/reference.md) — full field specification
+- [Testing Strategy](docs/testing.md) — layered tests, coverage gate, regression policy
 - [Design](docs/design.md) — architecture and principles
 
 ## License

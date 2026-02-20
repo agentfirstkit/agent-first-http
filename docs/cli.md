@@ -2,6 +2,13 @@
 
 Practical patterns for using `afhttp`. For the full field reference see [reference.md](reference.md).
 
+## Modes
+
+- `--mode cli` (default)
+- `--mode pipe`
+- `--mode mcp`
+- `--mode curl`
+
 ## CLI Mode (default)
 
 One request, one JSON response, exit:
@@ -237,7 +244,7 @@ afhttp GET https://mtls.example.com/api \
 afhttp GET wss://stream.example.com/ws --upgrade websocket
 ```
 
-Streams `chunk_data` until server closes or SIGINT. For bidirectional WebSocket, use `--pipe` mode.
+Streams `chunk_data` until server closes or SIGINT. For bidirectional WebSocket, use `--mode pipe` mode.
 
 When non-default TLS config is active (`tls.insecure`, custom CA, or client cert/key), WebSocket connections still use system roots only. In pipe mode, afhttp emits `{"code":"log","event":"websocket_tls_config_ignored",...}` under the `request` log category.
 
@@ -264,7 +271,7 @@ afhttp GET https://api.example.com/data --proxy http://proxy.corp:8080
 Limit concurrent in-flight requests in pipe mode (0 = unlimited):
 
 ```bash
-afhttp --pipe --request-concurrency-limit 200
+afhttp --mode pipe --request-concurrency-limit 200
 ```
 
 ## Pipe Mode
@@ -272,17 +279,17 @@ afhttp --pipe --request-concurrency-limit 200
 For long-lived sessions with connection reuse, concurrent requests, WebSocket send/receive, and runtime config changes:
 
 ```bash
-afhttp --pipe
+afhttp --mode pipe
 ```
 
-Reads JSONL from stdin, writes JSONL to stdout. CLI flags that set config (`--log`, `--proxy`, `--tls-*`, etc.) are applied at startup. No startup event is emitted by default — enable with `--log startup`:
+Reads JSONL from stdin, writes JSONL to stdout. Runtime protocol/log events are emitted on stdout only; stderr is not a protocol channel. CLI flags that set config (`--log`, `--proxy`, `--tls-*`, etc.) are applied at startup. No startup event is emitted by default — enable with `--log startup`:
 
 ```bash
-afhttp --pipe --log startup
+afhttp --mode pipe --log startup
 ```
 
 ```json
-{"code":"log","event":"startup","version":"0.1.0","argv":["afhttp","--pipe","--log","startup"],"config":{"response_save_dir":"<system-temp>/afh/a1b2c3d4","response_save_above_bytes":10485760,"request_concurrency_limit":0,"timeout_connect_s":10,"pool_idle_timeout_s":90,"retry_base_delay_ms":100,"tls":{"insecure":false},"log":["startup"],"defaults":{"headers":{"User-Agent":"afhttp/0.1.0"},"timeout_idle_s":30,"retry":0,"response_redirect":10,"response_parse_json":true,"response_decompress":true,"response_save_resume":false,"retry_on_status":[]}}}
+{"code":"log","event":"startup","version":"<version>","argv":["afhttp","--mode","pipe","--log","startup"],"config":{"response_save_dir":"<system-temp>/afh/a1b2c3d4","response_save_above_bytes":10485760,"request_concurrency_limit":0,"timeout_connect_s":10,"pool_idle_timeout_s":90,"retry_base_delay_ms":100,"tls":{"insecure":false},"log":["startup"],"defaults":{"headers":{"User-Agent":"afhttp/<version>"},"timeout_idle_s":30,"retry":0,"response_redirect":10,"response_parse_json":true,"response_decompress":true,"response_save_resume":false,"retry_on_status":[]}}}
 ```
 
 ### HTTP Requests
@@ -512,6 +519,7 @@ Match on `error_code`, not `error` text. `retryable` indicates whether afhttp's 
 | `cancelled` | false | Request was cancelled by the agent. |
 | `invalid_request` | false | Fix the request before retrying. |
 | `invalid_response` | false | Server protocol violation. Report to server owner. |
+| `internal_error` | false | Internal serialization/output failure (rare). Retry may succeed, but capture logs. |
 
 ### Concurrent Requests (pipe mode)
 
@@ -582,7 +590,7 @@ Inline (private key is auto-redacted in config echo):
 
 ### Shutdown (pipe mode)
 
-Graceful — waits up to 5 seconds for in-flight requests to complete, then closes all connections:
+Graceful — cancels active work, waits up to 5 seconds for terminal events, then emits process close:
 
 ```json
 → {"code":"close"}
@@ -595,13 +603,13 @@ On stdin EOF, `afhttp` also shuts down gracefully.
 
 ## MCP Mode
 
-`afhttp --mcp` runs as a [Model Context Protocol](https://modelcontextprotocol.io) server over stdio, exposing two tools:
+`afhttp --mode mcp` runs as a [Model Context Protocol](https://modelcontextprotocol.io) server over stdio, exposing two tools:
 
 - **`http_request`** — make an HTTP request, get a structured JSON response
 - **`http_config`** — view or update connection defaults
 
 ```bash
-afhttp --mcp
+afhttp --mode mcp
 ```
 
 See [docs/mcp.md](mcp.md) for the full tool reference and Claude Desktop setup.
@@ -612,26 +620,13 @@ See [docs/mcp.md](mcp.md) for the full tool reference and Claude Desktop setup.
 
 ## curl Compatibility
 
-afhttp understands a subset of curl flags so existing scripts and muscle memory work unchanged.
+afhttp understands a subset of curl flags in explicit curl mode.
 
-### Subcommand form
-
-```bash
-afhttp curl [flags] URL
-```
-
-### argv[0] form
-
-Create a symlink named `curl` pointing to `afhttp`:
+### Mode form
 
 ```bash
-# macOS/Linux
-ln -s "$(command -v afhttp)" ~/bin/curl
-# Windows PowerShell
-New-Item -ItemType SymbolicLink -Path "$HOME\\bin\\curl.exe" -Target (Get-Command afhttp).Source
+afhttp --mode curl [flags] URL
 ```
-
-Any invocation where `argv[0]` ends with `curl` (and not `afhttp`) is treated as curl compat mode.
 
 ### Supported flags
 

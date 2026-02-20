@@ -1,6 +1,9 @@
 use crate::config::VERSION;
 use crate::types::*;
-use clap::Parser;
+use agent_first_data::{
+    build_cli_error, cli_output, cli_parse_log_filters, cli_parse_output, OutputFormat,
+};
+use clap::{error::ErrorKind, Parser, ValueEnum};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::Write;
@@ -14,7 +17,7 @@ use std::io::Write;
     name = "afhttp",
     version = VERSION,
     about = "Agent-First HTTP — persistent HTTP client for AI agents",
-    after_help = "EXAMPLES:\n  afhttp GET https://api.example.com/users\n  afhttp POST https://api.example.com/users --body '{\"name\":\"Alice\"}'\n  afhttp GET https://api.example.com/stream --chunked\n  afhttp GET https://api.example.com/users --output yaml\n  afhttp --pipe    # JSONL stdin/stdout mode"
+    after_help = "EXAMPLES:\n  afhttp GET https://api.example.com/users\n  afhttp POST https://api.example.com/users --body '{\"name\":\"Alice\"}'\n  afhttp GET https://api.example.com/stream --chunked\n  afhttp GET https://api.example.com/users --output yaml\n  afhttp --mode pipe    # JSONL stdin/stdout mode"
 )]
 pub struct Cli {
     /// HTTP method (GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS)
@@ -164,14 +167,19 @@ pub struct Cli {
     #[arg(long)]
     pub verbose: bool,
 
-    // -- Mode flags --
-    /// JSONL stdin/stdout pipe mode
-    #[arg(long)]
-    pub pipe: bool,
+    // -- Mode --
+    /// Runtime mode: cli (default), pipe, curl, or mcp
+    #[arg(long, value_enum, default_value = "cli")]
+    pub mode: CliMode,
+}
 
-    /// MCP server mode (Model Context Protocol, stdio transport)
-    #[arg(long)]
-    pub mcp: bool,
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum CliMode {
+    Cli,
+    Pipe,
+    Curl,
+    #[cfg(feature = "mcp")]
+    Mcp,
 }
 
 // ---------------------------------------------------------------------------
@@ -202,14 +210,49 @@ pub struct CliRequest {
 pub enum Mode {
     Cli(Box<CliRequest>),
     Pipe(Box<ConfigPatch>),
+    #[cfg(feature = "mcp")]
     Mcp,
 }
 
-#[derive(Clone, Copy)]
-pub enum OutputFormat {
-    Json,
-    Yaml,
-    Plain,
+fn emit_cli_usage_error_and_exit(message: impl AsRef<str>) -> ! {
+    let json = agent_first_data::output_json(&build_cli_error(message.as_ref()));
+    println!("{json}");
+    std::process::exit(2);
+}
+
+fn raw_mode_is_curl(raw: &[String]) -> bool {
+    let mut i = 1;
+    while i < raw.len() {
+        if raw[i] == "--mode" {
+            return raw.get(i + 1).map(String::as_str) == Some("curl");
+        }
+        if let Some(v) = raw[i].strip_prefix("--mode=") {
+            return v == "curl";
+        }
+        i += 1;
+    }
+    false
+}
+
+fn strip_mode_flag(args: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--mode" {
+            i += 1;
+            if i < args.len() {
+                i += 1;
+            }
+            continue;
+        }
+        if args[i].starts_with("--mode=") {
+            i += 1;
+            continue;
+        }
+        out.push(args[i].clone());
+        i += 1;
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -217,73 +260,70 @@ pub enum OutputFormat {
 // ---------------------------------------------------------------------------
 
 pub fn parse_args() -> Mode {
-    // curl compatibility detection: must happen before Cli::parse() so clap
-    // doesn't choke on curl-style flags (e.g. -k, -I, --insecure).
+    // Curl mode must be handled before Clap parsing so curl-style flags
+    // (e.g. -k, -I, --insecure) do not fail clap validation.
     let raw: Vec<String> = std::env::args().collect();
-    let prog = raw.first().map(String::as_str).unwrap_or("");
-    let is_curl_argv0 = std::path::Path::new(prog)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .map(|s| s.contains("curl"))
-        .unwrap_or(false);
-    let is_curl_subcmd = raw.get(1).map(String::as_str) == Some("curl");
-
-    if is_curl_argv0 {
-        return crate::curl_compat::parse_curl_args(&raw[1..]);
-    }
-    if is_curl_subcmd {
-        return crate::curl_compat::parse_curl_args(&raw[2..]);
+    if raw_mode_is_curl(&raw) {
+        let curl_args = strip_mode_flag(&raw[1..]);
+        return crate::curl_compat::parse_curl_args(&curl_args);
     }
 
-    let cli = Cli::parse();
+    let cli = Cli::try_parse().unwrap_or_else(|e| {
+        if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
+            e.exit();
+        }
+        emit_cli_usage_error_and_exit(e.to_string());
+    });
 
-    // MCP mode: must check before method/url validation
-    if cli.mcp {
-        return Mode::Mcp;
-    }
-
-    if cli.pipe {
-        // Build config overrides from CLI flags so --pipe --log startup,retry --proxy ...
-        // all take effect at launch time.
-        const ALL_CATEGORIES: &[&str] = &["startup", "request", "progress", "retry", "redirect"];
-        let log_categories: Vec<String> = if cli.verbose {
-            ALL_CATEGORIES.iter().map(|s| s.to_string()).collect()
-        } else if let Some(ref log_str) = cli.log {
-            log_str
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect()
-        } else {
-            vec![]
-        };
-        let has_log_flag = cli.verbose || cli.log.is_some();
-        let tls = build_tls_partial(&cli);
-        let pipe_config = ConfigPatch {
-            response_save_dir: cli.response_save_dir.clone(),
-            response_save_above_bytes: cli.response_save_above_bytes,
-            request_concurrency_limit: cli.request_concurrency_limit,
-            timeout_connect_s: cli.timeout_connect_s,
-            retry_base_delay_ms: cli.retry_base_delay_ms,
-            proxy: cli.proxy.clone(),
-            tls,
-            log: if has_log_flag {
-                Some(log_categories)
+    match cli.mode {
+        #[cfg(feature = "mcp")]
+        CliMode::Mcp => return Mode::Mcp,
+        CliMode::Pipe => {
+            // Build config overrides from CLI flags so --mode pipe --log startup,retry --proxy ...
+            // all take effect at launch time.
+            const ALL_CATEGORIES: &[&str] =
+                &["startup", "request", "progress", "retry", "redirect"];
+            let log_categories: Vec<String> = if cli.verbose {
+                cli_parse_log_filters(ALL_CATEGORIES)
+            } else if let Some(ref log_str) = cli.log {
+                let entries: Vec<&str> = log_str.split(',').collect();
+                cli_parse_log_filters(&entries)
             } else {
-                None
-            },
-            ..ConfigPatch::default()
-        };
-        return Mode::Pipe(Box::new(pipe_config));
+                vec![]
+            };
+            let has_log_flag = cli.verbose || cli.log.is_some();
+            let tls = build_tls_partial(&cli);
+            let pipe_config = ConfigPatch {
+                response_save_dir: cli.response_save_dir.clone(),
+                response_save_above_bytes: cli.response_save_above_bytes,
+                request_concurrency_limit: cli.request_concurrency_limit,
+                timeout_connect_s: cli.timeout_connect_s,
+                retry_base_delay_ms: cli.retry_base_delay_ms,
+                proxy: cli.proxy.clone(),
+                tls,
+                log: if has_log_flag {
+                    Some(log_categories)
+                } else {
+                    None
+                },
+                ..ConfigPatch::default()
+            };
+            return Mode::Pipe(Box::new(pipe_config));
+        }
+        CliMode::Curl => {
+            let curl_args = strip_mode_flag(&raw[1..]);
+            return crate::curl_compat::parse_curl_args(&curl_args);
+        }
+        CliMode::Cli => {}
     }
 
     let method = match cli.method {
         Some(ref m) => m.to_uppercase(),
         None => {
-            // No method and no --pipe: show help and exit 2
+            // No method in cli mode: show help and exit 2
             let mut cmd = <Cli as clap::CommandFactory>::command();
             let _ = cmd.print_help();
-            eprintln!();
+            println!();
             std::process::exit(2);
         }
     };
@@ -291,8 +331,7 @@ pub fn parse_args() -> Mode {
     let url = match cli.url {
         Some(ref u) => u.clone(),
         None => {
-            eprintln!("error: URL is required after method");
-            std::process::exit(2);
+            emit_cli_usage_error_and_exit("URL is required after method");
         }
     };
 
@@ -324,13 +363,10 @@ pub fn parse_args() -> Mode {
     // Parse log categories from --verbose or --log
     const ALL_CATEGORIES: &[&str] = &["startup", "request", "progress", "retry", "redirect"];
     let log_categories: Vec<String> = if cli.verbose {
-        ALL_CATEGORIES.iter().map(|s| s.to_string()).collect()
+        cli_parse_log_filters(ALL_CATEGORIES)
     } else if let Some(ref log_str) = cli.log {
-        log_str
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
+        let entries: Vec<&str> = log_str.split(',').collect();
+        cli_parse_log_filters(&entries)
     } else {
         vec![]
     };
@@ -389,14 +425,9 @@ pub fn parse_args() -> Mode {
     };
 
     // Parse output format
-    let output_format = match cli.output.as_str() {
-        "json" => OutputFormat::Json,
-        "yaml" => OutputFormat::Yaml,
-        "plain" => OutputFormat::Plain,
-        other => {
-            eprintln!("error: unknown --output format '{other}': expected json, yaml, or plain");
-            std::process::exit(2);
-        }
+    let output_format = match cli_parse_output(&cli.output) {
+        Ok(f) => f,
+        Err(e) => emit_cli_usage_error_and_exit(e),
     };
 
     Mode::Cli(Box::new(CliRequest {
@@ -439,20 +470,13 @@ pub fn write_cli_output(output: &Output, format: OutputFormat) {
         obj.remove("tag");
     }
 
-    let formatted = match format {
-        OutputFormat::Json => agent_first_data::output_json(&value),
-        OutputFormat::Yaml | OutputFormat::Plain => {
-            // Protect server body fields from AFD suffix processing.
-            // Non-string body (parsed JSON objects) is converted to a JSON string
-            // so formatters treat it as opaque data.
-            protect_server_body(&mut value);
-            if matches!(format, OutputFormat::Yaml) {
-                agent_first_data::output_yaml(&value)
-            } else {
-                agent_first_data::output_plain(&value)
-            }
-        }
-    };
+    if !matches!(format, OutputFormat::Json) {
+        // Protect server body fields from AFD suffix processing.
+        // Non-string body (parsed JSON objects) is converted to a JSON string
+        // so formatters treat them as opaque data.
+        protect_server_body(&mut value);
+    }
+    let formatted = cli_output(&value, format);
 
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
@@ -488,8 +512,7 @@ fn parse_header_flag(s: &str) -> (String, Value) {
     let colon_pos = match s.find(':') {
         Some(p) => p,
         None => {
-            eprintln!("error: invalid header '{s}': expected 'Name: Value'");
-            std::process::exit(2);
+            emit_cli_usage_error_and_exit(format!("invalid header '{s}': expected 'Name: Value'"));
         }
     };
     let name = s[..colon_pos].trim().to_string();
@@ -528,10 +551,9 @@ fn parse_body_flags(
     .filter(|&&b| b)
     .count();
     if count > 1 {
-        eprintln!(
-            "error: --body, --body-base64, --body-file, --body-multipart, and --body-urlencoded are mutually exclusive"
+        emit_cli_usage_error_and_exit(
+            "--body, --body-base64, --body-file, --body-multipart, and --body-urlencoded are mutually exclusive",
         );
-        std::process::exit(2);
     }
 
     if let Some(ref b) = cli.body {
@@ -583,8 +605,9 @@ fn parse_form_flag(s: &str) -> MultipartPart {
     let eq_pos = match s.find('=') {
         Some(p) => p,
         None => {
-            eprintln!("error: invalid --body-multipart '{s}': expected name=value");
-            std::process::exit(2);
+            emit_cli_usage_error_and_exit(format!(
+                "invalid --body-multipart '{s}': expected name=value"
+            ));
         }
     };
     let name = s[..eq_pos].to_string();
@@ -631,8 +654,9 @@ fn parse_urlencoded_flag(s: &str) -> UrlencodedPart {
             value: s[pos + 1..].to_string(),
         },
         None => {
-            eprintln!("error: invalid --body-urlencoded '{s}': expected name=value");
-            std::process::exit(2);
+            emit_cli_usage_error_and_exit(format!(
+                "invalid --body-urlencoded '{s}': expected name=value"
+            ));
         }
     }
 }
@@ -660,4 +684,209 @@ fn build_tls_partial(cli: &Cli) -> Option<TlsConfigPartial> {
 /// Unescape common delimiter literals: \\n -> \n
 fn unescape_delimiter(s: &str) -> String {
     s.replace("\\n", "\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_cli() -> Cli {
+        Cli {
+            method: None,
+            url: None,
+            header: vec![],
+            body: None,
+            body_base64: None,
+            body_file: None,
+            body_multipart: vec![],
+            body_urlencoded: vec![],
+            response_save_dir: None,
+            response_save_above_bytes: None,
+            request_concurrency_limit: None,
+            timeout_connect_s: None,
+            timeout_idle_s: None,
+            retry: None,
+            retry_base_delay_ms: None,
+            retry_on_status: None,
+            response_redirect: None,
+            response_parse_json: None,
+            response_decompress: None,
+            response_save_file: None,
+            response_save_resume: false,
+            response_max_bytes: None,
+            chunked: false,
+            chunked_delimiter: None,
+            chunked_delimiter_raw: false,
+            progress_ms: None,
+            progress_bytes: None,
+            tls_insecure: false,
+            tls_cacert_file: None,
+            tls_cert_file: None,
+            tls_key_file: None,
+            proxy: None,
+            upgrade: None,
+            output: "json".to_string(),
+            log: None,
+            verbose: false,
+            mode: CliMode::Cli,
+        }
+    }
+
+    #[test]
+    fn parse_header_flag_normal_and_remove_default() {
+        let (name, value) = parse_header_flag("X-Test: abc");
+        assert_eq!(name, "X-Test");
+        assert_eq!(value, Value::String("abc".to_string()));
+
+        let (name, value) = parse_header_flag("X-Remove:   ");
+        assert_eq!(name, "X-Remove");
+        assert_eq!(value, Value::Null);
+    }
+
+    #[test]
+    fn parse_body_flags_object_array_string_and_files() {
+        let mut cli = empty_cli();
+        cli.body = Some("{\"a\":1}".to_string());
+        let (body, b64, file, mp, ue) = parse_body_flags(&cli);
+        assert_eq!(body, Some(serde_json::json!({"a":1})));
+        assert!(b64.is_none() && file.is_none() && mp.is_none() && ue.is_none());
+
+        let mut cli = empty_cli();
+        cli.body = Some("[1,2]".to_string());
+        let (body, _, _, _, _) = parse_body_flags(&cli);
+        assert_eq!(body, Some(serde_json::json!([1, 2])));
+
+        let mut cli = empty_cli();
+        cli.body = Some("hello".to_string());
+        let (body, _, _, _, _) = parse_body_flags(&cli);
+        assert_eq!(body, Some(Value::String("hello".to_string())));
+
+        let mut cli = empty_cli();
+        cli.body = Some("@/tmp/body.txt".to_string());
+        let (_, _, file, _, _) = parse_body_flags(&cli);
+        assert_eq!(file.as_deref(), Some("/tmp/body.txt"));
+
+        let mut cli = empty_cli();
+        cli.body_base64 = Some("aGVsbG8=".to_string());
+        let (_, b64, _, _, _) = parse_body_flags(&cli);
+        assert_eq!(b64.as_deref(), Some("aGVsbG8="));
+
+        let mut cli = empty_cli();
+        cli.body_file = Some("/tmp/f.bin".to_string());
+        let (_, _, file, _, _) = parse_body_flags(&cli);
+        assert_eq!(file.as_deref(), Some("/tmp/f.bin"));
+    }
+
+    #[test]
+    fn parse_body_flags_multipart_and_urlencoded() {
+        let mut cli = empty_cli();
+        cli.body_multipart = vec![
+            "name=roger".to_string(),
+            "upload=@/tmp/a.txt;filename=x.txt;type=text/plain".to_string(),
+        ];
+        let (_, _, _, mp, _) = parse_body_flags(&cli);
+        let parts = mp.expect("multipart");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].name, "name");
+        assert_eq!(parts[0].value.as_deref(), Some("roger"));
+        assert_eq!(parts[1].file.as_deref(), Some("/tmp/a.txt"));
+        assert_eq!(parts[1].filename.as_deref(), Some("x.txt"));
+        assert_eq!(parts[1].content_type.as_deref(), Some("text/plain"));
+
+        let mut cli = empty_cli();
+        cli.body_urlencoded = vec!["a=1".to_string(), "b=".to_string()];
+        let (_, _, _, _, ue) = parse_body_flags(&cli);
+        let parts = ue.expect("urlencoded");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].name, "a");
+        assert_eq!(parts[0].value, "1");
+        assert_eq!(parts[1].name, "b");
+        assert_eq!(parts[1].value, "");
+    }
+
+    #[test]
+    fn parse_form_and_urlencoded_flags() {
+        let p = parse_form_flag("n=v");
+        assert_eq!(p.name, "n");
+        assert_eq!(p.value.as_deref(), Some("v"));
+        assert!(p.file.is_none());
+
+        let p = parse_form_flag("f=@/tmp/a.bin;filename=b.bin;type=application/octet-stream");
+        assert_eq!(p.file.as_deref(), Some("/tmp/a.bin"));
+        assert_eq!(p.filename.as_deref(), Some("b.bin"));
+        assert_eq!(p.content_type.as_deref(), Some("application/octet-stream"));
+
+        let p = parse_urlencoded_flag("x=1");
+        assert_eq!(p.name, "x");
+        assert_eq!(p.value, "1");
+    }
+
+    #[test]
+    fn build_tls_partial_and_unescape_delimiter() {
+        let mut cli = empty_cli();
+        assert!(build_tls_partial(&cli).is_none());
+
+        cli.tls_insecure = true;
+        cli.tls_cacert_file = Some("/tmp/ca.pem".to_string());
+        cli.tls_cert_file = Some("/tmp/cert.pem".to_string());
+        cli.tls_key_file = Some("/tmp/key.pem".to_string());
+        let tls = build_tls_partial(&cli).expect("tls");
+        assert_eq!(tls.insecure, Some(true));
+        assert_eq!(tls.cacert_file.as_deref(), Some("/tmp/ca.pem"));
+        assert_eq!(tls.cert_file.as_deref(), Some("/tmp/cert.pem"));
+        assert_eq!(tls.key_file.as_deref(), Some("/tmp/key.pem"));
+
+        assert_eq!(unescape_delimiter("\\n\\n"), "\n\n");
+    }
+
+    #[test]
+    fn protect_server_body_stringifies_non_string() {
+        let mut value = serde_json::json!({
+            "body": {"a": 1},
+            "data": [1,2],
+            "other": true
+        });
+        protect_server_body(&mut value);
+        assert_eq!(
+            value.get("body"),
+            Some(&Value::String("{\"a\":1}".to_string()))
+        );
+        assert_eq!(value.get("data"), Some(&Value::String("[1,2]".to_string())));
+        assert_eq!(value.get("other"), Some(&Value::Bool(true)));
+    }
+
+    #[test]
+    fn curl_mode_helpers() {
+        let raw = vec![
+            "afhttp".to_string(),
+            "--mode".to_string(),
+            "curl".to_string(),
+        ];
+        assert!(raw_mode_is_curl(&raw));
+        assert_eq!(strip_mode_flag(&raw[1..]), Vec::<String>::new());
+
+        let raw = vec![
+            "afhttp".to_string(),
+            "--mode=curl".to_string(),
+            "-X".to_string(),
+            "GET".to_string(),
+            "https://example.com".to_string(),
+        ];
+        assert!(raw_mode_is_curl(&raw));
+        assert_eq!(
+            strip_mode_flag(&raw[1..]),
+            vec![
+                "-X".to_string(),
+                "GET".to_string(),
+                "https://example.com".to_string()
+            ]
+        );
+
+        let raw = vec![
+            "afhttp".to_string(),
+            "--mode".to_string(),
+            "pipe".to_string(),
+        ];
+        assert!(!raw_mode_is_curl(&raw));
+    }
 }

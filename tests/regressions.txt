@@ -1,0 +1,6 @@
+# One fully-qualified Rust test name per line.
+# These cases map to previously found defects and must always exist.
+handler::tests::regression_multipart_body_fields_are_mutually_exclusive
+tests::handle_config_rebuild_failure_rolls_back_config
+mcp::tests::http_config_rebuild_failure_rolls_back_config
+mcp::tests::http_request_skips_log_outputs_and_returns_terminal_result

@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Duration;
 
-pub const VERSION: &str = "0.1.0";
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 impl RuntimeConfig {
     pub fn new(download_dir: String) -> Self {
@@ -420,4 +420,259 @@ pub fn parse_content_length(headers: &HashMap<String, Value>) -> Option<u64> {
         .get("content-length")
         .and_then(|v| v.as_str())
         .and_then(|s| s.parse::<u64>().ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reqwest::header::{HeaderValue, CONTENT_LENGTH, SET_COOKIE};
+
+    fn tmp_file_path(name: &str) -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir()
+            .join(format!("afhttp-{name}-{nanos}.tmp"))
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[test]
+    fn runtime_config_new_has_defaults() {
+        let cfg = RuntimeConfig::new("/tmp/afhttp-test".to_string());
+        assert_eq!(cfg.response_save_dir, "/tmp/afhttp-test");
+        assert_eq!(
+            cfg.defaults.headers.get("User-Agent"),
+            Some(&Value::String(format!("afhttp/{VERSION}")))
+        );
+        assert_eq!(cfg.defaults.timeout_idle_s, 30);
+        assert!(cfg.host_defaults.is_empty());
+    }
+
+    #[test]
+    fn apply_update_merges_and_marks_rebuild() {
+        let mut cfg = RuntimeConfig::new("/tmp/afhttp-test".to_string());
+        let mut defaults_headers = HashMap::new();
+        defaults_headers.insert("X-One".to_string(), Value::String("1".to_string()));
+        defaults_headers.insert("User-Agent".to_string(), Value::Null);
+        let mut host_defaults = HashMap::new();
+        host_defaults.insert(
+            "example.com".to_string(),
+            HostDefaultsPartial {
+                headers: Some(
+                    [("X-Host".to_string(), Value::String("yes".to_string()))]
+                        .into_iter()
+                        .collect(),
+                ),
+            },
+        );
+
+        let patch = ConfigPatch {
+            timeout_connect_s: Some(11),
+            pool_idle_timeout_s: Some(22),
+            proxy: Some("http://127.0.0.1:8080".to_string()),
+            defaults: Some(RequestDefaultsPartial {
+                headers: Some(defaults_headers),
+                timeout_idle_s: Some(9),
+                retry_on_status: Some(vec![429, 503]),
+                ..RequestDefaultsPartial::default()
+            }),
+            host_defaults: Some(host_defaults),
+            tls: Some(TlsConfigPartial {
+                insecure: Some(true),
+                cacert_file: Some("/tmp/ca.pem".to_string()),
+                cert_file: Some("/tmp/cert.pem".to_string()),
+                key_file: Some("/tmp/key.pem".to_string()),
+                ..TlsConfigPartial::default()
+            }),
+            ..ConfigPatch::default()
+        };
+        let needs_rebuild = cfg.apply_update(patch);
+        assert!(needs_rebuild);
+        assert_eq!(cfg.timeout_connect_s, 11);
+        assert_eq!(cfg.pool_idle_timeout_s, 22);
+        assert_eq!(cfg.proxy.as_deref(), Some("http://127.0.0.1:8080"));
+        assert_eq!(cfg.defaults.timeout_idle_s, 9);
+        assert_eq!(cfg.defaults.retry_on_status, vec![429, 503]);
+        assert_eq!(
+            cfg.defaults.headers.get("X-One"),
+            Some(&Value::String("1".into()))
+        );
+        assert!(!cfg.defaults.headers.contains_key("User-Agent"));
+        assert_eq!(
+            cfg.host_defaults
+                .get("example.com")
+                .and_then(|h| h.headers.get("X-Host")),
+            Some(&Value::String("yes".into()))
+        );
+        assert!(cfg.tls.insecure);
+        assert_eq!(cfg.tls.cacert_file.as_deref(), Some("/tmp/ca.pem"));
+        assert_eq!(cfg.tls.cert_file.as_deref(), Some("/tmp/cert.pem"));
+        assert_eq!(cfg.tls.key_file.as_deref(), Some("/tmp/key.pem"));
+    }
+
+    #[test]
+    fn apply_update_inline_tls_clears_file_variants() {
+        let mut cfg = RuntimeConfig::new("/tmp/afhttp-test".to_string());
+        cfg.tls.cacert_file = Some("a".to_string());
+        cfg.tls.cert_file = Some("b".to_string());
+        cfg.tls.key_file = Some("c".to_string());
+
+        let _ = cfg.apply_update(ConfigPatch {
+            tls: Some(TlsConfigPartial {
+                cacert_pem: Some("CA".to_string()),
+                cert_pem: Some("CERT".to_string()),
+                key_pem_secret: Some("KEY".to_string()),
+                ..TlsConfigPartial::default()
+            }),
+            ..ConfigPatch::default()
+        });
+        assert_eq!(cfg.tls.cacert_pem.as_deref(), Some("CA"));
+        assert!(cfg.tls.cacert_file.is_none());
+        assert_eq!(cfg.tls.cert_pem.as_deref(), Some("CERT"));
+        assert!(cfg.tls.cert_file.is_none());
+        assert_eq!(cfg.tls.key_pem_secret.as_deref(), Some("KEY"));
+        assert!(cfg.tls.key_file.is_none());
+    }
+
+    #[test]
+    fn resolve_merges_defaults_and_request_options() {
+        let mut cfg = RuntimeConfig::new("/tmp/afhttp-test".to_string());
+        cfg.defaults.timeout_idle_s = 31;
+        cfg.defaults.retry = 2;
+        cfg.defaults.response_redirect = 7;
+        cfg.defaults.response_parse_json = false;
+        cfg.defaults.response_decompress = false;
+        cfg.defaults.response_save_resume = true;
+        cfg.defaults.retry_on_status = vec![500];
+        cfg.response_save_above_bytes = 123;
+        cfg.retry_base_delay_ms = 456;
+
+        let opts = RequestOptions {
+            chunked: true,
+            chunked_delimiter: Value::Null,
+            progress_bytes: Some(5),
+            progress_ms: Some(6),
+            response_max_bytes: Some(7),
+            ..RequestOptions::default()
+        };
+        let resolved = cfg.resolve(&opts);
+        assert_eq!(resolved.timeout_idle_s, 31);
+        assert_eq!(resolved.retry, 2);
+        assert_eq!(resolved.response_redirect, 7);
+        assert!(!resolved.response_parse_json);
+        assert!(!resolved.response_decompress);
+        assert!(resolved.response_save_resume);
+        assert!(resolved.chunked);
+        assert!(resolved.chunked_delimiter.is_none());
+        assert_eq!(resolved.progress_bytes, 5);
+        assert_eq!(resolved.progress_ms, 6);
+        assert_eq!(resolved.response_save_above_bytes, 123);
+        assert_eq!(resolved.retry_base_delay_ms, 456);
+        assert_eq!(resolved.retry_on_status, vec![500]);
+        assert_eq!(resolved.response_max_bytes, Some(7));
+    }
+
+    #[test]
+    fn merged_headers_applies_layers_and_null_removal() {
+        let mut cfg = RuntimeConfig::new("/tmp/afhttp-test".to_string());
+        cfg.defaults.headers.insert(
+            "X-Default".to_string(),
+            Value::String("default".to_string()),
+        );
+        cfg.host_defaults.insert(
+            "api.example.com".to_string(),
+            HostDefaults {
+                headers: [
+                    ("X-Host".to_string(), Value::String("host".to_string())),
+                    ("X-Default".to_string(), Value::Null),
+                ]
+                .into_iter()
+                .collect(),
+            },
+        );
+        let req_headers: HashMap<String, Value> = [
+            ("X-Req".to_string(), Value::String("req".to_string())),
+            ("X-Host".to_string(), Value::Null),
+        ]
+        .into_iter()
+        .collect();
+        let merged = cfg
+            .merged_headers(&req_headers, Some("api.example.com"))
+            .expect("merged headers");
+        assert_eq!(
+            merged.get("x-req").and_then(|v| v.to_str().ok()),
+            Some("req")
+        );
+        assert!(merged.get("x-host").is_none());
+        assert!(merged.get("x-default").is_none());
+    }
+
+    #[test]
+    fn merged_headers_rejects_invalid_names_or_values() {
+        let cfg = RuntimeConfig::new("/tmp/afhttp-test".to_string());
+        let bad_name: HashMap<String, Value> =
+            [("bad name".to_string(), Value::String("x".into()))]
+                .into_iter()
+                .collect();
+        assert!(cfg.merged_headers(&bad_name, None).is_err());
+
+        let bad_value: HashMap<String, Value> =
+            [("X".to_string(), Value::String("bad\nvalue".into()))]
+                .into_iter()
+                .collect();
+        assert!(cfg.merged_headers(&bad_value, None).is_err());
+    }
+
+    #[test]
+    fn load_pem_prefers_inline_then_file() {
+        let file = tmp_file_path("pem");
+        std::fs::write(&file, b"FILE").expect("write");
+        let inline = "INLINE".to_string();
+        let from_inline = load_pem(Some(&inline), Some(&file)).expect("inline pem");
+        assert_eq!(from_inline, Some(b"INLINE".to_vec()));
+        let from_file = load_pem(None, Some(&file)).expect("file pem");
+        assert_eq!(from_file, Some(b"FILE".to_vec()));
+        let none = load_pem(None, None).expect("none");
+        assert_eq!(none, None);
+        let _ = std::fs::remove_file(file);
+    }
+
+    #[test]
+    fn build_client_basics_and_bad_cert_error() {
+        let mut cfg = RuntimeConfig::new("/tmp/afhttp-test".to_string());
+        assert!(cfg.build_client().is_ok());
+
+        cfg.proxy = Some("not a valid proxy".to_string());
+        let err = cfg
+            .build_client()
+            .expect_err("should fail on invalid proxy");
+        assert!(err.contains("invalid proxy"));
+    }
+
+    #[test]
+    fn response_headers_map_and_content_length() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(CONTENT_LENGTH, HeaderValue::from_static("42"));
+        headers.append(SET_COOKIE, HeaderValue::from_static("a=1"));
+        headers.append(SET_COOKIE, HeaderValue::from_static("b=2"));
+        let map = response_headers_to_map(&headers).expect("headers");
+        assert_eq!(parse_content_length(&map), Some(42));
+        assert_eq!(
+            map.get("set-cookie"),
+            Some(&Value::Array(vec![
+                Value::String("a=1".to_string()),
+                Value::String("b=2".to_string())
+            ]))
+        );
+    }
+
+    #[test]
+    fn response_headers_map_rejects_non_ascii() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        let bad = HeaderValue::from_bytes(&[0xFF]).expect("header bytes");
+        headers.insert("x-bad", bad);
+        assert!(response_headers_to_map(&headers).is_err());
+    }
 }

@@ -17,8 +17,9 @@ sys.path.insert(0, os.path.dirname(__file__))
 from server import start_server
 from ws_server import WS_BASE, WS_PORT, start_ws_server
 
-AFH = os.path.join(os.path.dirname(__file__), "..", "target", "debug", "afhttp")
-HTTP_BASE = "http://127.0.0.1:18080"
+AFH = os.environ.get("AFH_BIN") or os.path.join(os.path.dirname(__file__), "..", "target", "debug", "afhttp")
+HTTP_PORT = int(os.environ.get("AFH_TEST_HTTP_PORT", "18080"))
+HTTP_BASE = f"http://127.0.0.1:{HTTP_PORT}"
 
 
 # ---------------------------------------------------------------------------
@@ -30,12 +31,14 @@ def run_afh(inputs, timeout_s=30):
     """Send JSONL lines to afh stdin (all at once), collect parsed output."""
     payload = "\n".join(inputs) + "\n"
     proc = subprocess.run(
-        [AFH, "--pipe"],
+        [AFH, "--mode", "pipe"],
         input=payload,
         capture_output=True,
         text=True,
         timeout=timeout_s,
     )
+    if proc.stderr.strip():
+        raise RuntimeError(f"afhttp wrote to stderr: {proc.stderr[:800]}")
     return _parse_stdout(proc.stdout)
 
 
@@ -45,7 +48,7 @@ def run_afh_interactive(inputs_with_delays, timeout_s=30):
     inputs_with_delays: list of (sleep_seconds_before_write, json_line) tuples.
     """
     proc = subprocess.Popen(
-        [AFH, "--pipe"],
+        [AFH, "--mode", "pipe"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -67,7 +70,11 @@ def run_afh_interactive(inputs_with_delays, timeout_s=30):
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()
-    return _parse_stdout(proc.stdout.read().decode())
+    stdout = proc.stdout.read().decode()
+    stderr = proc.stderr.read().decode() if proc.stderr else ""
+    if stderr.strip():
+        raise RuntimeError(f"afhttp wrote to stderr: {stderr[:800]}")
+    return _parse_stdout(stdout)
 
 
 def _parse_stdout(text: str) -> list[dict]:
@@ -403,7 +410,7 @@ def main():
     print("Build OK")
 
     print("Starting servers...")
-    http_server = start_server(18080)
+    http_server = start_server(HTTP_PORT)
     start_ws_server(WS_PORT)
     time.sleep(0.1)
     print("Servers ready\n")

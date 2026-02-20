@@ -1,16 +1,25 @@
-#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![deny(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::print_stderr,
+    clippy::disallowed_methods,
+    clippy::disallowed_macros
+)]
 
 mod chunked;
 mod cli;
 mod config;
 mod curl_compat;
 mod handler;
+#[cfg(feature = "mcp")]
 mod mcp;
 mod types;
 mod websocket;
 mod writer;
 
 use config::VERSION;
+#[cfg(feature = "mcp")]
 use rmcp::ServiceExt;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -31,6 +40,18 @@ fn default_response_save_dir() -> String {
     dir.to_string_lossy().into_owned()
 }
 
+fn emit_startup_error_and_exit(message: impl AsRef<str>) -> ! {
+    let err = serde_json::json!({
+        "code": "error",
+        "error_code": "internal_error",
+        "error": message.as_ref(),
+        "retryable": false,
+        "trace": {"duration_ms": 0}
+    });
+    println!("{}", agent_first_data::output_json(&err));
+    std::process::exit(1);
+}
+
 pub struct App {
     pub config: RwLock<RuntimeConfig>,
     pub client: RwLock<reqwest::Client>,
@@ -47,6 +68,7 @@ async fn main() {
     match mode {
         cli::Mode::Cli(req) => run_cli(*req).await,
         cli::Mode::Pipe(init_config) => run_pipe(*init_config).await,
+        #[cfg(feature = "mcp")]
         cli::Mode::Mcp => run_mcp().await,
     }
 }
@@ -61,8 +83,7 @@ async fn run_cli(req: cli::CliRequest) {
     // Auto-generate temp response_save_dir; user --response-save-dir overrides via config_overrides
     let tmp_save_dir = default_response_save_dir();
     if let Err(e) = std::fs::create_dir_all(&tmp_save_dir) {
-        eprintln!("fatal: create response_save_dir: {e}");
-        std::process::exit(1);
+        emit_startup_error_and_exit(format!("create response_save_dir: {e}"));
     }
 
     let log_categories = req.log_categories;
@@ -74,8 +95,7 @@ async fn run_cli(req: cli::CliRequest) {
     // If user provided --response-save-dir, ensure it exists
     if config.response_save_dir != tmp_save_dir {
         if let Err(e) = std::fs::create_dir_all(&config.response_save_dir) {
-            eprintln!("fatal: create response_save_dir: {e}");
-            std::process::exit(1);
+            emit_startup_error_and_exit(format!("create response_save_dir: {e}"));
         }
     }
 
@@ -162,19 +182,18 @@ async fn run_cli(req: cli::CliRequest) {
 // MCP mode: Model Context Protocol server over stdio
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "mcp")]
 async fn run_mcp() {
     let save_dir = default_response_save_dir();
     if let Err(e) = std::fs::create_dir_all(&save_dir) {
-        eprintln!("fatal: create response_save_dir: {e}");
-        std::process::exit(1);
+        emit_startup_error_and_exit(format!("create response_save_dir: {e}"));
     }
 
     let config = RuntimeConfig::new(save_dir);
     let client = match config.build_client() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("fatal: build client: {e}");
-            std::process::exit(1);
+            emit_startup_error_and_exit(format!("build client: {e}"));
         }
     };
 
@@ -195,14 +214,12 @@ async fn run_mcp() {
     let service = match mcp::AfhMcp::new(app).serve(rmcp::transport::stdio()).await {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("fatal: MCP serve failed: {e}");
-            std::process::exit(1);
+            emit_startup_error_and_exit(format!("MCP serve failed: {e}"));
         }
     };
 
     if let Err(e) = service.waiting().await {
-        eprintln!("MCP server error: {e}");
-        std::process::exit(1);
+        emit_startup_error_and_exit(format!("MCP server error: {e}"));
     }
 }
 
@@ -213,8 +230,7 @@ async fn run_mcp() {
 async fn run_pipe(init_config: ConfigPatch) {
     let save_dir = default_response_save_dir();
     if let Err(e) = std::fs::create_dir_all(&save_dir) {
-        eprintln!("fatal: create response_save_dir: {e}");
-        std::process::exit(1);
+        emit_startup_error_and_exit(format!("create response_save_dir: {e}"));
     }
 
     let mut config = RuntimeConfig::new(save_dir);
@@ -222,8 +238,7 @@ async fn run_pipe(init_config: ConfigPatch) {
     let client = match config.build_client() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("fatal: build client: {e}");
-            std::process::exit(1);
+            emit_startup_error_and_exit(format!("build client: {e}"));
         }
     };
 
@@ -351,6 +366,15 @@ async fn run_pipe(init_config: ConfigPatch) {
 
     // Graceful shutdown
 
+    // Cancel all active requests first so each in-flight id can converge toward
+    // a terminal event before we emit process close.
+    {
+        let in_flight = app.in_flight.read().await;
+        for token in in_flight.values() {
+            token.cancel();
+        }
+    }
+
     // Close all WebSocket connections
     {
         let ws_conns = app.ws_connections.read().await;
@@ -362,9 +386,40 @@ async fn run_pipe(init_config: ConfigPatch) {
     // Wait for all in-flight tasks (up to 5 seconds)
     let shutdown_deadline = tokio::time::sleep(std::time::Duration::from_secs(5));
     tokio::pin!(shutdown_deadline);
+    let mut shutdown_timed_out = false;
     tokio::select! {
         _ = futures::future::join_all(&mut handles) => {}
-        _ = &mut shutdown_deadline => {}
+        _ = &mut shutdown_deadline => {
+            shutdown_timed_out = true;
+        }
+    }
+
+    // Forced shutdown fallback: abort unfinished tasks and emit terminal cancelled
+    // events for any ids still tracked as in-flight.
+    if shutdown_timed_out {
+        for handle in &handles {
+            if !handle.is_finished() {
+                handle.abort();
+            }
+        }
+        let remaining_ids: Vec<String> = {
+            let mut in_flight = app.in_flight.write().await;
+            let ids = in_flight.keys().cloned().collect::<Vec<_>>();
+            in_flight.clear();
+            ids
+        };
+        for id in remaining_ids {
+            let _ = app
+                .writer
+                .send(make_error(
+                    Some(id),
+                    None,
+                    ErrorInfo::cancelled(),
+                    Trace::error_only(0),
+                ))
+                .await;
+        }
+        app.ws_connections.write().await.clear();
     }
 
     let uptime_s = app.start_time.elapsed().as_secs();
@@ -406,9 +461,11 @@ async fn handle_config(app: &Arc<App>, patch: ConfigPatch) {
         }
     }
 
-    let needs_rebuild = {
+    let (needs_rebuild, previous_config) = {
         let mut config = app.config.write().await;
-        config.apply_update(patch)
+        let previous = config.clone();
+        let needs = config.apply_update(patch);
+        (needs, previous)
     };
 
     if needs_rebuild {
@@ -420,6 +477,9 @@ async fn handle_config(app: &Arc<App>, patch: ConfigPatch) {
                 *client = new_client;
             }
             Err(e) => {
+                drop(config);
+                let mut config = app.config.write().await;
+                *config = previous_config;
                 let _ = app
                     .writer
                     .send(make_error(
@@ -507,4 +567,173 @@ async fn handle_cancel(app: &App, id: &str) {
             Trace::error_only(0),
         ))
         .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::RuntimeConfig;
+
+    async fn test_app() -> (Arc<App>, mpsc::Receiver<Output>) {
+        let save_dir = std::env::temp_dir()
+            .join(format!("afhttp-main-test-{}", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let config = RuntimeConfig::new(save_dir);
+        let client = config.build_client().expect("build client");
+        let (tx, rx) = mpsc::channel(32);
+        let app = Arc::new(App {
+            config: RwLock::new(config),
+            client: RwLock::new(client),
+            writer: tx,
+            in_flight: RwLock::new(HashMap::new()),
+            ws_connections: RwLock::new(HashMap::new()),
+            request_count: AtomicU64::new(0),
+            start_time: Instant::now(),
+        });
+        (app, rx)
+    }
+
+    #[test]
+    fn default_response_save_dir_is_temp_afh_path() {
+        let path = default_response_save_dir();
+        assert!(path.contains("/afh/"));
+        assert!(path.starts_with(std::env::temp_dir().to_string_lossy().as_ref()));
+    }
+
+    #[tokio::test]
+    async fn handle_ping_emits_pong() {
+        let (app, mut rx) = test_app().await;
+        handle_ping(&app).await;
+        let out = rx.recv().await.expect("output");
+        assert!(matches!(out, Output::Pong { .. }));
+    }
+
+    #[tokio::test]
+    async fn handle_send_unknown_id_emits_error() {
+        let (app, mut rx) = test_app().await;
+        handle_send(&app, "missing", None, None).await;
+        let out = rx.recv().await.expect("output");
+        assert!(matches!(out, Output::Error { .. }));
+    }
+
+    #[tokio::test]
+    async fn handle_send_known_ws_id_forwards_command() {
+        let (app, _rx) = test_app().await;
+        let (tx, mut ws_rx) = mpsc::unbounded_channel();
+        app.ws_connections
+            .write()
+            .await
+            .insert("ws1".to_string(), tx);
+        handle_send(
+            &app,
+            "ws1",
+            Some(serde_json::json!({"a":1})),
+            Some("aA==".to_string()),
+        )
+        .await;
+        let cmd = ws_rx.recv().await.expect("ws cmd");
+        assert!(matches!(cmd, WsCommand::Send { .. }));
+    }
+
+    #[tokio::test]
+    async fn handle_cancel_cancels_http_and_ws() {
+        let (app, mut rx) = test_app().await;
+        let token = CancellationToken::new();
+        app.in_flight
+            .write()
+            .await
+            .insert("r1".to_string(), token.clone());
+        handle_cancel(&app, "r1").await;
+        assert!(token.is_cancelled());
+
+        let (tx, mut ws_rx) = mpsc::unbounded_channel();
+        app.ws_connections
+            .write()
+            .await
+            .insert("ws1".to_string(), tx);
+        handle_cancel(&app, "ws1").await;
+        let cmd = ws_rx.recv().await.expect("ws close");
+        assert!(matches!(cmd, WsCommand::Close));
+
+        handle_cancel(&app, "missing").await;
+        let out = rx.recv().await.expect("error output");
+        assert!(matches!(out, Output::Error { .. }));
+    }
+
+    #[tokio::test]
+    async fn handle_config_updates_and_echoes_config() {
+        let (app, mut rx) = test_app().await;
+        handle_config(
+            &app,
+            ConfigPatch {
+                timeout_connect_s: Some(12),
+                request_concurrency_limit: Some(7),
+                ..ConfigPatch::default()
+            },
+        )
+        .await;
+        let out = rx.recv().await.expect("config output");
+        match out {
+            Output::Config(cfg) => {
+                assert_eq!(cfg.timeout_connect_s, 12);
+                assert_eq!(cfg.request_concurrency_limit, 7);
+            }
+            _ => panic!("expected Output::Config"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_config_rebuild_failure_rolls_back_config() {
+        let (app, mut rx) = test_app().await;
+        let before = app.config.read().await.clone();
+        handle_config(
+            &app,
+            ConfigPatch {
+                proxy: Some("not a valid proxy".to_string()),
+                ..ConfigPatch::default()
+            },
+        )
+        .await;
+        let out = rx.recv().await.expect("error output");
+        assert!(matches!(out, Output::Error { .. }));
+        let after = app.config.read().await.clone();
+        assert_eq!(after.proxy, before.proxy);
+        assert_eq!(after.timeout_connect_s, before.timeout_connect_s);
+    }
+
+    #[tokio::test]
+    async fn handle_config_invalid_response_save_dir_emits_error_and_keeps_config() {
+        let (app, mut rx) = test_app().await;
+        let before = app.config.read().await.clone();
+
+        let bad_path = std::env::temp_dir().join(format!(
+            "afhttp-config-file-{}-{}.tmp",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::write(&bad_path, b"x").expect("seed file");
+        let bad_path_str = bad_path.to_string_lossy().into_owned();
+
+        handle_config(
+            &app,
+            ConfigPatch {
+                response_save_dir: Some(bad_path_str),
+                timeout_connect_s: Some(99),
+                ..ConfigPatch::default()
+            },
+        )
+        .await;
+
+        let out = rx.recv().await.expect("error output");
+        assert!(matches!(out, Output::Error { .. }));
+        let after = app.config.read().await.clone();
+        assert_eq!(after.response_save_dir, before.response_save_dir);
+        assert_eq!(after.timeout_connect_s, before.timeout_connect_s);
+
+        let _ = std::fs::remove_file(bad_path);
+    }
 }

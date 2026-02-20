@@ -20,8 +20,12 @@ import tempfile
 sys.path.insert(0, os.path.dirname(__file__))
 from server import start_server
 
-AFH = os.path.join(os.path.dirname(__file__), "..", "target", "debug", "afhttp")
-BASE = "http://127.0.0.1:18080"
+AFH = os.environ.get("AFH_BIN") or os.path.join(os.path.dirname(__file__), "..", "target", "debug", "afhttp")
+HTTP_PORT = int(os.environ.get("AFH_TEST_HTTP_PORT", "18080"))
+HOST_PORT = f"127.0.0.1:{HTTP_PORT}"
+BASE = f"http://{HOST_PORT}"
+COVERAGE_MODE = os.environ.get("AFH_COVERAGE_MODE") == "1"
+_AFH_VERSION = os.environ.get("AFH_VERSION")
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -29,6 +33,22 @@ BASE = "http://127.0.0.1:18080"
 
 class TestFailure(Exception):
     pass
+
+
+def parse_output_line(line: str) -> dict:
+    try:
+        return json.loads(line)
+    except json.JSONDecodeError:
+        return {"_raw": line}
+
+
+def parse_output_lines(text: str) -> list[dict]:
+    lines = []
+    for line in text.strip().split("\n"):
+        line = line.strip()
+        if line:
+            lines.append(parse_output_line(line))
+    return lines
 
 
 def temp_path(prefix: str, suffix: str) -> str:
@@ -41,7 +61,7 @@ def temp_path(prefix: str, suffix: str) -> str:
 def run_afh(inputs: list[str], timeout_s=30, extra_args: list[str] = None) -> list[dict]:
     """Send JSONL lines to afh stdin, collect parsed output lines."""
     payload = "\n".join(inputs) + "\n"
-    cmd = [AFH, "--pipe"] + (extra_args or [])
+    cmd = [AFH, "--mode", "pipe"] + (extra_args or [])
     proc = subprocess.run(
         cmd,
         input=payload,
@@ -49,15 +69,9 @@ def run_afh(inputs: list[str], timeout_s=30, extra_args: list[str] = None) -> li
         text=True,
         timeout=timeout_s,
     )
-    lines = []
-    for line in proc.stdout.strip().split("\n"):
-        line = line.strip()
-        if line:
-            try:
-                lines.append(json.loads(line))
-            except json.JSONDecodeError:
-                lines.append({"_raw": line})
-    return lines
+    if proc.stderr.strip():
+        raise TestFailure(f"afhttp wrote to stderr: {proc.stderr[:800]}")
+    return parse_output_lines(proc.stdout)
 
 
 def run_afh_interactive(inputs_with_delays: list, timeout_s=60) -> list[dict]:
@@ -66,7 +80,7 @@ def run_afh_interactive(inputs_with_delays: list, timeout_s=60) -> list[dict]:
     inputs_with_delays: list of (delay_seconds, line_string) tuples.
     """
     proc = subprocess.Popen(
-        [AFH, "--pipe"],
+        [AFH, "--mode", "pipe"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -92,15 +106,116 @@ def run_afh_interactive(inputs_with_delays: list, timeout_s=60) -> list[dict]:
         proc.wait()
 
     stdout = proc.stdout.read().decode()
-    lines = []
-    for line in stdout.strip().split("\n"):
-        line = line.strip()
-        if line:
-            try:
-                lines.append(json.loads(line))
-            except json.JSONDecodeError:
-                lines.append({"_raw": line})
-    return lines
+    stderr = proc.stderr.read().decode() if proc.stderr else ""
+    if stderr.strip():
+        raise TestFailure(f"afhttp wrote to stderr: {stderr[:800]}")
+    return parse_output_lines(stdout)
+
+
+def afh_version() -> str:
+    global _AFH_VERSION
+    if _AFH_VERSION:
+        return _AFH_VERSION
+    proc = subprocess.run(
+        [AFH, "--version"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    if proc.returncode != 0:
+        raise TestFailure(f"afhttp --version failed: {proc.stderr.strip()}")
+    tokens = proc.stdout.strip().split()
+    if not tokens:
+        raise TestFailure("afhttp --version returned empty output")
+    _AFH_VERSION = tokens[-1]
+    return _AFH_VERSION
+
+
+def run_afh_until_terminal(request_lines: list[str], expected_terminal: int, timeout_s=60) -> list[dict]:
+    """
+    Keep stdin open until all request ids have reached terminal outputs, then close.
+    This avoids coupling throughput tests to close() cancellation timing.
+    """
+    proc = subprocess.Popen(
+        [AFH, "--mode", "pipe"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    outputs: list[dict] = []
+    lock = threading.Lock()
+
+    def reader():
+        for raw_line in proc.stdout:
+            line = raw_line.strip()
+            if line:
+                with lock:
+                    outputs.append(parse_output_line(line))
+
+    reader_thread = threading.Thread(target=reader, daemon=True)
+    reader_thread.start()
+
+    for line_str in request_lines:
+        try:
+            proc.stdin.write(line_str + "\n")
+            proc.stdin.flush()
+        except (BrokenPipeError, OSError):
+            break
+
+    deadline = time.time() + timeout_s
+    reached = False
+    while time.time() < deadline:
+        with lock:
+            terminal = sum(
+                1
+                for o in outputs
+                if o.get("id") and o.get("code") in ("response", "error")
+            )
+        if terminal >= expected_terminal:
+            reached = True
+            break
+        if proc.poll() is not None:
+            break
+        time.sleep(0.01)
+
+    try:
+        proc.stdin.write(json.dumps({"code": "close"}) + "\n")
+        proc.stdin.flush()
+    except (BrokenPipeError, OSError):
+        pass
+    try:
+        proc.stdin.close()
+    except (BrokenPipeError, OSError):
+        pass
+
+    try:
+        proc.wait(timeout=max(10, timeout_s // 2))
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+
+    reader_thread.join(timeout=1.0)
+    stderr = proc.stderr.read() if proc.stderr else ""
+    with lock:
+        result = list(outputs)
+        terminal = sum(
+            1
+            for o in result
+            if o.get("id") and o.get("code") in ("response", "error")
+        )
+
+    if stderr.strip():
+        raise TestFailure(f"afhttp wrote to stderr: {stderr[:800]}")
+
+    if not reached and terminal < expected_terminal:
+        raise TestFailure(
+            f"timed out waiting for terminal outputs: expected {expected_terminal}, got {terminal}; "
+            f"stderr={stderr[:800]}"
+        )
+
+    return result
 
 
 def find_by_id(outputs, code, req_id):
@@ -324,7 +439,7 @@ def test_config_update():
     assert cfg, "no config echo"
     assert cfg[0]["defaults"]["timeout_idle_s"] == 60
     assert cfg[0]["defaults"]["headers"]["Authorization"] == "Bearer test"
-    assert cfg[0]["defaults"]["headers"]["User-Agent"] == "afhttp/0.1.0"  # preserved
+    assert cfg[0]["defaults"]["headers"]["User-Agent"] == f"afhttp/{afh_version()}"  # preserved
     r = find_by_id(out, "response", "1")
     assert r, "no response"
     auth = get_header_ci(r["body"], "Authorization")
@@ -632,9 +747,9 @@ def test_startup():
     startups = find_log_events(out, "startup")
     assert startups, f"no startup log, got: {[o.get('code') for o in out]}"
     s = startups[0]
-    assert s["version"] == "0.1.0"
+    assert s["version"] == afh_version()
     assert isinstance(s["argv"], list)
-    assert "--pipe" in s["argv"]
+    assert "--mode" in s["argv"] and "pipe" in s["argv"]
     assert s["config"]["response_save_above_bytes"] == 10485760
     assert s["config"]["defaults"]["response_parse_json"] is True
     # No startup without --log startup
@@ -807,14 +922,17 @@ def test_download_progress():
 
 @test("100 concurrent requests to same host")
 def test_100_concurrent():
-    inputs = []
+    request_lines = []
     for i in range(100):
-        inputs.append(json.dumps({
+        request_lines.append(json.dumps({
             "code": "request", "id": str(i), "method": "GET",
             "url": f"{BASE}/fast",
         }))
-    inputs.append(json.dumps({"code": "close"}))
-    out = run_afh(inputs, timeout_s=30)
+    out = run_afh_until_terminal(
+        request_lines,
+        expected_terminal=100,
+        timeout_s=120 if COVERAGE_MODE else 30,
+    )
     responses = find_by_code(out, "response")
     assert len(responses) == 100, f"expected 100 responses, got {len(responses)}"
     ids = {r["id"] for r in responses}
@@ -825,31 +943,37 @@ def test_100_concurrent():
 
 @test("200 requests to varied endpoints")
 def test_200_varied():
-    inputs = []
+    request_lines = []
     endpoints = ["/fast", "/json/50", "/text/100", "/status/200", "/status/201"]
     for i in range(200):
         ep = endpoints[i % len(endpoints)]
-        inputs.append(json.dumps({
+        request_lines.append(json.dumps({
             "code": "request", "id": str(i), "method": "GET",
             "url": f"{BASE}{ep}",
         }))
-    inputs.append(json.dumps({"code": "close"}))
-    out = run_afh(inputs, timeout_s=30)
+    out = run_afh_until_terminal(
+        request_lines,
+        expected_terminal=200,
+        timeout_s=120 if COVERAGE_MODE else 30,
+    )
     responses = find_by_code(out, "response")
     assert len(responses) == 200, f"expected 200 responses, got {len(responses)}"
 
 
 @test("100 concurrent requests with mixed delays")
 def test_100_mixed_delays():
-    inputs = []
+    request_lines = []
     for i in range(100):
         delay = (i % 5) * 50  # 0, 50, 100, 150, 200ms
-        inputs.append(json.dumps({
+        request_lines.append(json.dumps({
             "code": "request", "id": str(i), "method": "GET",
             "url": f"{BASE}/delay/{delay}",
         }))
-    inputs.append(json.dumps({"code": "close"}))
-    out = run_afh(inputs, timeout_s=30)
+    out = run_afh_until_terminal(
+        request_lines,
+        expected_terminal=100,
+        timeout_s=120 if COVERAGE_MODE else 30,
+    )
     responses = find_by_code(out, "response")
     assert len(responses) == 100, f"expected 100, got {len(responses)}"
     # Verify responses may arrive out-of-order (fast before slow)
@@ -860,14 +984,17 @@ def test_100_mixed_delays():
 
 @test("500 rapid-fire requests")
 def test_500_rapid():
-    inputs = []
+    request_lines = []
     for i in range(500):
-        inputs.append(json.dumps({
+        request_lines.append(json.dumps({
             "code": "request", "id": str(i), "method": "GET",
             "url": f"{BASE}/fast",
         }))
-    inputs.append(json.dumps({"code": "close"}))
-    out = run_afh(inputs, timeout_s=60)
+    out = run_afh_until_terminal(
+        request_lines,
+        expected_terminal=500,
+        timeout_s=180 if COVERAGE_MODE else 60,
+    )
     responses = find_by_code(out, "response")
     errors_out = find_by_code(out, "error")
     total = len(responses) + len([e for e in errors_out if e.get("id")])
@@ -877,15 +1004,18 @@ def test_500_rapid():
 
 @test("50 concurrent POST requests with JSON bodies")
 def test_50_posts():
-    inputs = []
+    request_lines = []
     for i in range(50):
-        inputs.append(json.dumps({
+        request_lines.append(json.dumps({
             "code": "request", "id": str(i), "method": "POST",
             "url": f"{BASE}/echo",
             "body": {"index": i, "data": "x" * 100},
         }))
-    inputs.append(json.dumps({"code": "close"}))
-    out = run_afh(inputs, timeout_s=30)
+    out = run_afh_until_terminal(
+        request_lines,
+        expected_terminal=50,
+        timeout_s=120 if COVERAGE_MODE else 30,
+    )
     responses = find_by_code(out, "response")
     assert len(responses) == 50, f"expected 50, got {len(responses)}"
 
@@ -1553,7 +1683,7 @@ def test_tag_absent():
 def test_host_defaults():
     out = run_afh([
         json.dumps({"code": "config", "host_defaults": {
-            "127.0.0.1:18080": {"headers": {"Authorization": "Bearer host-token"}}
+            HOST_PORT: {"headers": {"Authorization": "Bearer host-token"}}
         }}),
         json.dumps({"code": "request", "id": "1", "method": "GET",
                      "url": f"{BASE}/headers"}),
@@ -1566,7 +1696,7 @@ def test_host_defaults():
     # config echo should show host_defaults
     configs = find_by_code(out, "config")
     assert configs, "no config"
-    assert "127.0.0.1:18080" in configs[0].get("host_defaults", {})
+    assert HOST_PORT in configs[0].get("host_defaults", {})
 
 
 @test("host_defaults don't leak to other hosts")
@@ -1684,15 +1814,18 @@ def test_content_length_bytes_download():
 
 @test("1000 rapid-fire requests (throughput)")
 def test_1000_rapid():
-    inputs = []
+    request_lines = []
     for i in range(1000):
-        inputs.append(json.dumps({
+        request_lines.append(json.dumps({
             "code": "request", "id": str(i), "method": "GET",
             "url": f"{BASE}/fast",
         }))
-    inputs.append(json.dumps({"code": "close"}))
     t0 = time.time()
-    out = run_afh(inputs, timeout_s=120)
+    out = run_afh_until_terminal(
+        request_lines,
+        expected_terminal=1000,
+        timeout_s=240 if COVERAGE_MODE else 120,
+    )
     elapsed = time.time() - t0
     responses = find_by_code(out, "response")
     errs = [o for o in find_by_code(out, "error") if o.get("id")]
@@ -1864,8 +1997,8 @@ def main():
     global passed, failed
 
     # Start test server
-    print("Starting test server on :18080...")
-    server = start_server(18080)
+    print(f"Starting test server on :{HTTP_PORT}...")
+    server = start_server(HTTP_PORT)
     time.sleep(0.3)
 
     # Verify server is running

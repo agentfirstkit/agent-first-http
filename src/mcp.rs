@@ -161,10 +161,16 @@ impl AfhMcp {
             .await;
         });
 
-        let output = rx
-            .recv()
-            .await
-            .ok_or_else(|| McpError::internal_error("no output received from request", None))?;
+        let output = loop {
+            let next = rx
+                .recv()
+                .await
+                .ok_or_else(|| McpError::internal_error("no output received from request", None))?;
+            match next {
+                Output::Response { .. } | Output::Error { .. } => break next,
+                _ => continue,
+            }
+        };
 
         // Strip id/tag from output for a cleaner MCP response
         let mut value = serde_json::to_value(&output)
@@ -173,8 +179,8 @@ impl AfhMcp {
             obj.remove("id");
             obj.remove("tag");
         }
-        let json = serde_json::to_string(&value)
-            .map_err(|e| McpError::internal_error(format!("serialize output: {e}"), None))?;
+        // Keep MCP payload schema aligned with CLI JSON mode.
+        let json = agent_first_data::output_json(&value);
 
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
@@ -237,9 +243,11 @@ impl AfhMcp {
                 ..ConfigPatch::default()
             };
 
-            let needs_rebuild = {
+            let (needs_rebuild, previous_config) = {
                 let mut config = self.app.config.write().await;
-                config.apply_update(patch)
+                let previous = config.clone();
+                let needs = config.apply_update(patch);
+                (needs, previous)
             };
 
             if needs_rebuild {
@@ -251,6 +259,9 @@ impl AfhMcp {
                         *client = new_client;
                     }
                     Err(e) => {
+                        drop(config);
+                        let mut config = self.app.config.write().await;
+                        *config = previous_config;
                         return Err(McpError::internal_error(
                             format!("rebuild client: {e}"),
                             None,
@@ -295,4 +306,192 @@ fn to_header_map(items: Option<Vec<NameValue>>) -> HashMap<String, Value> {
         }
     }
     headers
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::RuntimeConfig;
+    use rmcp::ServerHandler;
+
+    async fn test_app() -> Arc<App> {
+        let save_dir = std::env::temp_dir()
+            .join(format!("afhttp-mcp-test-{}", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let config = RuntimeConfig::new(save_dir);
+        let client = config.build_client().expect("build client");
+        let (tx, _rx) = mpsc::channel(16);
+        Arc::new(App {
+            config: RwLock::new(config),
+            client: RwLock::new(client),
+            writer: tx,
+            in_flight: RwLock::new(HashMap::new()),
+            ws_connections: RwLock::new(HashMap::new()),
+            request_count: AtomicU64::new(0),
+            start_time: Instant::now(),
+        })
+    }
+
+    #[test]
+    fn to_header_map_converts_none_and_nulls() {
+        let empty = to_header_map(None);
+        assert!(empty.is_empty());
+
+        let mapped = to_header_map(Some(vec![
+            NameValue {
+                name: "X-A".to_string(),
+                value: Some("1".to_string()),
+            },
+            NameValue {
+                name: "X-B".to_string(),
+                value: None,
+            },
+        ]));
+        assert_eq!(mapped.get("X-A"), Some(&Value::String("1".to_string())));
+        assert_eq!(mapped.get("X-B"), Some(&Value::Null));
+    }
+
+    #[tokio::test]
+    async fn get_info_exposes_tools_capability() {
+        let app = test_app().await;
+        let mcp = AfhMcp::new(app);
+        let info = mcp.get_info();
+        assert!(info.instructions.is_some());
+    }
+
+    #[tokio::test]
+    async fn http_config_get_and_update() {
+        let app = test_app().await;
+        let mcp = AfhMcp::new(app.clone());
+
+        let res = mcp
+            .http_config(Parameters(HttpConfigParams {
+                proxy: None,
+                timeout_connect_s: None,
+                timeout_idle_s: None,
+                retry: None,
+                response_redirect: None,
+                response_parse_json: None,
+                response_decompress: None,
+                tls_insecure: None,
+                request_concurrency_limit: None,
+                headers: None,
+            }))
+            .await;
+        assert!(res.is_ok());
+
+        let res = mcp
+            .http_config(Parameters(HttpConfigParams {
+                proxy: Some("http://127.0.0.1:8080".to_string()),
+                timeout_connect_s: Some(12),
+                timeout_idle_s: Some(34),
+                retry: Some(2),
+                response_redirect: Some(4),
+                response_parse_json: Some(false),
+                response_decompress: Some(false),
+                tls_insecure: Some(true),
+                request_concurrency_limit: Some(5),
+                headers: Some(vec![NameValue {
+                    name: "X-Test".to_string(),
+                    value: Some("yes".to_string()),
+                }]),
+            }))
+            .await;
+        assert!(res.is_ok());
+
+        let cfg = app.config.read().await;
+        assert_eq!(cfg.proxy.as_deref(), Some("http://127.0.0.1:8080"));
+        assert_eq!(cfg.timeout_connect_s, 12);
+        assert_eq!(cfg.request_concurrency_limit, 5);
+        assert_eq!(
+            cfg.defaults.headers.get("X-Test"),
+            Some(&Value::String("yes".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn http_request_returns_tool_result_for_invalid_url() {
+        let app = test_app().await;
+        let mcp = AfhMcp::new(app);
+        let res = mcp
+            .http_request(Parameters(HttpRequestParams {
+                method: "GET".to_string(),
+                url: "not-a-url".to_string(),
+                headers: None,
+                body: None,
+                body_base64: None,
+                timeout_idle_s: Some(1),
+                retry: Some(0),
+                response_redirect: Some(0),
+                response_parse_json: Some(true),
+                response_decompress: Some(true),
+            }))
+            .await;
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn http_config_rebuild_failure_rolls_back_config() {
+        let app = test_app().await;
+        let before = app.config.read().await.clone();
+        let mcp = AfhMcp::new(app.clone());
+
+        let res = mcp
+            .http_config(Parameters(HttpConfigParams {
+                proxy: Some("not a valid proxy".to_string()),
+                timeout_connect_s: None,
+                timeout_idle_s: None,
+                retry: None,
+                response_redirect: None,
+                response_parse_json: None,
+                response_decompress: None,
+                tls_insecure: None,
+                request_concurrency_limit: None,
+                headers: None,
+            }))
+            .await;
+
+        assert!(res.is_err());
+        let after = app.config.read().await.clone();
+        assert_eq!(after.proxy, before.proxy);
+        assert_eq!(after.timeout_connect_s, before.timeout_connect_s);
+        assert_eq!(
+            after.request_concurrency_limit,
+            before.request_concurrency_limit
+        );
+    }
+
+    #[tokio::test]
+    async fn http_request_skips_log_outputs_and_returns_terminal_result() {
+        let app = test_app().await;
+        {
+            let mut cfg = app.config.write().await;
+            cfg.log = vec!["request".to_string()];
+        }
+        let mcp = AfhMcp::new(app);
+
+        let res = mcp
+            .http_request(Parameters(HttpRequestParams {
+                method: "POST".to_string(),
+                url: "http://127.0.0.1:1".to_string(),
+                headers: None,
+                body: Some(serde_json::json!({"hello":"world"})),
+                body_base64: None,
+                timeout_idle_s: Some(1),
+                retry: Some(0),
+                response_redirect: Some(0),
+                response_parse_json: Some(true),
+                response_decompress: Some(true),
+            }))
+            .await
+            .expect("tool result");
+
+        let payload: Value = res.into_typed().expect("json output");
+        assert!(matches!(
+            payload.get("code").and_then(Value::as_str),
+            Some("response") | Some("error")
+        ));
+        assert_ne!(payload.get("code").and_then(Value::as_str), Some("log"));
+    }
 }

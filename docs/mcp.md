@@ -1,11 +1,11 @@
 # afhttp MCP Server
 
-`afhttp --mcp` starts an [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server over stdio. AI tools like Claude Desktop can then call HTTP requests directly through afhttp, getting structured JSON responses without writing curl commands.
+`afhttp --mode mcp` starts an [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server over stdio. AI tools like Claude Desktop can then call HTTP requests directly through afhttp, getting structured JSON responses without writing curl commands.
 
 ## Start the server
 
 ```bash
-afhttp --mcp
+afhttp --mode mcp
 ```
 
 The server communicates over stdin/stdout using the MCP JSON-RPC 2.0 protocol.
@@ -19,7 +19,7 @@ Add afhttp to your Claude Desktop MCP server config (`~/Library/Application Supp
   "mcpServers": {
     "afhttp": {
       "command": "afhttp",
-      "args": ["--mcp"]
+      "args": ["--mode", "mcp"]
     }
   }
 }
@@ -46,7 +46,7 @@ Make an HTTP request and return the structured afhttp response as a JSON string.
 | `response_parse_json` | boolean | no | Parse JSON response body (default: true) |
 | `response_decompress` | boolean | no | Auto-decompress gzip/brotli/deflate (default: true) |
 
-**Returns:** The afhttp response object as a JSON string. The `code` field is either `"response"` (success) or `"error"` (transport failure).
+**Returns:** A JSON string using the same envelope as CLI JSON output (`code`, `status`/`error_code`, `headers`, `body*`, `trace`), with `id`/`tag` omitted. `code` is `"response"` (transport success) or `"error"` (transport failure).
 
 **Example response:**
 ```json

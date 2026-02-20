@@ -24,3 +24,24 @@ pub async fn writer_task(mut rx: mpsc::Receiver<Output>) {
         let _ = out.flush();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn writer_task_drains_channel() {
+        let (tx, rx) = mpsc::channel(4);
+        tx.send(Output::Pong {
+            trace: crate::types::PongTrace {
+                uptime_s: 1,
+                requests_total: 2,
+                connections_active: 3,
+            },
+        })
+        .await
+        .expect("send");
+        drop(tx);
+        writer_task(rx).await;
+    }
+}

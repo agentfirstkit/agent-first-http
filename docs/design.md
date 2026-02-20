@@ -42,15 +42,15 @@ Default output: `response` or `error` — one JSON line, process exits. For stre
 
 This is how most agent tool calls work — fire a request, read the result, move on.
 
-### Pipe mode (`--pipe`)
+### Pipe mode (`--mode pipe`)
 
 For workflows that benefit from connection reuse, concurrent requests, or WebSocket:
 
 ```
-Agent ──→ afh --pipe (stdin JSONL ←→ stdout JSONL) ──→ Agent
+Agent ──→ afh --mode pipe (stdin JSONL ←→ stdout JSONL) ──→ Agent
 ```
 
-A long-lived process. The agent sends request/config/send/cancel/close commands as JSONL to stdin, reads responses from stdout. Connections stay open between requests. Multiple requests in-flight simultaneously. `close` message signals shutdown.
+A long-lived process. The agent sends request/config/send/cancel/close commands as JSONL to stdin, reads responses from stdout. Connections stay open between requests. Multiple requests in-flight simultaneously. `close` triggers shutdown by cancelling active work, waiting briefly for terminal events, then emitting a final `close` acknowledgement.
 
 ## Architecture
 
@@ -71,7 +71,7 @@ CLI mode:                           Pipe mode:
         stdout (JSON)                stdout ←──── Response Writer (JSONL)
 ```
 
-All output goes to stdout as JSON. No stderr (except fatal startup errors).
+All runtime protocol output goes to stdout as JSON. stderr is not a protocol channel.
 
 ### Shared core
 

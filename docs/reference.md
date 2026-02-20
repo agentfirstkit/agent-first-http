@@ -1,10 +1,11 @@
 # Agent-First HTTP — Protocol Reference
 
 Every stdin/stdout line is a JSON object with a `code` field that identifies its type.
+Runtime protocol/log events are emitted on stdout only; stderr is not a protocol channel.
 
 In **CLI mode** (`afhttp METHOD URL [flags]`), output is the same schema but `id` and `tag` fields are omitted. Use `--output yaml` or `--output plain` for human-readable output (server response body is never modified). See [cli.md](cli.md) for CLI usage.
 
-In **pipe mode** (`afhttp --pipe`), all fields including `id` and `tag` are present.
+In **pipe mode** (`afhttp --mode pipe`), all fields including `id` and `tag` are present.
 
 ## Input (stdin)
 
@@ -98,7 +99,7 @@ Applied to every request; overridable per-request via `options`.
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `headers` | `{"User-Agent":"afhttp/0.1.0"}` | Merged into every request. `null` value removes a default header. |
+| `headers` | `{"User-Agent":"afhttp/<version>"}` | Merged into every request. `null` value removes a default header. |
 | `timeout_idle_s` | 30 | No-data timeout — abort if no bytes received for this many seconds |
 | `retry` | 0 | Retry attempts for retryable transport errors |
 | `response_redirect` | 10 | Maximum redirects to follow (0 to disable) |
@@ -122,9 +123,19 @@ Merge order for every request: global `defaults` → `host_defaults[host]` → p
 | `send` | `id`, `data` or `data_base64` | Send a message on an open WebSocket. `data`: object/array → JSON text frame, string → raw text frame. `data_base64` → binary frame. Mutually exclusive. |
 | `cancel` | `id` | Cancel an in-flight HTTP request (→ `error` with `cancelled`) or close a WebSocket (→ `chunk_end`). |
 | `ping` | — | Health check. Returns `pong`. |
-| `close` | — | Graceful shutdown — drains in-flight requests (up to 5s), then exits. |
+| `close` | — | Graceful shutdown — cancels in-flight work, waits up to 5s, emits terminal events, then exits. |
 
 ## Output (stdout)
+
+### Agent Consumption Contract
+
+For each request `id`, consume events as a finite state machine:
+
+- HTTP buffered: `response` **or** `error` (exactly one terminal event).
+- Chunked/download/WebSocket: `chunk_start` → zero or more `chunk_data`/`log` → `chunk_end` **or** `error`.
+- `log` events are non-terminal and may appear between lifecycle events.
+- `id` values are unique among active requests/connections; duplicate active `id` returns `error_code: "invalid_request"` immediately.
+- On `close`, afhttp cancels active work and attempts to emit terminal events for any remaining `id` values before process exit.
 
 ### Response codes
 
@@ -192,6 +203,7 @@ Body selection rules (when `response_parse_json: true`):
 | `cancelled` | false | Cancelled via `cancel` command |
 | `invalid_request` | false | Malformed JSON, missing field, or duplicate `id` |
 | `invalid_response` | false | Server protocol violation (e.g. non-ASCII header bytes) |
+| `internal_error` | false | Internal serialization/output failure (rare) |
 
 Retryable errors are automatically retried up to `retry` with exponential backoff: delay for attempt N = `retry_base_delay_ms × 2^(N-1)`.
 
@@ -247,7 +259,7 @@ Retryable errors are automatically retried up to `retry` with exponential backof
 All diagnostic output uses `code: "log"` with an `event` field identifying the category. Emitted only when the category is enabled in `config.log`. In CLI mode, use `--log <categories>` or `--verbose` to enable.
 
 ```json
-{"code":"log","event":"startup","version":"0.1.0","argv":["afhttp","--pipe","--log","startup"],"config":{...}}
+{"code":"log","event":"startup","version":"<version>","argv":["afhttp","--mode","pipe","--log","startup"],"config":{...}}
 {"code":"log","event":"progress","id":"dl-1","received_bytes":10485760,"total_bytes":104857600,"percent":10,"eta_s":27}
 {"code":"log","event":"request","id":"req-1","implicit_headers":{"Content-Type":"application/json","Accept-Encoding":"gzip, deflate, br"}}
 {"code":"log","event":"retry","id":"req-3","host":"api.example.com","reason":"connection_reset","attempt":1,"delay_ms":100}
