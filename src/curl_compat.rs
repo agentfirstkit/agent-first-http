@@ -1,7 +1,7 @@
 use crate::cli::{CliRequest, Mode};
 use crate::types::*;
 /// curl compatibility mode: parse a subset of curl command-line flags and
-/// return a `Mode::Cli(...)` equivalent to what afh would produce natively.
+/// return a `Mode::Cli(...)` equivalent to what afhttp would produce natively.
 ///
 /// Supported flags: see docs/cli.md for the complete table.
 use agent_first_data::OutputFormat;
@@ -193,7 +193,7 @@ pub fn parse_curl_args(args: &[String]) -> Mode {
                 "verbose" => {
                     verbose = true;
                 }
-                // Intentional no-ops: afh already behaves like these flags
+                // Intentional no-ops: afhttp already behaves like these flags
                 "silent" | "compressed" | "fail" | "fail-with-body" | "show-error" | "globoff"
                 | "disable-eprt" | "ipv4" | "ipv6" => {}
                 "continue-at" => {

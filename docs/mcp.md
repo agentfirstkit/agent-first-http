@@ -85,7 +85,7 @@ Get or update afhttp connection defaults. Call with no arguments to view the cur
 | `response_decompress` | boolean | Default auto-decompress |
 | `tls_insecure` | boolean | Skip TLS certificate verification |
 | `request_concurrency_limit` | integer | Max concurrent in-flight requests (0 = unlimited) |
-| `headers` | array | Default request headers as `[{\"name\":\"Header-Name\",\"value\":\"Header Value\"}]` (use `value: null` to remove) |
+| `headers_for_any_hosts` | array | Global default headers (all hosts) as `[{\"name\":\"Header-Name\",\"value\":\"Header Value\"}]` (use `value: null` to remove) |
 
 **Returns:** Current `RuntimeConfig` as a JSON string.
 
@@ -99,7 +99,7 @@ Claude will call `http_request` with `{"method": "GET", "url": "https://api.gith
 
 > "Set the Authorization header to Bearer sk-xxx for all requests"
 
-Claude will call `http_config` with `{"headers":[{"name":"Authorization","value":"Bearer sk-xxx"}]}`.
+Claude will call `http_config` with `{"headers_for_any_hosts":[{"name":"Authorization","value":"Bearer sk-xxx"}]}`.
 
 > "POST this JSON to the endpoint"
 

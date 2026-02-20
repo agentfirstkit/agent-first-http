@@ -1,5 +1,5 @@
 """
-Test HTTP server for afh stress tests.
+Test HTTP server for afhttp stress tests.
 Endpoints with configurable size, delay, streaming, redirects, errors.
 """
 

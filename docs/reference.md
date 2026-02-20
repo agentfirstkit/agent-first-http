@@ -18,7 +18,7 @@ In **pipe mode** (`afhttp --mode pipe`), all fields including `id` and `tag` are
 | `tag` | no | Opaque string echoed in every output for this request — useful for grouping or correlation. Not interpreted by `afhttp`. |
 | `method` | yes | `GET`, `POST`, `PUT`, `DELETE`, `PATCH`, `HEAD`, `OPTIONS` |
 | `url` | yes | Full URL including scheme and host |
-| `headers` | no | Merged with `defaults.headers` — request wins on key conflict, `null` value removes a default |
+| `headers` | no | Merged with `defaults.headers_for_any_hosts` — request wins on key conflict, `null` value removes a default |
 | `body` | no | Request body — object/array/number/bool → serialized as JSON, sets `Content-Type: application/json`; string → raw bytes, no implicit Content-Type |
 | `body_base64` | no | Base64-encoded binary body — no implicit Content-Type; set explicitly via `headers` if needed |
 | `body_file` | no | Path to file used as request body — no implicit Content-Type; set explicitly via `headers` if needed |
@@ -67,13 +67,13 @@ Array of `{"name": "...", "value": "..."}` objects. `afhttp` percent-encodes bot
 
 ### `config`
 
-Partial update — only provided fields change. Deep-merged for nested objects (`defaults.headers`, `host_defaults`). Echoes full config after applying.
+Partial update — only provided fields change. Deep-merged for nested objects (`defaults.headers_for_any_hosts`, `host_defaults`). Echoes full config after applying.
 
 #### Global config fields
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `response_save_dir` | `<system-temp>/afh/{uuid}` | Directory for auto-saved response bodies (uses OS temp dir; e.g. `/tmp/...` on macOS/Linux, `%TEMP%\\...` on Windows). Must be writable. |
+| `response_save_dir` | `<system-temp>/afhttp/{uuid}` | Directory for auto-saved response bodies (uses OS temp dir; e.g. `/tmp/...` on macOS/Linux, `%TEMP%\\...` on Windows). Must be writable. |
 | `response_save_above_bytes` | 10485760 | Responses larger than this are auto-saved to `response_save_dir/{id}` and returned as `body_file`. |
 | `request_concurrency_limit` | 0 | Max concurrent in-flight requests (0 = unlimited). New requests above the limit return `error_code: "overloaded"`. |
 | `timeout_connect_s` | 10 | TCP+TLS handshake timeout. Triggers client rebuild. |
@@ -99,7 +99,7 @@ Applied to every request; overridable per-request via `options`.
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `headers` | `{"User-Agent":"afhttp/<version>"}` | Merged into every request. `null` value removes a default header. |
+| `headers_for_any_hosts` | `{"User-Agent":"afhttp/<version>"}` | Merged into every request. `null` value removes a default header. **Use only for non-sensitive public headers** (for example `User-Agent`, `Accept`). Do not place credentials or tokens here. |
 | `timeout_idle_s` | 30 | No-data timeout — abort if no bytes received for this many seconds |
 | `retry` | 0 | Retry attempts for retryable transport errors |
 | `response_redirect` | 10 | Maximum redirects to follow (0 to disable) |
@@ -115,6 +115,8 @@ Applied to every request; overridable per-request via `options`.
 ```
 
 Merge order for every request: global `defaults` → `host_defaults[host]` → per-request `headers`.
+
+Credential headers (for example `Authorization`, `x-api-key`, cookies) must be configured in `host_defaults`, never in `defaults.headers_for_any_hosts`.
 
 ### Other input commands
 

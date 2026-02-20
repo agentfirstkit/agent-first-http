@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-WebSocket correctness tests for afh.
-Starts an HTTP test server and a WebSocket test server, pipes JSONL into afh.
+WebSocket correctness tests for afhttp.
+Starts an HTTP test server and a WebSocket test server, pipes JSONL into afhttp.
 
 Requires: pip install websockets
 """
@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from server import start_server
 from ws_server import WS_BASE, WS_PORT, start_ws_server
 
-AFH = os.environ.get("AFH_BIN") or os.path.join(os.path.dirname(__file__), "..", "target", "debug", "afhttp")
+AFHTTP = os.environ.get("AFHTTP_BIN") or os.path.join(os.path.dirname(__file__), "..", "target", "debug", "afhttp")
 HTTP_PORT = int(os.environ.get("AFH_TEST_HTTP_PORT", "18080"))
 HTTP_BASE = f"http://127.0.0.1:{HTTP_PORT}"
 
@@ -28,10 +28,10 @@ HTTP_BASE = f"http://127.0.0.1:{HTTP_PORT}"
 
 
 def run_afh(inputs, timeout_s=30):
-    """Send JSONL lines to afh stdin (all at once), collect parsed output."""
+    """Send JSONL lines to afhttp stdin (all at once), collect parsed output."""
     payload = "\n".join(inputs) + "\n"
     proc = subprocess.run(
-        [AFH, "--mode", "pipe"],
+        [AFHTTP, "--mode", "pipe"],
         input=payload,
         capture_output=True,
         text=True,
@@ -48,7 +48,7 @@ def run_afh_interactive(inputs_with_delays, timeout_s=30):
     inputs_with_delays: list of (sleep_seconds_before_write, json_line) tuples.
     """
     proc = subprocess.Popen(
-        [AFH, "--mode", "pipe"],
+        [AFHTTP, "--mode", "pipe"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -334,7 +334,7 @@ def test_ws_and_http():
     assert ws_end, "no ws chunk_end"
 
 
-@test("shutdown: afh close command drains open WebSocket connections")
+@test("shutdown: afhttp close command drains open WebSocket connections")
 def test_ws_shutdown_drains():
     # Echo server keeps connection open; close command should flush it
     out = run_afh_interactive([
@@ -398,7 +398,7 @@ def test_ws_tls_warning_log_gated():
 
 
 def main():
-    print("Building afh...")
+    print("Building afhttp...")
     build = subprocess.run(
         ["cargo", "build"],
         cwd=os.path.join(os.path.dirname(__file__), ".."),

@@ -108,7 +108,7 @@ pub struct UrlencodedPart {
 
 #[derive(Deserialize, Default)]
 pub struct RequestDefaultsPartial {
-    pub headers: Option<HashMap<String, Value>>,
+    pub headers_for_any_hosts: Option<HashMap<String, Value>>,
     pub timeout_idle_s: Option<u64>,
     pub retry: Option<u32>,
     pub response_redirect: Option<u32>,
@@ -254,7 +254,7 @@ pub struct RuntimeConfig {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct RequestDefaults {
     #[serde(default)]
-    pub headers: HashMap<String, Value>,
+    pub headers_for_any_hosts: HashMap<String, Value>,
     pub timeout_idle_s: u64,
     pub retry: u32,
     pub response_redirect: u32,

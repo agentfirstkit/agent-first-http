@@ -8,8 +8,8 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 impl RuntimeConfig {
     pub fn new(download_dir: String) -> Self {
-        let mut headers = HashMap::new();
-        headers.insert(
+        let mut headers_for_any_hosts = HashMap::new();
+        headers_for_any_hosts.insert(
             "User-Agent".to_string(),
             Value::String(format!("afhttp/{VERSION}")),
         );
@@ -32,7 +32,7 @@ impl RuntimeConfig {
             },
             log: vec![],
             defaults: RequestDefaults {
-                headers,
+                headers_for_any_hosts,
                 timeout_idle_s: 30,
                 retry: 0,
                 response_redirect: 10,
@@ -123,13 +123,13 @@ impl RuntimeConfig {
         }
 
         if let Some(d) = patch.defaults {
-            // Deep merge headers: key-by-key, null removes
-            if let Some(new_headers) = d.headers {
+            // Deep merge global default headers (for any host): key-by-key, null removes
+            if let Some(new_headers) = d.headers_for_any_hosts {
                 for (k, v) in new_headers {
                     if v.is_null() {
-                        self.defaults.headers.remove(&k);
+                        self.defaults.headers_for_any_hosts.remove(&k);
                     } else {
-                        self.defaults.headers.insert(k, v);
+                        self.defaults.headers_for_any_hosts.insert(k, v);
                     }
                 }
             }
@@ -233,14 +233,15 @@ impl RuntimeConfig {
         }
     }
 
-    /// Merge config default headers + host-specific headers + per-request headers.
-    /// Merge order: defaults → host_defaults[host] → request headers. Null removes.
+    /// Merge global default headers + host-specific headers + per-request headers.
+    /// Merge order: defaults.headers_for_any_hosts → host_defaults[host] → request headers.
+    /// Null removes.
     pub fn merged_headers(
         &self,
         request_headers: &HashMap<String, Value>,
         host: Option<&str>,
     ) -> Result<HeaderMap, String> {
-        let mut merged: HashMap<String, Value> = self.defaults.headers.clone();
+        let mut merged: HashMap<String, Value> = self.defaults.headers_for_any_hosts.clone();
 
         // Layer 2: host-specific defaults
         if let Some(host) = host {
@@ -443,7 +444,7 @@ mod tests {
         let cfg = RuntimeConfig::new("/tmp/afhttp-test".to_string());
         assert_eq!(cfg.response_save_dir, "/tmp/afhttp-test");
         assert_eq!(
-            cfg.defaults.headers.get("User-Agent"),
+            cfg.defaults.headers_for_any_hosts.get("User-Agent"),
             Some(&Value::String(format!("afhttp/{VERSION}")))
         );
         assert_eq!(cfg.defaults.timeout_idle_s, 30);
@@ -473,7 +474,7 @@ mod tests {
             pool_idle_timeout_s: Some(22),
             proxy: Some("http://127.0.0.1:8080".to_string()),
             defaults: Some(RequestDefaultsPartial {
-                headers: Some(defaults_headers),
+                headers_for_any_hosts: Some(defaults_headers),
                 timeout_idle_s: Some(9),
                 retry_on_status: Some(vec![429, 503]),
                 ..RequestDefaultsPartial::default()
@@ -496,10 +497,13 @@ mod tests {
         assert_eq!(cfg.defaults.timeout_idle_s, 9);
         assert_eq!(cfg.defaults.retry_on_status, vec![429, 503]);
         assert_eq!(
-            cfg.defaults.headers.get("X-One"),
+            cfg.defaults.headers_for_any_hosts.get("X-One"),
             Some(&Value::String("1".into()))
         );
-        assert!(!cfg.defaults.headers.contains_key("User-Agent"));
+        assert!(!cfg
+            .defaults
+            .headers_for_any_hosts
+            .contains_key("User-Agent"));
         assert_eq!(
             cfg.host_defaults
                 .get("example.com")
@@ -577,7 +581,7 @@ mod tests {
     #[test]
     fn merged_headers_applies_layers_and_null_removal() {
         let mut cfg = RuntimeConfig::new("/tmp/afhttp-test".to_string());
-        cfg.defaults.headers.insert(
+        cfg.defaults.headers_for_any_hosts.insert(
             "X-Default".to_string(),
             Value::String("default".to_string()),
         );

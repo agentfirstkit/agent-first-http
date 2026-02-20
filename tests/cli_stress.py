@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-CLI mode correctness tests for afh.
-Starts a local test server, runs afh CLI commands, validates JSON output.
+CLI mode correctness tests for afhttp.
+Starts a local test server, runs afhttp CLI commands, validates JSON output.
 """
 
 import json
@@ -15,7 +15,7 @@ import tempfile
 sys.path.insert(0, os.path.dirname(__file__))
 from server import start_server
 
-AFH = os.environ.get("AFH_BIN") or os.path.join(os.path.dirname(__file__), "..", "target", "debug", "afhttp")
+AFHTTP = os.environ.get("AFHTTP_BIN") or os.path.join(os.path.dirname(__file__), "..", "target", "debug", "afhttp")
 HTTP_PORT = int(os.environ.get("AFH_TEST_HTTP_PORT", "18080"))
 BASE = f"http://127.0.0.1:{HTTP_PORT}"
 _AFH_VERSION = os.environ.get("AFH_VERSION")
@@ -26,9 +26,9 @@ _AFH_VERSION = os.environ.get("AFH_VERSION")
 
 
 def run_cli(args: list[str], timeout_s=30, stdin_data=None) -> tuple[list[dict], int]:
-    """Run afh with CLI args, return (parsed_output_lines, exit_code)."""
+    """Run afhttp with CLI args, return (parsed_output_lines, exit_code)."""
     proc = subprocess.run(
-        [AFH] + args,
+        [AFHTTP] + args,
         input=stdin_data,
         capture_output=True,
         text=True,
@@ -51,7 +51,7 @@ def afh_version() -> str:
     global _AFH_VERSION
     if _AFH_VERSION:
         return _AFH_VERSION
-    proc = subprocess.run([AFH, "--version"], capture_output=True, text=True, timeout=5)
+    proc = subprocess.run([AFHTTP, "--version"], capture_output=True, text=True, timeout=5)
     if proc.returncode != 0:
         raise RuntimeError(f"afhttp --version failed: {proc.stderr.strip()}")
     tokens = proc.stdout.strip().split()
@@ -185,13 +185,13 @@ def test_exit_1():
 
 @test("exit 2 on no arguments")
 def test_exit_2_no_args():
-    proc = subprocess.run([AFH], capture_output=True, text=True, timeout=5)
+    proc = subprocess.run([AFHTTP], capture_output=True, text=True, timeout=5)
     assert proc.returncode == 2, f"exit code: {proc.returncode}"
 
 
 @test("exit 2 on missing URL")
 def test_exit_2_no_url():
-    proc = subprocess.run([AFH, "GET"], capture_output=True, text=True, timeout=5)
+    proc = subprocess.run([AFHTTP, "GET"], capture_output=True, text=True, timeout=5)
     assert proc.returncode == 2, f"exit code: {proc.returncode}"
 
 
@@ -514,7 +514,7 @@ def test_max_inline_bytes():
 
 @test("--response-save-dir overrides auto-save directory")
 def test_response_save_dir():
-    save_dir = tempfile.mkdtemp(prefix="afh-test-savedir-")
+    save_dir = tempfile.mkdtemp(prefix="afhttp-test-savedir-")
     try:
         out, code = run_cli(["GET", f"{BASE}/size/5000",
                               "--response-save-above-bytes", "1000",
@@ -602,7 +602,7 @@ def test_chunked_order():
 
 @test("--response-save-file saves to file")
 def test_save_to():
-    save_path = temp_path("afh-cli-test", ".bin")
+    save_path = temp_path("afhttp-cli-test", ".bin")
     try:
         out, code = run_cli(["GET", f"{BASE}/size/5000",
                               "--response-save-file", save_path])
@@ -622,7 +622,7 @@ def test_save_to():
 
 @test("--log progress with --progress-bytes emits progress log events")
 def test_download_progress():
-    save_path = temp_path("afh-cli-progress", ".bin")
+    save_path = temp_path("afhttp-cli-progress", ".bin")
     try:
         out, code = run_cli(["GET", f"{BASE}/size/10000",
                               "--response-save-file", save_path,
@@ -664,7 +664,7 @@ def test_connect_refused():
     assert e[0]["retryable"] is True
 
 
-@test("error has structured AFD fields")
+@test("error has structured Agent-First Data fields")
 def test_error_structure():
     out, _ = run_cli(["GET", "http://127.0.0.1:19999/fail"])
     e = find_by_code(out, "error")
@@ -732,14 +732,14 @@ def test_method_case():
 
 @test("--help prints help and exits 0")
 def test_help():
-    proc = subprocess.run([AFH, "--help"], capture_output=True, text=True, timeout=5)
+    proc = subprocess.run([AFHTTP, "--help"], capture_output=True, text=True, timeout=5)
     assert proc.returncode == 0
     assert "Agent-First HTTP" in proc.stdout
 
 
 @test("--version prints version and exits 0")
 def test_version():
-    proc = subprocess.run([AFH, "--version"], capture_output=True, text=True, timeout=5)
+    proc = subprocess.run([AFHTTP, "--version"], capture_output=True, text=True, timeout=5)
     assert proc.returncode == 0
     assert afh_version() in proc.stdout
 
@@ -917,7 +917,7 @@ def test_output_json():
 @test("--output yaml produces YAML output")
 def test_output_yaml():
     proc = subprocess.run(
-        [AFH, "GET", f"{BASE}/fast", "--output", "yaml"],
+        [AFHTTP, "GET", f"{BASE}/fast", "--output", "yaml"],
         capture_output=True, text=True, timeout=10,
     )
     assert proc.returncode == 0
@@ -927,7 +927,7 @@ def test_output_yaml():
 @test("--output plain produces logfmt output")
 def test_output_plain():
     proc = subprocess.run(
-        [AFH, "GET", f"{BASE}/fast", "--output", "plain"],
+        [AFHTTP, "GET", f"{BASE}/fast", "--output", "plain"],
         capture_output=True, text=True, timeout=10,
     )
     assert proc.returncode == 0
@@ -937,7 +937,7 @@ def test_output_plain():
 @test("--output yaml preserves server body")
 def test_output_yaml_body():
     proc = subprocess.run(
-        [AFH, "GET", f"{BASE}/fast", "--output", "yaml"],
+        [AFHTTP, "GET", f"{BASE}/fast", "--output", "yaml"],
         capture_output=True, text=True, timeout=10,
     )
     assert proc.returncode == 0
@@ -947,7 +947,7 @@ def test_output_yaml_body():
 @test("--output invalid rejected")
 def test_output_invalid():
     proc = subprocess.run(
-        [AFH, "GET", f"{BASE}/fast", "--output", "xml"],
+        [AFHTTP, "GET", f"{BASE}/fast", "--output", "xml"],
         capture_output=True, text=True, timeout=10,
     )
     assert proc.returncode == 2, f"expected exit 2, got {proc.returncode}"
@@ -1049,8 +1049,8 @@ def main():
         sys.exit(1)
     print("Test server ready.\n")
 
-    if not os.path.exists(AFH):
-        print(f"FATAL: afh binary not found at {AFH}")
+    if not os.path.exists(AFHTTP):
+        print(f"FATAL: afhttp binary not found at {AFHTTP}")
         print("Run: cargo build")
         sys.exit(1)
 

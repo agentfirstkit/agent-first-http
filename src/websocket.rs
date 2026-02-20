@@ -23,7 +23,7 @@ pub async fn open(
     let start = Instant::now();
 
     // Warn when TLS settings from config are present — tokio-tungstenite uses its own
-    // TLS stack (rustls + native roots) and does not inherit afh's reqwest TLS config.
+    // TLS stack (rustls + native roots) and does not inherit afhttp's reqwest TLS config.
     // This warning is treated as a `request` log category event.
     {
         let config = app.config.read().await;

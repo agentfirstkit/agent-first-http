@@ -15,7 +15,7 @@ fn run_script(root: &Path, script: &str, afh_bin: &str) {
     let output = Command::new("python3")
         .arg(script)
         .current_dir(root)
-        .env("AFH_BIN", afh_bin)
+        .env("AFHTTP_BIN", afh_bin)
         .env("AFH_VERSION", env!("CARGO_PKG_VERSION"))
         .env("AFH_COVERAGE_MODE", "1")
         .env("AFH_TEST_HTTP_PORT", &http_port)

@@ -10,7 +10,7 @@ Modes (single entrypoint):
 - `--mode mcp`
 - `--mode curl`
 
-`curl` opens a new TCP+TLS connection for every request. An agent making 20 calls to the same API pays 20 handshakes — on a 200ms RTT link, that's over 4 seconds of pure overhead before a single byte of useful work. `afhttp` is a long-lived process: connections stay open, concurrent requests share them, and the agent never thinks about transport.
+The key contract for agents is protocol determinism: `stdout` is always structured JSON, and failures are always structured `{"code":"error",...}` events with stable `error_code` values. No human-only text parsing, no mixed output channels, no ad-hoc error shapes.
 
 ## CLI Mode
 
@@ -27,7 +27,15 @@ afhttp GET https://api.example.com/data --header "Authorization: Bearer sk-xxx"
 # {"code":"response","status":200,...}
 ```
 
-Exit codes: `0` = got HTTP response (any status), `1` = transport error, `2` = invalid arguments.
+Structured error output examples:
+
+```json
+{"code":"error","error_code":"connect_timeout","error":"request timed out after 30s","retryable":true,"trace":{"duration_ms":30012}}
+```
+
+```json
+{"code":"error","error_code":"invalid_request","error":"invalid --output format 'xml': expected json, yaml, or plain","retryable":false,"trace":{"duration_ms":0}}
+```
 
 ## Pipe Mode
 
@@ -35,17 +43,17 @@ For long-lived sessions with connection reuse, concurrent requests, and WebSocke
 
 ```bash
 afhttp --mode pipe <<'EOF'
-{"code":"config","defaults":{"headers":{"x-api-key":"sk-ant-xxx","anthropic-version":"2023-06-01"}}}
-{"code":"request","id":"models","method":"GET","url":"https://api.anthropic.com/v1/models"}
-{"code":"request","id":"usage","method":"GET","url":"https://api.anthropic.com/v1/usage"}
-{"code":"request","id":"chat","method":"POST","url":"https://api.anthropic.com/v1/messages","body":{"model":"claude-opus-4-6","max_tokens":256,"messages":[{"role":"user","content":"Hello"}],"stream":true},"options":{"chunked":true,"chunked_delimiter":"\n\n"}}
+{"code":"config","host_defaults":{"api.example.com":{"headers":{"x-api-key":"sk-xxx","api-version":"2023-06-01"}}}}
+{"code":"request","id":"models","method":"GET","url":"https://api.example.com/v1/models"}
+{"code":"request","id":"usage","method":"GET","url":"https://api.example.com/v1/usage"}
+{"code":"request","id":"chat","method":"POST","url":"https://api.example.com/v1/messages","body":{"model":"general-chat-model","max_tokens":256,"messages":[{"role":"user","content":"Hello"}],"stream":true},"options":{"chunked":true,"chunked_delimiter":"\n\n"}}
 EOF
 ```
 
 **output:**
 ```json
-{"code":"config","defaults":{"headers":{"x-api-key":"[redacted]","anthropic-version":"2023-06-01"}},...}
-{"code":"response","id":"models","status":200,"body":{"data":[{"id":"claude-opus-4-6",...}]},"trace":{"duration_ms":92,"http_version":"h2","redirects":0,"remote_addr":"13.32.4.10"}}
+{"code":"config","host_defaults":{"api.example.com":{"headers":{"x-api-key":"[redacted]","api-version":"2023-06-01"}}},...}
+{"code":"response","id":"models","status":200,"body":{"data":[{"id":"general-chat-model",...}]},"trace":{"duration_ms":92,"http_version":"h2","redirects":0,"remote_addr":"13.32.4.10"}}
 {"code":"response","id":"usage","status":403,"body":{"error":{"type":"permission_error","message":"Your API key does not have permission"}},"trace":{"duration_ms":87,"http_version":"h2","redirects":0}}
 {"code":"chunk_start","id":"chat","status":200,"headers":{"content-type":"text/event-stream"}}
 {"code":"chunk_data","id":"chat","data":"event: content_block_delta\ndata: {\"delta\":{\"text\":\"Hello\"}}"}
@@ -57,7 +65,7 @@ EOF
 What just happened:
 
 - **One bash call** — the heredoc sends all requests into one `afhttp` process; afhttp exits when stdin closes
-- **Auth set once** — the `config` header applies to every subsequent request; nothing is repeated
+- **Auth set once per host** — `host_defaults` applies auth only to matching host; credentials do not leak to other domains
 - **Three requests fired without waiting** — `models`, `usage`, and `chat` all in-flight simultaneously
 - **Connection reuse is automatic** — requests to the same host can reuse pooled connections without extra agent logic
 - **Out-of-order responses** — `usage` arrived before `chat` finished; the agent matches by `id`

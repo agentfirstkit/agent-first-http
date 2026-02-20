@@ -1,5 +1,5 @@
 """
-WebSocket test server for afh WebSocket tests.
+WebSocket test server for afhttp WebSocket tests.
 Requires: pip install websockets  (>=10)
 """
 

@@ -1097,8 +1097,8 @@ mod tests {
         assert_eq!(find_delimiter(b"a", b"aa"), None);
         assert_eq!(sanitize_file_name("a/b:c"), "a_b_c");
         assert_eq!(sanitize_file_name(""), "request");
-        let p = auto_download_path("/tmp/afh", "a/b");
-        assert!(p.ends_with("/tmp/afh/a_b"));
+        let p = auto_download_path("/tmp/afhttpttp", "a/b");
+        assert!(p.ends_with("/tmp/afhttpttp/a_b"));
         assert_eq!(sidecar_path_for("/tmp/x.bin"), "/tmp/x.bin.json");
     }
 }
