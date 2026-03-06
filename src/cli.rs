@@ -2,6 +2,7 @@ use crate::config::VERSION;
 use crate::types::*;
 use agent_first_data::{
     build_cli_error, cli_output, cli_parse_log_filters, cli_parse_output, OutputFormat,
+    RedactionPolicy,
 };
 use clap::{error::ErrorKind, Parser, ValueEnum};
 use serde_json::Value;
@@ -470,13 +471,18 @@ pub fn write_cli_output(output: &Output, format: OutputFormat) {
         obj.remove("tag");
     }
 
-    if !matches!(format, OutputFormat::Json) {
+    let formatted = if matches!(format, OutputFormat::Json) {
+        match json_redaction_policy_for_output(output) {
+            Some(policy) => agent_first_data::output_json_with(&value, policy),
+            None => agent_first_data::output_json(&value),
+        }
+    } else {
         // Protect server body fields from Agent-First Data suffix processing.
         // Non-string body (parsed JSON objects) is converted to a JSON string
         // so formatters treat them as opaque data.
         protect_server_body(&mut value);
-    }
-    let formatted = cli_output(&value, format);
+        cli_output(&value, format)
+    };
 
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
@@ -485,6 +491,17 @@ pub fn write_cli_output(output: &Output, format: OutputFormat) {
         let _ = out.write_all(b"\n");
     }
     let _ = out.flush();
+}
+
+fn json_redaction_policy_for_output(output: &Output) -> Option<RedactionPolicy> {
+    match output {
+        // Keep server payload raw in response body; only trace metadata is redacted.
+        Output::Response { .. } => Some(RedactionPolicy::RedactionTraceOnly),
+        // Stream chunks are opaque server data.
+        Output::ChunkData { .. } => Some(RedactionPolicy::RedactionNone),
+        // Other events keep existing safe default.
+        _ => None,
+    }
 }
 
 /// Protect server-originated body fields from Agent-First Data suffix processing.
@@ -853,6 +870,34 @@ mod tests {
         );
         assert_eq!(value.get("data"), Some(&Value::String("[1,2]".to_string())));
         assert_eq!(value.get("other"), Some(&Value::Bool(true)));
+    }
+
+    #[test]
+    fn json_redaction_policy_for_response_and_log() {
+        let resp = Output::Response {
+            id: "1".to_string(),
+            tag: None,
+            status: 200,
+            headers: HashMap::new(),
+            body: Some(serde_json::json!({"api_key_secret":"sk-live-123"})),
+            body_base64: None,
+            body_file: None,
+            body_parse_failed: false,
+            trace: Trace::error_only(1),
+        };
+        assert_eq!(
+            json_redaction_policy_for_output(&resp),
+            Some(RedactionPolicy::RedactionTraceOnly)
+        );
+
+        let log = Output::Log {
+            event: "startup".to_string(),
+            fields: HashMap::from([(
+                "api_key_secret".to_string(),
+                Value::String("sk-live-123".to_string()),
+            )]),
+        };
+        assert_eq!(json_redaction_policy_for_output(&log), None);
     }
 
     #[test]

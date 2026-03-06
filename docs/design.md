@@ -103,7 +103,7 @@ Every error carries `error_code` (machine-readable, stable), `error` (human-read
 
 ### Secret fields are redacted in config echo
 
-All stdout lines go through `agent_first_data::output_json()` for consistent single-line JSON formatting. For config output (`startup`, `config`), this also automatically redacts fields whose names end in `_secret` — so `key_pem_secret` never appears in plain text in the config echo.
+All stdout lines go through `agent_first_data::output_json_with()` for consistent single-line JSON formatting with explicit redaction policy. Config/log output (`startup`, `config`, `log`) uses full `_secret` redaction so `key_pem_secret` never appears in plain text in config echo.
 
 Server response data (response bodies, headers, WebSocket messages) is passed through unmodified. Redaction does not apply to server-originated content.
 
@@ -141,7 +141,7 @@ Boolean flags that default to false are bare flags (`--verbose`, `--chunked`, `-
 
 CLI mode supports three output formats via `--output json|yaml|plain`:
 
-- **json** (default): Single-line JSON via `agent_first_data::output_json()`. `_secret` fields auto-redacted.
+- **json** (default): Single-line JSON via `agent_first_data::output_json_with()`. Config/log fields use full `_secret` redaction; server response payload fields remain raw.
 - **yaml**: Multi-line YAML via `agent_first_data::output_yaml()`. Field name suffixes stripped (`duration_ms` → `duration`), values formatted (`10485760` → `"10.0MB"`).
 - **plain**: Logfmt via `agent_first_data::output_plain()`. Same suffix stripping and value formatting as YAML but single-line.
 
