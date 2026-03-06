@@ -1,28 +1,25 @@
 {
   "id": "agent-first-http",
+  "version": "0.3.1",
   "name": "Agent-First HTTP",
   "domain": "cmn.dev",
-  "synopsis": "Persistent HTTP client for AI agents — JSONL in, JSONL out, connections managed transparently so agents never think about transport",
+  "synopsis": "Persistent HTTP client for AI agents \u2014 JSONL in, JSONL out, connections managed transparently so agents never think about transport",
   "intent": [
-    "Give AI agents a persistent HTTP client that maintains connection pools per host, reuses TCP+TLS connections across requests, and multiplexes concurrent streams over HTTP/2 — the agent writes JSON requests to stdin and reads JSON responses from stdout, never managing sockets, TLS handshakes, or connection lifecycles",
-    "Bridge the gap between curl (one connection per invocation, human-oriented output) and MCP (protocol-locked, requires JSON-RPC framing) — afhttp is transport-only, works with any HTTP API, and uses Agent-First Data suffix conventions for self-describing fields in every request and response",
+    "Give AI agents a persistent HTTP client that maintains connection pools per host, reuses TCP+TLS connections across requests, and multiplexes concurrent streams over HTTP/2 \u2014 the agent writes JSON requests to stdin and reads JSON responses from stdout, never managing sockets, TLS handshakes, or connection lifecycles",
+    "Bridge the gap between curl (one connection per invocation, human-oriented output) and MCP (protocol-locked, requires JSON-RPC framing) \u2014 afhttp is transport-only, works with any HTTP API, and uses Agent-First Data suffix conventions for self-describing fields in every request and response",
     "Provide first-class SSE streaming support where server-sent events arrive as individual JSONL lines on stdout, enabling agents to process streaming responses (LLM tokens, progress updates, real-time feeds) without buffering the entire response"
   ],
   "changes": [
-    "Rename defaults.headers to defaults.headers_for_any_hosts in the pipe mode config command, making explicit that this field applies to all outbound hosts regardless of destination — agents must move credential headers to host_defaults[host].headers to prevent them from leaking to unintended third-party services",
-    "Standardize all internal references from the old 'afh' short name to the full 'afhttp' binary name: env var AFH_BIN → AFHTTP_BIN, temp download directory /tmp/afh/ → /tmp/afhttp/, and all comments and test fixtures",
-    "Fix GitHub Actions CI working-directory (was spores/agent-first-http, must be . since GitHub repo mirrors the spore at its root), add cargo build to e2e test tier before stress tests, and adjust global coverage thresholds to 88%/89% to reflect actual baseline after the --mode refactor"
+    "Fix server response bodies being incorrectly redacted when they contain fields with _secret suffixes (e.g. api_key_secret): response and stream chunk outputs now use per-output-type redaction policies so server payload data is preserved raw while internal trace metadata continues to be redacted",
+    "Update MCP ServerInfo construction to use the new rmcp 1.1 builder API (ServerInfo::new + with_instructions)"
   ],
   "license": "MIT",
-  "references": [
+  "bonds": [
     {
-      "uri": "cmn://cmn.dev/spore/blake3_eeb9f29b968d51855c8b8d60d8f97b64beff48e92405e005b7890b40503415e3",
-      "relation": "follows",
+      "uri": "cmn://cmn.dev/b3.F1prEHPAtDHnMsbr6RkaLekPFm25DH4y6xjdMR5r55qg",
+      "relation": "depends_on",
+      "id": "agent-first-data",
       "reason": "All request/response fields use Agent-First Data suffix conventions, and runtime protocol/log events are emitted on stdout only"
-    },
-    {
-      "uri": "cmn://cmn.dev/spore/blake3_e06f2f484eba1d97470e412f448f6e70ce3e525b1747a27ebe77cedf4d924bba",
-      "relation": "spawned_from"
     }
   ],
   "tree": {
@@ -33,5 +30,13 @@
     "ignore_rules": [
       ".gitignore"
     ]
-  }
+  },
+  "references": [
+    {
+      "uri": "cmn://cmn.dev/b3.2Zm2fuLm4SATwjeonaNfRNLQp6JNQfskYk43SwSvcGrM",
+      "relation": "depends_on",
+      "id": "agent-first-data",
+      "reason": "All request/response fields use Agent-First Data suffix conventions, and runtime protocol/log events are emitted on stdout only"
+    }
+  ]
 }

@@ -14,6 +14,7 @@ use tokio::sync::{mpsc, RwLock};
 use crate::handler;
 use crate::types::*;
 use crate::App;
+use agent_first_data::RedactionPolicy;
 
 const MCP_OUTPUT_CHANNEL_CAPACITY: usize = 512;
 
@@ -180,7 +181,12 @@ impl AfhMcp {
             obj.remove("tag");
         }
         // Keep MCP payload schema aligned with CLI JSON mode.
-        let json = agent_first_data::output_json(&value);
+        let json = match output {
+            Output::Response { .. } => {
+                agent_first_data::output_json_with(&value, RedactionPolicy::RedactionTraceOnly)
+            }
+            _ => agent_first_data::output_json(&value),
+        };
 
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
@@ -281,16 +287,11 @@ impl AfhMcp {
 #[tool_handler]
 impl ServerHandler for AfhMcp {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            instructions: Some(
-                "afhttp HTTP client — make HTTP requests and configure defaults. \
-                Use http_request to make HTTP calls with structured JSON responses. \
-                Use http_config to view or update connection settings."
-                    .into(),
-            ),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            ..Default::default()
-        }
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
+            "afhttp HTTP client — make HTTP requests and configure defaults. \
+            Use http_request to make HTTP calls with structured JSON responses. \
+            Use http_config to view or update connection settings.",
+        )
     }
 }
 
