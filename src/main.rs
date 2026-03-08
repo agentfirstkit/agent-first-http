@@ -140,6 +140,19 @@ async fn run_cli(req: cli::CliRequest) {
         start_time: Instant::now(),
     });
 
+    // Dry-run: emit the request details without executing
+    if req.dry_run {
+        let dry = Output::DryRun {
+            method: req.method,
+            url: req.url,
+            headers: req.headers,
+            body: req.body,
+            trace: Trace::error_only(0),
+        };
+        cli::write_cli_output(&dry, output_format);
+        return;
+    }
+
     // Spawn the request task — it holds a clone of the Arc
     let app2 = app.clone();
     tokio::spawn(async move {

@@ -179,7 +179,19 @@ pub enum Output {
         tag: Option<String>,
         error: String,
         error_code: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hint: Option<String>,
         retryable: bool,
+        trace: Trace,
+    },
+
+    #[serde(rename = "dry_run")]
+    DryRun {
+        method: String,
+        url: String,
+        headers: HashMap<String, Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        body: Option<Value>,
         trace: Trace,
     },
 
@@ -374,6 +386,7 @@ impl Trace {
 pub struct ErrorInfo {
     pub error_code: &'static str,
     pub error: String,
+    pub hint: Option<String>,
     pub retryable: bool,
 }
 
@@ -382,6 +395,7 @@ impl ErrorInfo {
         ErrorInfo {
             error_code: "invalid_request",
             error: format!("{detail}"),
+            hint: None,
             retryable: false,
         }
     }
@@ -390,6 +404,7 @@ impl ErrorInfo {
         ErrorInfo {
             error_code: "cancelled",
             error: "cancelled".to_string(),
+            hint: None,
             retryable: false,
         }
     }
@@ -398,6 +413,7 @@ impl ErrorInfo {
         ErrorInfo {
             error_code: "too_many_redirects",
             error: format!("exceeded {max}"),
+            hint: Some("increase --response-redirect or check for redirect loops".into()),
             retryable: false,
         }
     }
@@ -406,6 +422,7 @@ impl ErrorInfo {
         ErrorInfo {
             error_code: "request_timeout",
             error: format!("{detail}"),
+            hint: Some("increase --timeout-idle-s".into()),
             retryable: false,
         }
     }
@@ -414,6 +431,7 @@ impl ErrorInfo {
         ErrorInfo {
             error_code: "invalid_response",
             error: format!("{detail}"),
+            hint: None,
             retryable: false,
         }
     }
@@ -422,6 +440,7 @@ impl ErrorInfo {
         ErrorInfo {
             error_code: "chunk_disconnected",
             error: format!("{detail}"),
+            hint: None,
             retryable: false,
         }
     }
@@ -430,6 +449,7 @@ impl ErrorInfo {
         ErrorInfo {
             error_code: "response_too_large",
             error: format!("exceeded {limit_bytes} bytes"),
+            hint: Some("increase --response-max-bytes".into()),
             retryable: false,
         }
     }
@@ -438,6 +458,7 @@ impl ErrorInfo {
         ErrorInfo {
             error_code: "overloaded",
             error: format!("{detail}"),
+            hint: None,
             retryable: true,
         }
     }
@@ -448,12 +469,14 @@ impl ErrorInfo {
                 return ErrorInfo {
                     error_code: "connect_timeout",
                     error: e.to_string(),
+                    hint: Some("increase --timeout-connect-s or check host reachability".into()),
                     retryable: true,
                 };
             }
             return ErrorInfo {
                 error_code: "request_timeout",
                 error: e.to_string(),
+                hint: Some("increase --timeout-idle-s".into()),
                 retryable: false,
             };
         }
@@ -463,12 +486,14 @@ impl ErrorInfo {
                 return ErrorInfo {
                     error_code: "dns_failed",
                     error: e.to_string(),
+                    hint: Some("check the hostname spelling".into()),
                     retryable: true,
                 };
             }
             return ErrorInfo {
                 error_code: "connect_refused",
                 error: e.to_string(),
+                hint: None,
                 retryable: true,
             };
         }
@@ -477,6 +502,7 @@ impl ErrorInfo {
             return ErrorInfo {
                 error_code: "tls_error",
                 error: e.to_string(),
+                hint: None,
                 retryable: false,
             };
         }
@@ -484,12 +510,14 @@ impl ErrorInfo {
             return ErrorInfo {
                 error_code: "dns_failed",
                 error: e.to_string(),
+                hint: Some("check the hostname spelling".into()),
                 retryable: true,
             };
         }
         ErrorInfo {
             error_code: "connect_refused",
             error: e.to_string(),
+            hint: None,
             retryable: true,
         }
     }
@@ -507,6 +535,7 @@ pub fn make_error(
         tag,
         error: info.error,
         error_code: info.error_code.to_string(),
+        hint: info.hint,
         retryable: info.retryable,
         trace,
     }
