@@ -1,25 +1,30 @@
 {
   "id": "agent-first-http",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "name": "Agent-First HTTP",
   "domain": "cmn.dev",
-  "synopsis": "Persistent HTTP client for AI agents \u2014 JSONL in, JSONL out, connections managed transparently so agents never think about transport",
+  "synopsis": "Persistent HTTP client for AI agents — JSONL in, JSONL out, connections managed transparently so agents never think about transport",
   "intent": [
-    "Give AI agents a persistent HTTP client that maintains connection pools per host, reuses TCP+TLS connections across requests, and multiplexes concurrent streams over HTTP/2 \u2014 the agent writes JSON requests to stdin and reads JSON responses from stdout, never managing sockets, TLS handshakes, or connection lifecycles",
-    "Bridge the gap between curl (one connection per invocation, human-oriented output) and MCP (protocol-locked, requires JSON-RPC framing) \u2014 afhttp is transport-only, works with any HTTP API, and uses Agent-First Data suffix conventions for self-describing fields in every request and response",
+    "Give AI agents a persistent HTTP client that maintains connection pools per host, reuses TCP+TLS connections across requests, and multiplexes concurrent streams over HTTP/2 — the agent writes JSON requests to stdin and reads JSON responses from stdout, never managing sockets, TLS handshakes, or connection lifecycles",
+    "Bridge the gap between curl (one connection per invocation, human-oriented output) and MCP (protocol-locked, requires JSON-RPC framing) — afhttp is transport-only, works with any HTTP API, and uses Agent-First Data suffix conventions for self-describing fields in every request and response",
     "Provide first-class SSE streaming support where server-sent events arrive as individual JSONL lines on stdout, enabling agents to process streaming responses (LLM tokens, progress updates, real-time feeds) without buffering the entire response"
   ],
-  "changes": [
-    "Fix server response bodies being incorrectly redacted when they contain fields with _secret suffixes (e.g. api_key_secret): response and stream chunk outputs now use per-output-type redaction policies so server payload data is preserved raw while internal trace metadata continues to be redacted",
-    "Update MCP ServerInfo construction to use the new rmcp 1.1 builder API (ServerInfo::new + with_instructions)"
+  "mutations": [
+    "Add --dry-run flag and Output::DryRun variant to preview HTTP requests without executing, emitting the resolved method, URL, headers, and body for agent inspection",
+    "Add error hint field to ErrorInfo and Output::Error, providing actionable suggestions for common failures — DNS resolution, connect timeout, redirect loops, response size limits",
+    "Upgrade agent-first-data dependency from 0.5 to 0.6 to use the new hint parameter on build_cli_error"
   ],
   "license": "MIT",
   "bonds": [
     {
-      "uri": "cmn://cmn.dev/b3.F1prEHPAtDHnMsbr6RkaLekPFm25DH4y6xjdMR5r55qg",
+      "uri": "cmn://cmn.dev/b3.AwNhTbTQiv5XwAJeKaMHRv2LxcweHudyLWYPh4qcP11J",
       "relation": "depends_on",
       "id": "agent-first-data",
       "reason": "All request/response fields use Agent-First Data suffix conventions, and runtime protocol/log events are emitted on stdout only"
+    },
+    {
+      "uri": "cmn://cmn.dev/b3.5HFGeaPQ9AhZjsAmF6fVCeveMjyRFfV4y3X5koQDugaE",
+      "relation": "spawned_from"
     }
   ],
   "tree": {
@@ -30,13 +35,5 @@
     "ignore_rules": [
       ".gitignore"
     ]
-  },
-  "references": [
-    {
-      "uri": "cmn://cmn.dev/b3.2Zm2fuLm4SATwjeonaNfRNLQp6JNQfskYk43SwSvcGrM",
-      "relation": "depends_on",
-      "id": "agent-first-data",
-      "reason": "All request/response fields use Agent-First Data suffix conventions, and runtime protocol/log events are emitted on stdout only"
-    }
-  ]
+  }
 }

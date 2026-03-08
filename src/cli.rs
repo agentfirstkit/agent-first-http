@@ -168,6 +168,10 @@ pub struct Cli {
     #[arg(long)]
     pub verbose: bool,
 
+    /// Preview the request without executing it
+    #[arg(long)]
+    pub dry_run: bool,
+
     // -- Mode --
     /// Runtime mode: cli (default), pipe, curl, or mcp
     #[arg(long, value_enum, default_value = "cli")]
@@ -202,6 +206,8 @@ pub struct CliRequest {
     pub log_categories: Vec<String>,
     /// Output format for CLI output
     pub output_format: OutputFormat,
+    /// Preview the request without executing it
+    pub dry_run: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -216,7 +222,7 @@ pub enum Mode {
 }
 
 fn emit_cli_usage_error_and_exit(message: impl AsRef<str>) -> ! {
-    let json = agent_first_data::output_json(&build_cli_error(message.as_ref()));
+    let json = agent_first_data::output_json(&build_cli_error(message.as_ref(), None));
     println!("{json}");
     std::process::exit(2);
 }
@@ -444,6 +450,7 @@ pub fn parse_args() -> Mode {
         config_overrides,
         log_categories,
         output_format,
+        dry_run: cli.dry_run,
     }))
 }
 
@@ -745,6 +752,7 @@ mod tests {
             output: "json".to_string(),
             log: None,
             verbose: false,
+            dry_run: false,
             mode: CliMode::Cli,
         }
     }

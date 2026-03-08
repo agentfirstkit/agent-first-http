@@ -284,24 +284,28 @@ fn classify_error(e: &tokio_tungstenite::tungstenite::Error) -> ErrorInfo {
         ErrorInfo {
             error_code: "dns_failed",
             error: e.to_string(),
+            hint: Some("check the hostname spelling".to_string()),
             retryable: true,
         }
     } else if msg.contains("tls") || msg.contains("ssl") || msg.contains("certificate") {
         ErrorInfo {
             error_code: "tls_error",
             error: e.to_string(),
+            hint: None,
             retryable: false,
         }
     } else if msg.contains("timeout") {
         ErrorInfo {
             error_code: "connect_timeout",
             error: e.to_string(),
+            hint: Some("increase --timeout-connect-s or check host reachability".to_string()),
             retryable: true,
         }
     } else {
         ErrorInfo {
             error_code: "connect_refused",
             error: e.to_string(),
+            hint: None,
             retryable: true,
         }
     }

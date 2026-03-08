@@ -540,6 +540,7 @@ pub fn parse_curl_args(args: &[String]) -> Mode {
         config_overrides,
         log_categories,
         output_format: OutputFormat::Json,
+        dry_run: false,
     }))
 }
 
