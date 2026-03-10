@@ -1,8 +1,9 @@
 {
   "id": "agent-first-http",
-  "version": "0.3.2",
   "name": "Agent-First HTTP",
+  "version": "0.3.3",
   "domain": "cmn.dev",
+  "key": "ed25519.7BmCWmBb2YeUWR7pmHvwAvi9wRm96VpZsJvZFSTfc2Uu",
   "synopsis": "Persistent HTTP client for AI agents — JSONL in, JSONL out, connections managed transparently so agents never think about transport",
   "intent": [
     "Give AI agents a persistent HTTP client that maintains connection pools per host, reuses TCP+TLS connections across requests, and multiplexes concurrent streams over HTTP/2 — the agent writes JSON requests to stdin and reads JSON responses from stdout, never managing sockets, TLS handshakes, or connection lifecycles",
@@ -10,29 +11,28 @@
     "Provide first-class SSE streaming support where server-sent events arrive as individual JSONL lines on stdout, enabling agents to process streaming responses (LLM tokens, progress updates, real-time feeds) without buffering the entire response"
   ],
   "mutations": [
-    "Add --dry-run flag and Output::DryRun variant to preview HTTP requests without executing, emitting the resolved method, URL, headers, and body for agent inspection",
-    "Add error hint field to ErrorInfo and Output::Error, providing actionable suggestions for common failures — DNS resolution, connect timeout, redirect loops, response size limits",
-    "Upgrade agent-first-data dependency from 0.5 to 0.6 to use the new hint parameter on build_cli_error"
+    "Add hint field to CLI and startup error outputs, giving agents actionable next-step suggestions (usage syntax, valid flag values, expected formats) when argument parsing or initialization fails",
+    "Relax clippy deny rules to cfg_attr(not(test)) so test code can use expect/unwrap without suppression attributes on every test module"
   ],
   "license": "MIT",
   "bonds": [
     {
-      "uri": "cmn://cmn.dev/b3.AwNhTbTQiv5XwAJeKaMHRv2LxcweHudyLWYPh4qcP11J",
-      "relation": "depends_on",
-      "id": "agent-first-data",
-      "reason": "All request/response fields use Agent-First Data suffix conventions, and runtime protocol/log events are emitted on stdout only"
+      "relation": "spawned_from",
+      "uri": "cmn://cmn.dev/b3.5MUFXkJ1vQbx3qbBA2jdjkcxaqGT27cQxg1ofpjMqm4F"
     },
     {
-      "uri": "cmn://cmn.dev/b3.5HFGeaPQ9AhZjsAmF6fVCeveMjyRFfV4y3X5koQDugaE",
-      "relation": "spawned_from"
+      "relation": "depends_on",
+      "uri": "cmn://cmn.dev/b3.4Q6SQVbb9HLB8ffJpzuqECtq8TZZrBXzHtqoHgJXoNJ5",
+      "id": "agent-first-data",
+      "reason": "All request/response fields use Agent-First Data suffix conventions, and runtime protocol/log events are emitted on stdout only"
     }
   ],
   "tree": {
     "algorithm": "blob_tree_blake3_nfc",
-    "excludes": [
+    "exclude_names": [
       ".git"
     ],
-    "ignore_rules": [
+    "follow_rules": [
       ".gitignore"
     ]
   }
