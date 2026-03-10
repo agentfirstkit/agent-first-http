@@ -1,10 +1,13 @@
-#![deny(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::print_stderr,
-    clippy::disallowed_methods,
-    clippy::disallowed_macros
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::print_stderr,
+        clippy::disallowed_methods,
+        clippy::disallowed_macros
+    )
 )]
 
 mod chunked;
@@ -40,15 +43,20 @@ fn default_response_save_dir() -> String {
     dir.to_string_lossy().into_owned()
 }
 
-fn emit_startup_error_and_exit(message: impl AsRef<str>) -> ! {
-    let err = serde_json::json!({
-        "code": "error",
-        "error_code": "internal_error",
-        "error": message.as_ref(),
-        "retryable": false,
-        "trace": {"duration_ms": 0}
-    });
-    println!("{}", agent_first_data::output_json(&err));
+fn emit_startup_error_and_exit(message: impl AsRef<str>, hint: Option<&str>) -> ! {
+    let mut obj = serde_json::Map::new();
+    obj.insert("code".into(), serde_json::json!("error"));
+    obj.insert("error_code".into(), serde_json::json!("internal_error"));
+    obj.insert("error".into(), serde_json::json!(message.as_ref()));
+    if let Some(h) = hint {
+        obj.insert("hint".into(), serde_json::json!(h));
+    }
+    obj.insert("retryable".into(), serde_json::json!(false));
+    obj.insert("trace".into(), serde_json::json!({"duration_ms": 0}));
+    println!(
+        "{}",
+        agent_first_data::output_json(&serde_json::Value::Object(obj))
+    );
     std::process::exit(1);
 }
 
@@ -83,7 +91,7 @@ async fn run_cli(req: cli::CliRequest) {
     // Auto-generate temp response_save_dir; user --response-save-dir overrides via config_overrides
     let tmp_save_dir = default_response_save_dir();
     if let Err(e) = std::fs::create_dir_all(&tmp_save_dir) {
-        emit_startup_error_and_exit(format!("create response_save_dir: {e}"));
+        emit_startup_error_and_exit(format!("create response_save_dir: {e}"), None);
     }
 
     let log_categories = req.log_categories;
@@ -95,23 +103,14 @@ async fn run_cli(req: cli::CliRequest) {
     // If user provided --response-save-dir, ensure it exists
     if config.response_save_dir != tmp_save_dir {
         if let Err(e) = std::fs::create_dir_all(&config.response_save_dir) {
-            emit_startup_error_and_exit(format!("create response_save_dir: {e}"));
+            emit_startup_error_and_exit(format!("create response_save_dir: {e}"), None);
         }
     }
 
     let client = match config.build_client() {
         Ok(c) => c,
         Err(e) => {
-            let err = serde_json::json!({
-                "code": "error",
-                "error_code": "invalid_request",
-                "error": format!("build client: {e}"),
-                "retryable": false,
-                "trace": {"duration_ms": 0}
-            });
-            let json = agent_first_data::output_json(&err);
-            println!("{json}");
-            std::process::exit(1);
+            emit_startup_error_and_exit(format!("build client: {e}"), None);
         }
     };
 
@@ -199,14 +198,14 @@ async fn run_cli(req: cli::CliRequest) {
 async fn run_mcp() {
     let save_dir = default_response_save_dir();
     if let Err(e) = std::fs::create_dir_all(&save_dir) {
-        emit_startup_error_and_exit(format!("create response_save_dir: {e}"));
+        emit_startup_error_and_exit(format!("create response_save_dir: {e}"), None);
     }
 
     let config = RuntimeConfig::new(save_dir);
     let client = match config.build_client() {
         Ok(c) => c,
         Err(e) => {
-            emit_startup_error_and_exit(format!("build client: {e}"));
+            emit_startup_error_and_exit(format!("build client: {e}"), None);
         }
     };
 
@@ -227,12 +226,12 @@ async fn run_mcp() {
     let service = match mcp::AfhMcp::new(app).serve(rmcp::transport::stdio()).await {
         Ok(s) => s,
         Err(e) => {
-            emit_startup_error_and_exit(format!("MCP serve failed: {e}"));
+            emit_startup_error_and_exit(format!("MCP serve failed: {e}"), None);
         }
     };
 
     if let Err(e) = service.waiting().await {
-        emit_startup_error_and_exit(format!("MCP server error: {e}"));
+        emit_startup_error_and_exit(format!("MCP server error: {e}"), None);
     }
 }
 
@@ -243,7 +242,7 @@ async fn run_mcp() {
 async fn run_pipe(init_config: ConfigPatch) {
     let save_dir = default_response_save_dir();
     if let Err(e) = std::fs::create_dir_all(&save_dir) {
-        emit_startup_error_and_exit(format!("create response_save_dir: {e}"));
+        emit_startup_error_and_exit(format!("create response_save_dir: {e}"), None);
     }
 
     let mut config = RuntimeConfig::new(save_dir);
@@ -251,7 +250,7 @@ async fn run_pipe(init_config: ConfigPatch) {
     let client = match config.build_client() {
         Ok(c) => c,
         Err(e) => {
-            emit_startup_error_and_exit(format!("build client: {e}"));
+            emit_startup_error_and_exit(format!("build client: {e}"), None);
         }
     };
 

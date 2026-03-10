@@ -221,8 +221,8 @@ pub enum Mode {
     Mcp,
 }
 
-fn emit_cli_usage_error_and_exit(message: impl AsRef<str>) -> ! {
-    let json = agent_first_data::output_json(&build_cli_error(message.as_ref(), None));
+fn emit_cli_usage_error_and_exit(message: impl AsRef<str>, hint: Option<&str>) -> ! {
+    let json = agent_first_data::output_json(&build_cli_error(message.as_ref(), hint));
     println!("{json}");
     std::process::exit(2);
 }
@@ -279,7 +279,7 @@ pub fn parse_args() -> Mode {
         if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
             e.exit();
         }
-        emit_cli_usage_error_and_exit(e.to_string());
+        emit_cli_usage_error_and_exit(e.to_string(), None);
     });
 
     match cli.mode {
@@ -338,7 +338,10 @@ pub fn parse_args() -> Mode {
     let url = match cli.url {
         Some(ref u) => u.clone(),
         None => {
-            emit_cli_usage_error_and_exit("URL is required after method");
+            emit_cli_usage_error_and_exit(
+                "URL is required after method",
+                Some("usage: afhttp METHOD URL [flags]"),
+            );
         }
     };
 
@@ -434,7 +437,7 @@ pub fn parse_args() -> Mode {
     // Parse output format
     let output_format = match cli_parse_output(&cli.output) {
         Ok(f) => f,
-        Err(e) => emit_cli_usage_error_and_exit(e),
+        Err(e) => emit_cli_usage_error_and_exit(e, None),
     };
 
     Mode::Cli(Box::new(CliRequest {
@@ -536,7 +539,10 @@ fn parse_header_flag(s: &str) -> (String, Value) {
     let colon_pos = match s.find(':') {
         Some(p) => p,
         None => {
-            emit_cli_usage_error_and_exit(format!("invalid header '{s}': expected 'Name: Value'"));
+            emit_cli_usage_error_and_exit(
+                format!("invalid header '{s}'"),
+                Some("expected format: Name: Value"),
+            );
         }
     };
     let name = s[..colon_pos].trim().to_string();
@@ -577,6 +583,7 @@ fn parse_body_flags(
     if count > 1 {
         emit_cli_usage_error_and_exit(
             "--body, --body-base64, --body-file, --body-multipart, and --body-urlencoded are mutually exclusive",
+            Some("use only one body flag per request"),
         );
     }
 
@@ -629,9 +636,10 @@ fn parse_form_flag(s: &str) -> MultipartPart {
     let eq_pos = match s.find('=') {
         Some(p) => p,
         None => {
-            emit_cli_usage_error_and_exit(format!(
-                "invalid --body-multipart '{s}': expected name=value"
-            ));
+            emit_cli_usage_error_and_exit(
+                format!("invalid --body-multipart '{s}'"),
+                Some("expected format: name=value or name=@filepath"),
+            );
         }
     };
     let name = s[..eq_pos].to_string();
@@ -678,9 +686,10 @@ fn parse_urlencoded_flag(s: &str) -> UrlencodedPart {
             value: s[pos + 1..].to_string(),
         },
         None => {
-            emit_cli_usage_error_and_exit(format!(
-                "invalid --body-urlencoded '{s}': expected name=value"
-            ));
+            emit_cli_usage_error_and_exit(
+                format!("invalid --body-urlencoded '{s}'"),
+                Some("expected format: name=value"),
+            );
         }
     }
 }
