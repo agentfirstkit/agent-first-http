@@ -1,7 +1,8 @@
 {
+  "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-http",
   "name": "Agent-First HTTP",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "domain": "cmn.dev",
   "key": "ed25519.7BmCWmBb2YeUWR7pmHvwAvi9wRm96VpZsJvZFSTfc2Uu",
   "synopsis": "Persistent HTTP client for AI agents — JSONL in, JSONL out, connections managed transparently so agents never think about transport",
@@ -11,18 +12,19 @@
     "Provide first-class SSE streaming support where server-sent events arrive as individual JSONL lines on stdout, enabling agents to process streaming responses (LLM tokens, progress updates, real-time feeds) without buffering the entire response"
   ],
   "mutations": [
-    "Add hint field to CLI and startup error outputs, giving agents actionable next-step suggestions (usage syntax, valid flag values, expected formats) when argument parsing or initialization fails",
-    "Relax clippy deny rules to cfg_attr(not(test)) so test code can use expect/unwrap without suppression attributes on every test module"
+    "Extend --output yaml and --output plain support to pipe mode, so agents running afhttp with --mode pipe now receive structured output in their chosen format instead of always falling back to JSON",
+    "Protect server response body fields when rendering non-JSON output by serializing them as opaque JSON strings, preventing YAML or plain formatters from re-interpreting server payloads and corrupting their structure",
+    "Upgrade agent-first-data dependency to 0.7.0, which introduces the cli_output helper and yaml/plain output format support used by the above changes"
   ],
   "license": "MIT",
   "bonds": [
     {
       "relation": "spawned_from",
-      "uri": "cmn://cmn.dev/b3.5MUFXkJ1vQbx3qbBA2jdjkcxaqGT27cQxg1ofpjMqm4F"
+      "uri": "cmn://cmn.dev/b3.DNRCfecJN1paBiZK4Bz9GyWc9idU1VG7Mur8WVrVkorr"
     },
     {
       "relation": "depends_on",
-      "uri": "cmn://cmn.dev/b3.4Q6SQVbb9HLB8ffJpzuqECtq8TZZrBXzHtqoHgJXoNJ5",
+      "uri": "cmn://cmn.dev/b3.CXRG2dKsx1Dgmw5zVCydwcLKF1zCKcEqhS1UDewyqjCu",
       "id": "agent-first-data",
       "reason": "All request/response fields use Agent-First Data suffix conventions, and runtime protocol/log events are emitted on stdout only"
     }

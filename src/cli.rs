@@ -18,7 +18,7 @@ use std::io::Write;
     name = "afhttp",
     version = VERSION,
     about = "Agent-First HTTP — persistent HTTP client for AI agents",
-    after_help = "EXAMPLES:\n  afhttp GET https://api.example.com/users\n  afhttp POST https://api.example.com/users --body '{\"name\":\"Alice\"}'\n  afhttp GET https://api.example.com/stream --chunked\n  afhttp GET https://api.example.com/users --output yaml\n  afhttp --mode pipe    # JSONL stdin/stdout mode"
+    after_help = "EXAMPLES:\n  afhttp GET https://api.example.com/users\n  afhttp POST https://api.example.com/users --body '{\"name\":\"Alice\"}'\n  afhttp GET https://api.example.com/stream --chunked\n  afhttp GET https://api.example.com/users --output yaml\n  afhttp --mode pipe    # structured stdin/stdout mode"
 )]
 pub struct Cli {
     /// HTTP method (GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS)
@@ -216,13 +216,18 @@ pub struct CliRequest {
 
 pub enum Mode {
     Cli(Box<CliRequest>),
-    Pipe(Box<ConfigPatch>),
+    Pipe(Box<PipeInit>),
     #[cfg(feature = "mcp")]
     Mcp,
 }
 
+pub struct PipeInit {
+    pub config: ConfigPatch,
+    pub output_format: OutputFormat,
+}
+
 fn emit_cli_usage_error_and_exit(message: impl AsRef<str>, hint: Option<&str>) -> ! {
-    let json = agent_first_data::output_json(&build_cli_error(message.as_ref(), hint));
+    let json = cli_output(&build_cli_error(message.as_ref(), hint), OutputFormat::Json);
     println!("{json}");
     std::process::exit(2);
 }
@@ -281,6 +286,10 @@ pub fn parse_args() -> Mode {
         }
         emit_cli_usage_error_and_exit(e.to_string(), None);
     });
+    let output_format = match cli_parse_output(&cli.output) {
+        Ok(f) => f,
+        Err(e) => emit_cli_usage_error_and_exit(e, None),
+    };
 
     match cli.mode {
         #[cfg(feature = "mcp")]
@@ -315,7 +324,10 @@ pub fn parse_args() -> Mode {
                 },
                 ..ConfigPatch::default()
             };
-            return Mode::Pipe(Box::new(pipe_config));
+            return Mode::Pipe(Box::new(PipeInit {
+                config: pipe_config,
+                output_format,
+            }));
         }
         CliMode::Curl => {
             let curl_args = strip_mode_flag(&raw[1..]);
@@ -432,12 +444,6 @@ pub fn parse_args() -> Mode {
         response_max_bytes: cli.response_max_bytes,
         upgrade: cli.upgrade,
         tls,
-    };
-
-    // Parse output format
-    let output_format = match cli_parse_output(&cli.output) {
-        Ok(f) => f,
-        Err(e) => emit_cli_usage_error_and_exit(e, None),
     };
 
     Mode::Cli(Box::new(CliRequest {
