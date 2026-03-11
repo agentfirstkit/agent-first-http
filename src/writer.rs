@@ -91,4 +91,22 @@ mod tests {
         drop(tx);
         writer_task(rx, OutputFormat::Json).await;
     }
+
+    #[tokio::test]
+    async fn writer_task_yaml_and_plain_formats() {
+        for format in [OutputFormat::Yaml, OutputFormat::Plain] {
+            let (tx, rx) = mpsc::channel(4);
+            tx.send(Output::Pong {
+                trace: crate::types::PongTrace {
+                    uptime_s: 1,
+                    requests_total: 2,
+                    connections_active: 3,
+                },
+            })
+            .await
+            .expect("send");
+            drop(tx);
+            writer_task(rx, format).await;
+        }
+    }
 }
