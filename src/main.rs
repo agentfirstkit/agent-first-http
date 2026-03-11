@@ -21,6 +21,7 @@ mod types;
 mod websocket;
 mod writer;
 
+use agent_first_data::{cli_output, OutputFormat};
 use config::VERSION;
 #[cfg(feature = "mcp")]
 use rmcp::ServiceExt;
@@ -55,7 +56,7 @@ fn emit_startup_error_and_exit(message: impl AsRef<str>, hint: Option<&str>) -> 
     obj.insert("trace".into(), serde_json::json!({"duration_ms": 0}));
     println!(
         "{}",
-        agent_first_data::output_json(&serde_json::Value::Object(obj))
+        cli_output(&serde_json::Value::Object(obj), OutputFormat::Json)
     );
     std::process::exit(1);
 }
@@ -75,7 +76,7 @@ async fn main() {
     let mode = cli::parse_args();
     match mode {
         cli::Mode::Cli(req) => run_cli(*req).await,
-        cli::Mode::Pipe(init_config) => run_pipe(*init_config).await,
+        cli::Mode::Pipe(init) => run_pipe(*init).await,
         #[cfg(feature = "mcp")]
         cli::Mode::Mcp => run_mcp().await,
     }
@@ -236,10 +237,14 @@ async fn run_mcp() {
 }
 
 // ---------------------------------------------------------------------------
-// Pipe mode: JSONL stdin/stdout (existing behavior)
+// Pipe mode: structured stdin/stdout
 // ---------------------------------------------------------------------------
 
-async fn run_pipe(init_config: ConfigPatch) {
+async fn run_pipe(init: cli::PipeInit) {
+    let cli::PipeInit {
+        config: init_config,
+        output_format,
+    } = init;
     let save_dir = default_response_save_dir();
     if let Err(e) = std::fs::create_dir_all(&save_dir) {
         emit_startup_error_and_exit(format!("create response_save_dir: {e}"), None);
@@ -257,7 +262,7 @@ async fn run_pipe(init_config: ConfigPatch) {
     let (writer_tx, writer_rx) = mpsc::channel::<Output>(OUTPUT_CHANNEL_CAPACITY);
 
     // Spawn writer task
-    tokio::spawn(writer::writer_task(writer_rx));
+    tokio::spawn(writer::writer_task(writer_rx, output_format));
 
     // Send startup log if enabled (default: off, agent must configure log:["startup"])
     if config.log.contains(&"startup".to_string()) {

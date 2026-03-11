@@ -1,31 +1,48 @@
 use crate::types::Output;
-use agent_first_data::RedactionPolicy;
+use agent_first_data::{cli_output, OutputFormat, RedactionPolicy};
+use serde_json::Value;
 use std::io::Write;
 use tokio::sync::mpsc;
 
 /// Stdout writer task. Receives Output values from a channel,
-/// serializes to JSONL via Agent-First Data output_json_with (policy per output type),
+/// serializes via Agent-First Data output helpers,
 /// writes to stdout. Single task prevents interleaving.
-pub async fn writer_task(mut rx: mpsc::Receiver<Output>) {
+pub async fn writer_task(mut rx: mpsc::Receiver<Output>, format: OutputFormat) {
     while let Some(output) = rx.recv().await {
-        let redaction_policy = redaction_policy_for_output(&output);
         // Output is fully #[derive(Serialize)] with no custom impls — to_value should
         // never fail. If it somehow does, emit a raw error rather than panicking or
         // silently dropping the message.
-        let json = match serde_json::to_value(&output) {
-            Ok(value) => match redaction_policy {
-                Some(policy) => agent_first_data::output_json_with(&value, policy),
-                None => agent_first_data::output_json(&value),
-            },
+        let rendered = match serde_json::to_value(&output) {
+            Ok(mut value) => {
+                if matches!(format, OutputFormat::Json) {
+                    match redaction_policy_for_output(&output) {
+                        Some(policy) => agent_first_data::output_json_with(&value, policy),
+                        None => cli_output(&value, OutputFormat::Json),
+                    }
+                } else {
+                    // Server payload fields should remain opaque across human-oriented formats.
+                    protect_server_body(&mut value);
+                    cli_output(&value, format)
+                }
+            }
             Err(_) => {
-                r#"{"code":"error","error_code":"internal_error","error":"output serialization failed","retryable":false,"trace":{"duration_ms":0}}"#.to_string()
+                let fallback = serde_json::json!({
+                    "code": "error",
+                    "error_code": "internal_error",
+                    "error": "output serialization failed",
+                    "retryable": false,
+                    "trace": {"duration_ms": 0}
+                });
+                cli_output(&fallback, format)
             }
         };
         // Lock stdout per-write — can't hold across await
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
-        let _ = out.write_all(json.as_bytes());
-        let _ = out.write_all(b"\n");
+        let _ = out.write_all(rendered.as_bytes());
+        if !rendered.ends_with('\n') {
+            let _ = out.write_all(b"\n");
+        }
         let _ = out.flush();
     }
 }
@@ -38,6 +55,20 @@ fn redaction_policy_for_output(output: &Output) -> Option<RedactionPolicy> {
         Output::ChunkData { .. } => Some(RedactionPolicy::RedactionNone),
         // Config/log/startup/error remain fully redacted by default.
         _ => None,
+    }
+}
+
+fn protect_server_body(value: &mut Value) {
+    if let Some(obj) = value.as_object_mut() {
+        for key in &["body", "data"] {
+            if let Some(v) = obj.get(*key).cloned() {
+                if !v.is_null() && !v.is_string() {
+                    if let Ok(json_str) = serde_json::to_string(&v) {
+                        obj.insert((*key).to_string(), Value::String(json_str));
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -58,6 +89,6 @@ mod tests {
         .await
         .expect("send");
         drop(tx);
-        writer_task(rx).await;
+        writer_task(rx, OutputFormat::Json).await;
     }
 }
