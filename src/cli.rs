@@ -173,7 +173,7 @@ pub struct Cli {
     pub dry_run: bool,
 
     // -- Mode --
-    /// Runtime mode: cli (default), pipe, curl, or mcp
+    /// Runtime mode: cli (default), pipe, or curl
     #[arg(long, value_enum, default_value = "cli")]
     pub mode: CliMode,
 }
@@ -183,8 +183,6 @@ pub enum CliMode {
     Cli,
     Pipe,
     Curl,
-    #[cfg(feature = "mcp")]
-    Mcp,
 }
 
 // ---------------------------------------------------------------------------
@@ -217,8 +215,6 @@ pub struct CliRequest {
 pub enum Mode {
     Cli(Box<CliRequest>),
     Pipe(Box<PipeInit>),
-    #[cfg(feature = "mcp")]
-    Mcp,
 }
 
 pub struct PipeInit {
@@ -292,8 +288,6 @@ pub fn parse_args() -> Mode {
     };
 
     match cli.mode {
-        #[cfg(feature = "mcp")]
-        CliMode::Mcp => return Mode::Mcp,
         CliMode::Pipe => {
             // Build config overrides from CLI flags so --mode pipe --log startup,retry --proxy ...
             // all take effect at launch time.

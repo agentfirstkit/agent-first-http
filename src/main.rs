@@ -15,16 +15,12 @@ mod cli;
 mod config;
 mod curl_compat;
 mod handler;
-#[cfg(feature = "mcp")]
-mod mcp;
 mod types;
 mod websocket;
 mod writer;
 
 use agent_first_data::{cli_output, OutputFormat};
 use config::VERSION;
-#[cfg(feature = "mcp")]
-use rmcp::ServiceExt;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
@@ -77,8 +73,6 @@ async fn main() {
     match mode {
         cli::Mode::Cli(req) => run_cli(*req).await,
         cli::Mode::Pipe(init) => run_pipe(*init).await,
-        #[cfg(feature = "mcp")]
-        cli::Mode::Mcp => run_mcp().await,
     }
 }
 
@@ -189,51 +183,6 @@ async fn run_cli(req: cli::CliRequest) {
     let _ = std::fs::remove_dir(&tmp_save_dir);
 
     std::process::exit(if had_error { 1 } else { 0 });
-}
-
-// ---------------------------------------------------------------------------
-// MCP mode: Model Context Protocol server over stdio
-// ---------------------------------------------------------------------------
-
-#[cfg(feature = "mcp")]
-async fn run_mcp() {
-    let save_dir = default_response_save_dir();
-    if let Err(e) = std::fs::create_dir_all(&save_dir) {
-        emit_startup_error_and_exit(format!("create response_save_dir: {e}"), None);
-    }
-
-    let config = RuntimeConfig::new(save_dir);
-    let client = match config.build_client() {
-        Ok(c) => c,
-        Err(e) => {
-            emit_startup_error_and_exit(format!("build client: {e}"), None);
-        }
-    };
-
-    // The shared app holds config/client state for the MCP session.
-    // Each http_request tool call creates its own per-call App clone with a
-    // dedicated writer channel, sharing the config/client snapshot at call time.
-    let (writer_tx, _writer_rx) = mpsc::channel::<Output>(OUTPUT_CHANNEL_CAPACITY);
-    let app = Arc::new(App {
-        config: RwLock::new(config),
-        client: RwLock::new(client),
-        writer: writer_tx,
-        in_flight: RwLock::new(HashMap::new()),
-        ws_connections: RwLock::new(HashMap::new()),
-        request_count: AtomicU64::new(0),
-        start_time: Instant::now(),
-    });
-
-    let service = match mcp::AfhMcp::new(app).serve(rmcp::transport::stdio()).await {
-        Ok(s) => s,
-        Err(e) => {
-            emit_startup_error_and_exit(format!("MCP serve failed: {e}"), None);
-        }
-    };
-
-    if let Err(e) = service.waiting().await {
-        emit_startup_error_and_exit(format!("MCP server error: {e}"), None);
-    }
 }
 
 // ---------------------------------------------------------------------------

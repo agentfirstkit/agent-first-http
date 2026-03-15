@@ -7,7 +7,6 @@ Supported platforms: macOS, Linux, Windows.
 Modes (single entrypoint):
 - `--mode cli` (default)
 - `--mode pipe`
-- `--mode mcp`
 - `--mode curl`
 
 The key contract for agents is protocol determinism: `stdout` is always structured JSON, and failures are always structured `{"code":"error",...}` events with stable `error_code` values. No human-only text parsing, no mixed output channels, no ad-hoc error shapes.
@@ -72,20 +71,6 @@ What just happened:
 - **Streaming inline** — `chat` delivers events as they arrive, no buffering, no special setup
 - **HTTP errors are data** — `usage` returned 403; afhttp delivers it as `code: "response"` with `status: 403`; the agent checks `status`, not exception types or text patterns
 
-## MCP Mode
-
-`afhttp --mode mcp` runs as a [Model Context Protocol](https://modelcontextprotocol.io) server, letting AI tools like Claude Desktop make HTTP requests directly:
-
-```json
-{
-  "mcpServers": {
-    "afhttp": { "command": "afhttp", "args": ["--mode", "mcp"] }
-  }
-}
-```
-
-Claude can then call `http_request` and `http_config` tools. See [docs/mcp.md](docs/mcp.md) for the full setup guide.
-
 ## curl Compatibility
 
 Use explicit curl mode. afhttp understands a subset of curl flags and returns structured JSON:
@@ -120,8 +105,7 @@ cargo install agent-first-http
 
 ## Docs
 
-- [CLI Manual](docs/cli.md) — CLI, MCP, and curl compat modes
-- [MCP Reference](docs/mcp.md) — MCP tool reference and Claude Desktop setup
+- [CLI Manual](docs/cli.md) — CLI, pipe, and curl compat modes
 - [Protocol Reference](docs/reference.md) — full field specification
 - [Testing Strategy](docs/testing.md) — layered tests, coverage gate, regression policy
 - [Design](docs/design.md) — architecture and principles

@@ -9,12 +9,8 @@
       "lines": 89.0
     },
     "src/config.rs": {
-      "regions": 89.0,
+      "regions": 88.0,
       "lines": 93.0
-    },
-    "src/mcp.rs": {
-      "regions": 95.0,
-      "lines": 97.0
     }
   },
   "exempt_files": [

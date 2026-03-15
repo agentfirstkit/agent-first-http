@@ -6,7 +6,6 @@ Practical patterns for using `afhttp`. For the full field reference see [referen
 
 - `--mode cli` (default)
 - `--mode pipe`
-- `--mode mcp`
 - `--mode curl`
 
 ## CLI Mode (default)
@@ -598,23 +597,6 @@ Graceful — cancels active work, waits up to 5 seconds for terminal events, the
 ```
 
 On stdin EOF, `afhttp` also shuts down gracefully.
-
----
-
-## MCP Mode
-
-`afhttp --mode mcp` runs as a [Model Context Protocol](https://modelcontextprotocol.io) server over stdio, exposing two tools:
-
-- **`http_request`** — make an HTTP request, get a structured JSON response
-- **`http_config`** — view or update connection defaults
-
-```bash
-afhttp --mode mcp
-```
-
-See [docs/mcp.md](mcp.md) for the full tool reference and Claude Desktop setup.
-
-**Limitations:** No streaming (chunked/SSE), no WebSocket, no file bodies in MCP mode.
 
 ---
 

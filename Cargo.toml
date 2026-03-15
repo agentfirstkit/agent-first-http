@@ -1,6 +1,6 @@
 [package]
 name = "agent-first-http"
-version = "0.3.4"
+version = "0.4.0"
 edition = "2021"
 description = "Persistent HTTP client for AI agents — one request, one JSON line"
 license = "MIT"
@@ -10,10 +10,6 @@ readme = "README.md"
 [[bin]]
 name = "afhttp"
 path = "src/main.rs"
-
-[features]
-default = ["mcp"]
-mcp = ["dep:rmcp", "dep:schemars"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -30,5 +26,3 @@ tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
 futures = "0.3"
 clap = { version = "4", features = ["derive"] }
 agent-first-data = "0.7.0"
-rmcp = { version = "1.1", features = ["macros", "server", "transport-io"], optional = true }
-schemars = { version = "1", optional = true }
