@@ -424,6 +424,7 @@ pub fn parse_content_length(headers: &HashMap<String, Value>) -> Option<u64> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use reqwest::header::{HeaderValue, CONTENT_LENGTH, SET_COOKIE};

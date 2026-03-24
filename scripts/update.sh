@@ -1,14 +1,32 @@
 #!/bin/bash
-# Update lock file for agent-first-http
+set -euo pipefail
 
-set -e
-ROOTPATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-echo "Updating agent-first-http dependencies..."
-echo ""
+find_repo_root() {
+  local dir="$PROJECT_ROOT"
 
-echo "[1/1] Rust - cargo update"
-(cd "$ROOTPATH" && cargo update)
+  while [ "$dir" != "/" ]; do
+    if [ -f "$dir/scripts/rust-project/lib.sh" ]; then
+      printf '%s\n' "$dir"
+      return 0
+    fi
 
-echo ""
-echo "Update complete!"
+    dir="$(dirname "$dir")"
+  done
+
+  return 1
+}
+
+REPO_ROOT="$(find_repo_root)" || {
+  echo "Could not locate repository root from $PROJECT_ROOT" >&2
+  exit 1
+}
+
+SCRIPT_NAME="$(basename "$0")"
+
+export CMN_RUST_PROJECT_ROOT="$PROJECT_ROOT"
+export CMN_RUST_SCRIPT_INVOCATION="$0"
+
+exec "$REPO_ROOT/scripts/rust-project/$SCRIPT_NAME" "$@"

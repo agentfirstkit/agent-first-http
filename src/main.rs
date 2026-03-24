@@ -4,9 +4,8 @@
         clippy::unwrap_used,
         clippy::expect_used,
         clippy::panic,
+        clippy::print_stdout,
         clippy::print_stderr,
-        clippy::disallowed_methods,
-        clippy::disallowed_macros
     )
 )]
 
@@ -22,6 +21,7 @@ mod writer;
 use agent_first_data::{cli_output, OutputFormat};
 use config::VERSION;
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
@@ -50,7 +50,8 @@ fn emit_startup_error_and_exit(message: impl AsRef<str>, hint: Option<&str>) -> 
     }
     obj.insert("retryable".into(), serde_json::json!(false));
     obj.insert("trace".into(), serde_json::json!({"duration_ms": 0}));
-    println!(
+    let _ = writeln!(
+        std::io::stdout(),
         "{}",
         cli_output(&serde_json::Value::Object(obj), OutputFormat::Json)
     );
@@ -536,6 +537,7 @@ async fn handle_cancel(app: &App, id: &str) {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::types::RuntimeConfig;

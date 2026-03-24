@@ -553,6 +553,7 @@ pub fn make_log(event: &str, fields: Vec<(&str, Value)>) -> Output {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 

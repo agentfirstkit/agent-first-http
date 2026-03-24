@@ -105,7 +105,7 @@ cargo install agent-first-http
 
 ## Docs
 
-- [CLI Manual](docs/cli.md) — CLI, pipe, and curl compat modes
+- [CLI](docs/cli.md) — Generated CLI guide and flag reference from `src/cli.rs`
 - [Protocol Reference](docs/reference.md) — full field specification
 - [Testing Strategy](docs/testing.md) — layered tests, coverage gate, regression policy
 - [Design](docs/design.md) — architecture and principles

@@ -13,13 +13,53 @@ use std::io::Write;
 // Clap argument definition
 // ---------------------------------------------------------------------------
 
+#[doc = r#"Agent-First HTTP — persistent HTTP client for AI agents.
+
+### Modes
+
+- `--mode cli` (default): one request, one structured response, then exit
+- `--mode pipe`: long-lived JSONL stdin/stdout session for agents
+- `--mode curl`: parse a focused subset of curl flags, then execute through the same runtime
+
+### Output and Exit Codes
+
+- default output is one JSON object on stdout
+- `--output yaml` and `--output plain` only reformat the envelope; server response bodies are not rewritten
+- exit code `0`: HTTP response received
+- exit code `1`: transport/runtime error
+- exit code `2`: invalid arguments
+
+### Request Body Rules
+
+- `--body` with a JSON object or array auto-sets `Content-Type: application/json`
+- string bodies are sent as raw bytes; set `--header "Content-Type: ..."` yourself when needed
+- `--body`, `--body-base64`, `--body-file`, `--body-multipart`, and `--body-urlencoded` are mutually exclusive
+
+### Streaming and Files
+
+- `--chunked` emits `chunk_start`, repeated `chunk_data`, then `chunk_end`
+- use `--chunked-delimiter '\n\n'` for SSE and `--chunked-delimiter-raw` for binary frames
+- `--response-save-file` writes the body to disk; `--response-save-resume` resumes partial downloads
+- progress logs are opt-in via `--log progress`
+
+### Examples
+
+```text
+afhttp GET https://api.example.com/users
+afhttp POST https://api.example.com/users --body '{"name":"Alice"}'
+afhttp POST https://api.openai.com/v1/files \
+  --header "Authorization: Bearer sk-xxx" \
+  --body-multipart purpose=assistants \
+  --body-multipart file=@/tmp/data.jsonl;filename=data.jsonl;type=application/jsonl
+afhttp GET https://api.example.com/stream --chunked-delimiter '\n\n'
+afhttp GET https://example.com/large.tar.gz \
+  --response-save-file /tmp/large.tar.gz \
+  --log progress
+afhttp --mode pipe
+```
+"#]
 #[derive(Parser)]
-#[command(
-    name = "afhttp",
-    version = VERSION,
-    about = "Agent-First HTTP — persistent HTTP client for AI agents",
-    after_help = "EXAMPLES:\n  afhttp GET https://api.example.com/users\n  afhttp POST https://api.example.com/users --body '{\"name\":\"Alice\"}'\n  afhttp GET https://api.example.com/stream --chunked\n  afhttp GET https://api.example.com/users --output yaml\n  afhttp --mode pipe    # structured stdin/stdout mode"
-)]
+#[command(name = "afhttp", version = VERSION, verbatim_doc_comment)]
 pub struct Cli {
     /// HTTP method (GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS)
     pub method: Option<String>,
@@ -29,152 +69,152 @@ pub struct Cli {
 
     // -- Request flags --
     /// Request header (repeatable). Format: "Name: Value". Empty value removes default.
-    #[arg(long = "header")]
+    #[arg(long = "header", help_heading = "Request")]
     pub header: Vec<String>,
 
     /// Request body. Valid JSON object/array auto-detected and sets Content-Type: application/json. @path reads from file.
-    #[arg(long = "body")]
+    #[arg(long = "body", help_heading = "Request")]
     pub body: Option<String>,
 
     /// Base64-encoded binary request body
-    #[arg(long = "body-base64")]
+    #[arg(long = "body-base64", help_heading = "Request")]
     pub body_base64: Option<String>,
 
     /// Read request body from file
-    #[arg(long = "body-file")]
+    #[arg(long = "body-file", help_heading = "Request")]
     pub body_file: Option<String>,
 
     /// Multipart form part (repeatable). Format: name=value or name=@path[;filename=x][;type=mime]
-    #[arg(long = "body-multipart")]
+    #[arg(long = "body-multipart", help_heading = "Request")]
     pub body_multipart: Vec<String>,
 
     /// URL-encoded form field (repeatable). Format: name=value. Sets Content-Type: application/x-www-form-urlencoded.
-    #[arg(long = "body-urlencoded")]
+    #[arg(long = "body-urlencoded", help_heading = "Request")]
     pub body_urlencoded: Vec<String>,
 
     // -- Config flags --
     /// Directory for auto-saved large response bodies
-    #[arg(long = "response-save-dir")]
+    #[arg(long = "response-save-dir", help_heading = "Config")]
     pub response_save_dir: Option<String>,
 
     /// Auto-save response body to response-save-dir when larger than this (default: 10485760)
-    #[arg(long = "response-save-above-bytes")]
+    #[arg(long = "response-save-above-bytes", help_heading = "Config")]
     pub response_save_above_bytes: Option<u64>,
 
     /// Max concurrent in-flight requests (0 = unlimited)
-    #[arg(long = "request-concurrency-limit")]
+    #[arg(long = "request-concurrency-limit", help_heading = "Config")]
     pub request_concurrency_limit: Option<u64>,
 
     /// TCP+TLS handshake timeout in seconds (default: 10)
-    #[arg(long = "timeout-connect-s")]
+    #[arg(long = "timeout-connect-s", help_heading = "Config")]
     pub timeout_connect_s: Option<u64>,
 
     /// No-data timeout in seconds (default: 30)
-    #[arg(long = "timeout-idle-s")]
+    #[arg(long = "timeout-idle-s", help_heading = "Config")]
     pub timeout_idle_s: Option<u64>,
 
     /// Retry count (default: 0, no retry)
-    #[arg(long)]
+    #[arg(long, help_heading = "Config")]
     pub retry: Option<u32>,
 
     /// Base delay for first retry in ms (default: 100). Subsequent: base * 2^(attempt-1)
-    #[arg(long = "retry-base-delay-ms")]
+    #[arg(long = "retry-base-delay-ms", help_heading = "Config")]
     pub retry_base_delay_ms: Option<u64>,
 
     /// Comma-separated status codes to retry (e.g. 429,503)
-    #[arg(long = "retry-on-status")]
+    #[arg(long = "retry-on-status", help_heading = "Config")]
     pub retry_on_status: Option<String>,
 
     /// Redirect limit (default: 10, 0=disable)
-    #[arg(long = "response-redirect")]
+    #[arg(long = "response-redirect", help_heading = "Config")]
     pub response_redirect: Option<u32>,
 
     /// Parse JSON response body (default: true)
-    #[arg(long = "response-parse-json")]
+    #[arg(long = "response-parse-json", help_heading = "Config")]
     pub response_parse_json: Option<bool>,
 
     /// Auto-decompress response (default: true)
-    #[arg(long = "response-decompress")]
+    #[arg(long = "response-decompress", help_heading = "Config")]
     pub response_decompress: Option<bool>,
 
     /// Save response body to file
-    #[arg(long = "response-save-file")]
+    #[arg(long = "response-save-file", help_heading = "Config")]
     pub response_save_file: Option<String>,
 
     /// Resume download if response-save-file exists
-    #[arg(long = "response-save-resume")]
+    #[arg(long = "response-save-resume", help_heading = "Config")]
     pub response_save_resume: bool,
 
     /// Hard limit on response body size in bytes
-    #[arg(long = "response-max-bytes")]
+    #[arg(long = "response-max-bytes", help_heading = "Config")]
     pub response_max_bytes: Option<u64>,
 
     /// Stream response in chunks
-    #[arg(long)]
+    #[arg(long, help_heading = "Config")]
     pub chunked: bool,
 
     /// Chunk delimiter (default: \n). Use \n\n for SSE. Implies --chunked
-    #[arg(long = "chunked-delimiter")]
+    #[arg(long = "chunked-delimiter", help_heading = "Config")]
     pub chunked_delimiter: Option<String>,
 
     /// Raw binary chunks (null delimiter). Implies --chunked
-    #[arg(long = "chunked-delimiter-raw")]
+    #[arg(long = "chunked-delimiter-raw", help_heading = "Config")]
     pub chunked_delimiter_raw: bool,
 
     /// Time-based progress interval in ms (default: 10000, 0=disable). Works with --progress-bytes
-    #[arg(long = "progress-ms")]
+    #[arg(long = "progress-ms", help_heading = "Config")]
     pub progress_ms: Option<u64>,
 
     /// Byte-based progress interval (default: 0=disable). Works with --progress-ms
-    #[arg(long = "progress-bytes")]
+    #[arg(long = "progress-bytes", help_heading = "Config")]
     pub progress_bytes: Option<u64>,
 
     // -- TLS flags --
     /// Skip certificate verification
-    #[arg(long = "tls-insecure")]
+    #[arg(long = "tls-insecure", help_heading = "TLS")]
     pub tls_insecure: bool,
 
     /// CA certificate file path
-    #[arg(long = "tls-cacert-file")]
+    #[arg(long = "tls-cacert-file", help_heading = "TLS")]
     pub tls_cacert_file: Option<String>,
 
     /// Client certificate file path
-    #[arg(long = "tls-cert-file")]
+    #[arg(long = "tls-cert-file", help_heading = "TLS")]
     pub tls_cert_file: Option<String>,
 
     /// Client private key file path
-    #[arg(long = "tls-key-file")]
+    #[arg(long = "tls-key-file", help_heading = "TLS")]
     pub tls_key_file: Option<String>,
 
     // -- Other --
     /// Proxy URL
-    #[arg(long)]
+    #[arg(long, help_heading = "Other")]
     pub proxy: Option<String>,
 
     /// Protocol upgrade (e.g. "websocket")
-    #[arg(long)]
+    #[arg(long, help_heading = "Other")]
     pub upgrade: Option<String>,
 
     // -- Output flags --
     /// Output format: json (default), yaml (human-readable), plain (logfmt)
-    #[arg(long, default_value = "json")]
+    #[arg(long, default_value = "json", help_heading = "Output")]
     pub output: String,
 
     /// Log categories (comma-separated). Categories: startup, request, progress, retry, redirect
-    #[arg(long)]
+    #[arg(long, help_heading = "Output")]
     pub log: Option<String>,
 
     /// Enable all log categories (equivalent to --log startup,request,progress,retry,redirect)
-    #[arg(long)]
+    #[arg(long, help_heading = "Output")]
     pub verbose: bool,
 
     /// Preview the request without executing it
-    #[arg(long)]
+    #[arg(long, help_heading = "Output")]
     pub dry_run: bool,
 
     // -- Mode --
     /// Runtime mode: cli (default), pipe, or curl
-    #[arg(long, value_enum, default_value = "cli")]
+    #[arg(long, value_enum, default_value = "cli", help_heading = "Mode")]
     pub mode: CliMode,
 }
 
@@ -224,7 +264,7 @@ pub struct PipeInit {
 
 fn emit_cli_usage_error_and_exit(message: impl AsRef<str>, hint: Option<&str>) -> ! {
     let json = cli_output(&build_cli_error(message.as_ref(), hint), OutputFormat::Json);
-    println!("{json}");
+    let _ = writeln!(std::io::stdout(), "{json}");
     std::process::exit(2);
 }
 
@@ -336,7 +376,7 @@ pub fn parse_args() -> Mode {
             // No method in cli mode: show help and exit 2
             let mut cmd = <Cli as clap::CommandFactory>::command();
             let _ = cmd.print_help();
-            println!();
+            let _ = writeln!(std::io::stdout());
             std::process::exit(2);
         }
     };
@@ -720,6 +760,7 @@ fn unescape_delimiter(s: &str) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 

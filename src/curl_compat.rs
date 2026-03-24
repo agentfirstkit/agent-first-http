@@ -3,7 +3,7 @@ use crate::types::*;
 /// curl compatibility mode: parse a subset of curl command-line flags and
 /// return a `Mode::Cli(...)` equivalent to what afhttp would produce natively.
 ///
-/// Supported flags: see docs/cli.md for the complete table.
+/// Supported flags: see docs/cli.md for the generated table.
 use agent_first_data::OutputFormat;
 use base64::Engine;
 use serde_json::Value;
@@ -647,6 +647,7 @@ fn push_form_part(s: &str, parts: &mut Vec<MultipartPart>) {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
