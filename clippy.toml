@@ -1,7 +1,7 @@
 disallowed-macros = [
-  { path = "std::eprintln", reason = "AFDATA runtime protocol/log events must use stdout only; stderr is not a protocol channel." },
+  { path = "std::eprintln", reason = "AFDATA protocol/log events must use stdout only; stderr is not a protocol channel." },
 ]
 
 disallowed-methods = [
-  { path = "std::io::stderr", reason = "AFDATA runtime protocol/log events must use stdout only; stderr is not a protocol channel." },
+  { path = "std::io::stderr", reason = "AFDATA protocol/log events must use stdout only; stderr is not a protocol channel." },
 ]

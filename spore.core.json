@@ -2,29 +2,23 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-http",
   "name": "Agent-First HTTP",
-  "version": "0.3.4",
+  "version": "0.4.2",
   "domain": "cmn.dev",
   "key": "ed25519.7BmCWmBb2YeUWR7pmHvwAvi9wRm96VpZsJvZFSTfc2Uu",
   "synopsis": "Persistent HTTP client for AI agents — JSONL in, JSONL out, connections managed transparently so agents never think about transport",
   "intent": [
     "Give AI agents a persistent HTTP client that maintains connection pools per host, reuses TCP+TLS connections across requests, and multiplexes concurrent streams over HTTP/2 — the agent writes JSON requests to stdin and reads JSON responses from stdout, never managing sockets, TLS handshakes, or connection lifecycles",
-    "Bridge the gap between curl (one connection per invocation, human-oriented output) and MCP (protocol-locked, requires JSON-RPC framing) — afhttp is transport-only, works with any HTTP API, and uses Agent-First Data suffix conventions for self-describing fields in every request and response",
+    "Bridge the gap between curl (one connection per invocation, human-oriented output) and protocol-locked framing — afhttp is transport-only, works with any HTTP API, and uses Agent-First Data suffix conventions for self-describing fields in every request and response",
     "Provide first-class SSE streaming support where server-sent events arrive as individual JSONL lines on stdout, enabling agents to process streaming responses (LLM tokens, progress updates, real-time feeds) without buffering the entire response"
   ],
-  "mutations": [
-    "Extend --output yaml and --output plain support to pipe mode, so agents running afhttp with --mode pipe now receive structured output in their chosen format instead of always falling back to JSON",
-    "Protect server response body fields when rendering non-JSON output by serializing them as opaque JSON strings, preventing YAML or plain formatters from re-interpreting server payloads and corrupting their structure",
-    "Upgrade agent-first-data dependency to 0.7.0, which introduces the cli_output helper and yaml/plain output format support used by the above changes"
-  ],
   "license": "MIT",
+  "mutations": [
+    "Replace --help with recursive plain-text output via agent-first-data cli_render_help, and add --help-markdown for Markdown documentation generation — agents get the full CLI interface in one call"
+  ],
   "bonds": [
     {
-      "relation": "spawned_from",
-      "uri": "cmn://cmn.dev/b3.DNRCfecJN1paBiZK4Bz9GyWc9idU1VG7Mur8WVrVkorr"
-    },
-    {
       "relation": "depends_on",
-      "uri": "cmn://cmn.dev/b3.CXRG2dKsx1Dgmw5zVCydwcLKF1zCKcEqhS1UDewyqjCu",
+      "uri": "cmn://cmn.dev/b3.AgMr3xwC5DbTa1QWvDrqoLiVU2hCK5X2gto6uBHenGkH",
       "id": "agent-first-data",
       "reason": "All request/response fields use Agent-First Data suffix conventions, and runtime protocol/log events are emitted on stdout only"
     }
@@ -32,7 +26,8 @@
   "tree": {
     "algorithm": "blob_tree_blake3_nfc",
     "exclude_names": [
-      ".git"
+      ".git",
+      ".cmn"
     ],
     "follow_rules": [
       ".gitignore"

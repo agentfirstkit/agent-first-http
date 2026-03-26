@@ -8,9 +8,6 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: .
 
     steps:
       - uses: actions/checkout@v4
@@ -27,11 +24,23 @@ jobs:
       - name: Install Python test deps
         run: pip install websockets
 
+      - name: Static (fmt + clippy)
+        run: |
+          cargo fmt --all --check
+          cargo build
+          cargo clippy -- -D warnings
+
       - name: Unit + Component
-        run: ./scripts/test.sh unit
+        run: |
+          cargo test --bin afhttp
+          bash tests/check_regressions.sh
 
       - name: End-to-end Stress
-        run: ./scripts/test.sh e2e
+        run: |
+          cargo build
+          python3 tests/stress.py
+          python3 tests/cli_stress.py
+          python3 tests/ws_stress.py
 
       - name: Coverage Gate
-        run: ./scripts/test.sh coverage
+        run: python3 tests/coverage_gate.py
