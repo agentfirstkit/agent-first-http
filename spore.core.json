@@ -2,9 +2,9 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-http",
   "name": "Agent-First HTTP",
-  "version": "0.4.2",
-  "domain": "cmn.dev",
-  "key": "ed25519.7BmCWmBb2YeUWR7pmHvwAvi9wRm96VpZsJvZFSTfc2Uu",
+  "version": "0.4.3",
+  "domain": "agentfirstkit.com",
+  "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "Persistent HTTP client for AI agents — JSONL in, JSONL out, connections managed transparently so agents never think about transport",
   "intent": [
     "Give AI agents a persistent HTTP client that maintains connection pools per host, reuses TCP+TLS connections across requests, and multiplexes concurrent streams over HTTP/2 — the agent writes JSON requests to stdin and reads JSON responses from stdout, never managing sockets, TLS handshakes, or connection lifecycles",
@@ -13,12 +13,16 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Replace --help with recursive plain-text output via agent-first-data cli_render_help, and add --help-markdown for Markdown documentation generation — agents get the full CLI interface in one call"
+    "Migrate to the agentfirstkit identity: publish under cmn://agentfirstkit.com and update repository + bond URIs",
+    "Rewrite README around agent ergonomics, with the full guide moved to docs/overview.md",
+    "Bump agent-first-data dependency to 0.8",
+    "Tighten clippy: deny unwrap, expect, panic, and stdout/stderr prints to lock in structured-JSON-only output",
+    "Overhaul release infrastructure: CI builds platform binaries with sha256 checksums, and the release script updates Homebrew + Scoop locally"
   ],
   "bonds": [
     {
       "relation": "depends_on",
-      "uri": "cmn://cmn.dev/b3.AgMr3xwC5DbTa1QWvDrqoLiVU2hCK5X2gto6uBHenGkH",
+      "uri": "cmn://agentfirstkit.com/b3.DRSaYD5qjBZoBHEukpEoRzDoBk3aangKVgYo8hBrftqZ",
       "id": "agent-first-data",
       "reason": "All request/response fields use Agent-First Data suffix conventions, and runtime protocol/log events are emitted on stdout only"
     }

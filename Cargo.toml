@@ -1,10 +1,10 @@
 [package]
 name = "agent-first-http"
-version = "0.4.2"
+version = "0.4.3"
 edition = "2021"
 description = "Persistent HTTP client for AI agents — one request, one JSON line"
 license = "MIT"
-repository = "https://github.com/cmnspore/agent-first-http"
+repository = "https://github.com/agentfirstkit/agent-first-http"
 readme = "README.md"
 exclude = [".github/"]
 
@@ -26,7 +26,7 @@ tokio-util = { version = "0.7", features = ["io"] }
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }
 futures = "0.3"
 clap = { version = "4", features = ["derive"] }
-agent-first-data = { version = "0.7", features = ["cli-help", "cli-help-markdown"] }
+agent-first-data = { version = "0.8", features = ["cli-help", "cli-help-markdown"] }
 
 [lints.clippy]
 unwrap_used = "deny"

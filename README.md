@@ -1,114 +1,43 @@
 # Agent-First HTTP
 
-Persistent HTTP client for AI agents — one request, one JSON line.
+An HTTP tool for AI agents — one request in, one line of structured JSON out.
 
-Supported platforms: macOS, Linux, Windows.
+## The problem: curl was built for people, not agents
 
-Modes (single entrypoint):
-- `--mode cli` (default)
-- `--mode pipe`
-- `--mode curl`
+Agents need to talk to the web: call an API, download a file, stream a response. The usual tool is `curl`, but `curl` was built for a person at a terminal.
 
-The key contract for agents is protocol determinism: `stdout` is always structured JSON, and failures are always structured `{"code":"error",...}` events with stable `error_code` values. No human-only text parsing, no mixed output channels, no ad-hoc error shapes.
+Its output is text meant for human eyes. A failure is a sentence you read, not data you can branch on — and a timeout, a refused connection, and a bad URL all look different. An agent ends up scraping that text and guessing what went wrong. And because `curl` starts fresh every time, an agent making many calls pays the connection cost again and again.
 
-## CLI Mode
+## What it does: one request, one JSON line
 
-The default mode — one request, one JSON response, exit:
+Agent-First HTTP makes the same web requests, but reports back in a form an agent can act on. Every request produces one JSON line. Every failure is a JSON event with a stable, named error code. Success or failure, the agent gets data — never prose.
 
-```bash
-afhttp GET https://api.example.com/users
-# {"code":"response","status":200,"body":[...],"trace":{"duration_ms":120,...}}
+- **One request, one JSON line.** Status, headers, body, and timing all come back as structured data.
+- **Failures are data too.** Timeouts, bad URLs, refused connections — all structured `{"code":"error",...}` events with stable error codes.
+- **Stays connected.** A long-lived pipe mode reuses connections, runs many requests at once, and streams responses as they arrive.
+- **Speaks curl.** A curl-compatible mode understands common `curl` flags and returns the same structured JSON.
 
-afhttp POST https://api.example.com/users --body '{"name":"Alice","email":"alice@example.com"}'
-# {"code":"response","status":201,"body":{"id":42},...}
+## Where to use it: API calls, streaming responses, and bursts of requests
 
-afhttp GET https://api.example.com/data --header "Authorization: Bearer sk-xxx"
-# {"code":"response","status":200,...}
-```
-
-Structured error output examples:
-
-```json
-{"code":"error","error_code":"connect_timeout","error":"request timed out after 30s","retryable":true,"trace":{"duration_ms":30012}}
-```
-
-```json
-{"code":"error","error_code":"invalid_request","error":"invalid --output format 'xml': expected json, yaml, or plain","retryable":false,"trace":{"duration_ms":0}}
-```
-
-## Pipe Mode
-
-For long-lived sessions with connection reuse, concurrent requests, and WebSocket — use `afhttp --mode pipe`:
-
-```bash
-afhttp --mode pipe <<'EOF'
-{"code":"config","host_defaults":{"api.example.com":{"headers":{"x-api-key":"sk-xxx","api-version":"2023-06-01"}}}}
-{"code":"request","id":"models","method":"GET","url":"https://api.example.com/v1/models"}
-{"code":"request","id":"usage","method":"GET","url":"https://api.example.com/v1/usage"}
-{"code":"request","id":"chat","method":"POST","url":"https://api.example.com/v1/messages","body":{"model":"general-chat-model","max_tokens":256,"messages":[{"role":"user","content":"Hello"}],"stream":true},"options":{"chunked":true,"chunked_delimiter":"\n\n"}}
-EOF
-```
-
-**output:**
-```json
-{"code":"config","host_defaults":{"api.example.com":{"headers":{"x-api-key":"[redacted]","api-version":"2023-06-01"}}},...}
-{"code":"response","id":"models","status":200,"body":{"data":[{"id":"general-chat-model",...}]},"trace":{"duration_ms":92,"http_version":"h2","redirects":0,"remote_addr":"13.32.4.10"}}
-{"code":"response","id":"usage","status":403,"body":{"error":{"type":"permission_error","message":"Your API key does not have permission"}},"trace":{"duration_ms":87,"http_version":"h2","redirects":0}}
-{"code":"chunk_start","id":"chat","status":200,"headers":{"content-type":"text/event-stream"}}
-{"code":"chunk_data","id":"chat","data":"event: content_block_delta\ndata: {\"delta\":{\"text\":\"Hello\"}}"}
-{"code":"chunk_data","id":"chat","data":"event: content_block_delta\ndata: {\"delta\":{\"text\":\" there\"}}"}
-{"code":"chunk_data","id":"chat","data":"event: message_stop\ndata: {}"}
-{"code":"chunk_end","id":"chat","trace":{"duration_ms":834,"chunks":8}}
-```
-
-What just happened:
-
-- **One bash call** — the heredoc sends all requests into one `afhttp` process; afhttp exits when stdin closes
-- **Auth set once per host** — `host_defaults` applies auth only to matching host; credentials do not leak to other domains
-- **Three requests fired without waiting** — `models`, `usage`, and `chat` all in-flight simultaneously
-- **Connection reuse is automatic** — requests to the same host can reuse pooled connections without extra agent logic
-- **Out-of-order responses** — `usage` arrived before `chat` finished; the agent matches by `id`
-- **Streaming inline** — `chat` delivers events as they arrive, no buffering, no special setup
-- **HTTP errors are data** — `usage` returned 403; afhttp delivers it as `code: "response"` with `status: 403`; the agent checks `status`, not exception types or text patterns
-
-## curl Compatibility
-
-Use explicit curl mode. afhttp understands a subset of curl flags and returns structured JSON:
-
-```bash
-afhttp --mode curl -X POST https://api.example.com/users \
-  -H "Authorization: Bearer sk-xxx" \
-  -d '{"name":"Alice"}'
-# {"code":"response","status":201,"body":{"id":42},...}
-```
+- **An agent calling REST APIs** — it checks a `status` field instead of parsing text, and handles errors by code.
+- **Streaming responses** — server-sent events and chunked replies arrive as structured events, live.
+- **A burst of requests to one host** — pipe mode keeps the connection warm and runs them concurrently.
+- **Replacing `curl` in an agent's toolset** — similar flags, but output it can actually read.
 
 ## Install
 
-**macOS / Linux — Homebrew**
-
 ```bash
-brew install cmnspore/tap/afhttp
-```
-
-**Windows — Scoop**
-
-```powershell
-scoop bucket add cmnspore https://github.com/cmnspore/scoop-bucket
-scoop install afhttp
-```
-
-**Any platform — Cargo**
-
-```bash
-cargo install agent-first-http
+brew install agentfirstkit/tap/afhttp   # macOS / Linux
+cargo install agent-first-http          # any platform
 ```
 
 ## Docs
 
-- [CLI](docs/cli.md) — Generated CLI guide and flag reference from `src/cli.rs`
-- [Protocol Reference](docs/reference.md) — full field specification
-- [Testing Strategy](docs/testing.md) — layered tests, coverage gate, regression policy
+- [Overview](docs/overview.md) — the full guide: every mode, with examples
+- [CLI](docs/cli.md) — command and flag reference
+- [Protocol Reference](docs/reference.md) — the complete field specification
 - [Design](docs/design.md) — architecture and principles
+- [Testing](docs/testing.md) — test strategy and coverage
 
 ## License
 

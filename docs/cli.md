@@ -2,7 +2,7 @@
 
 # afhttp CLI Reference
 
-> Regenerate with `./scripts/generate-cli-doc.sh`.
+> Regenerate with `afhttp --help-markdown`.
 > See [reference.md](reference.md) for field-level response details.
 
 # Command-Line Help for `afhttp`
