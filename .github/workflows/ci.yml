@@ -72,13 +72,13 @@ jobs:
   integration:
     strategy:
       fail-fast: false
+      # Native legs validate the binaries we actually ship (macOS via Homebrew,
+      # Windows via Scoop). Linux is covered comprehensively by integration-docker
+      # (real chromium + all backends), so there is no ubuntu native leg here —
+      # the ubuntu runner's chromium is a confined snap that can't complete
+      # download-to-disk tests.
       matrix:
         include:
-          - os: ubuntu-latest
-            install: |
-              sudo apt-get update
-              sudo apt-get install -y --no-install-recommends chromium-browser libnss3 libatk-bridge2.0-0 libdrm2 libgbm1 libxkbcommon0 fonts-liberation
-            browser_bin: /usr/bin/chromium-browser
           - os: macos-latest
             install: ""
             browser_bin: /Applications/Google Chrome.app/Contents/MacOS/Google Chrome

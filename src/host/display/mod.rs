@@ -10,9 +10,17 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+// KasmVNC takeover is Unix-only (Xvnc + a unix-socket control channel); these
+// imports are used solely by the `#[cfg(unix)]` launch path below. On Windows
+// `launch_kasmvnc()` returns BackendUnsupported, so the rest of afhttp — fetch,
+// host, ops-panel screencast — still builds and runs.
+#[cfg(unix)]
 use tokio::io::AsyncBufReadExt;
+#[cfg(unix)]
 use tokio::net::UnixStream;
-use tokio::process::{Child, Command};
+use tokio::process::Child;
+#[cfg(unix)]
+use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
