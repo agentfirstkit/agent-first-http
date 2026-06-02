@@ -18,6 +18,8 @@ command afhttp
     arg url
     arg endpoint --endpoint-url
     arg token --token-secret
+    arg browser --browser
+    arg browser_bin --browser-bin
     arg render --render
     arg tab --tab
     arg wait --wait

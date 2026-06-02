@@ -6,8 +6,9 @@ use clap::Args as ClapArgs;
 use clap::ValueEnum;
 
 use crate::cli::output;
+use crate::host::bootstrap::BrowserChoice;
 use crate::sdk::fetch::{FetchCookie, NetworkBodies, RenderMode, Wait};
-use crate::sdk::Client;
+use crate::sdk::{Client, InlineConfig};
 use crate::shared::artifacts::Artifact;
 use crate::shared::error::{Error, ErrorCode};
 use crate::shared::ids::TabId;
@@ -68,6 +69,15 @@ pub struct Args {
     /// Bearer token, if the host was started with `--token-secret`.
     #[arg(long = "token-secret", help_heading = "Connection")]
     pub token: Option<String>,
+    /// Browser backend for the inline host: auto, chromium, chrome,
+    /// chrome_shell, fingerprint-chromium, edge, brave, lightpanda, camoufox.
+    /// Ignored when --endpoint-url is set (the host owns its browser).
+    #[arg(long, default_value = "auto", help_heading = "Connection")]
+    pub browser: String,
+    /// Browser binary path for the inline host, for when auto-discovery can't
+    /// find one. Ignored when --endpoint-url is set.
+    #[arg(long = "browser-bin", value_name = "PATH", help_heading = "Connection")]
+    pub browser_bin: Option<PathBuf>,
     /// Render strategy: none (HTTP fast path, no browser), auto (HTTP first,
     /// escalate to the browser on failure), or always (browser only).
     #[arg(long, default_value = "auto", help_heading = "Rendering")]
@@ -259,8 +269,21 @@ pub async fn run(args: Args) -> Result<(), Error> {
             c
         }
         None if matches!(render, RenderMode::None) => Client::http_only()?,
-        None if matches!(render, RenderMode::Auto) => Client::inline_ephemeral_lazy().await?,
-        None => Client::inline_ephemeral().await?,
+        None => {
+            let browser = args
+                .browser
+                .parse::<BrowserChoice>()
+                .map_err(|e| Error::new(ErrorCode::InvalidArgument, format!("--browser: {e}")))?;
+            let cfg = InlineConfig {
+                browser,
+                browser_bin: args.browser_bin.clone(),
+            };
+            if matches!(render, RenderMode::Auto) {
+                Client::inline_ephemeral_lazy(cfg).await?
+            } else {
+                Client::inline_ephemeral_with(cfg).await?
+            }
+        }
     };
 
     let mut builder = client

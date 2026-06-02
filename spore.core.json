@@ -20,7 +20,7 @@
     "Add persistent, sandboxed per-host profiles with an internal cookie jar, multiple named profiles per host, and `afhttp profile cookies` inspection, keeping strict isolation from system browser data.",
     "Add an ops panel with CDP screencast and optional KasmVNC display takeover (--takeover, --display-quality) so a human can complete login/captcha/2FA inside an otherwise headless session.",
     "Add host introspection endpoints /recent-requests and /diagnostics, plus side-effect-free tab inspection and `afhttp tabs list/close`.",
-    "Broaden the request surface: HTTP methods/bodies (--method/--data/--data-file/--form), --retry/--backoff, layout-aware Wait::SelectorVisible, streamed-and-capped fast-path body, and explicit proxy+TLS options that never leak ambient proxy credentials.",
+    "Broaden the request surface: HTTP methods/bodies (--method/--data/--data-file/--form), --retry/--backoff, layout-aware Wait::SelectorVisible, streamed-and-capped fast-path body, explicit proxy+TLS options that never leak ambient proxy credentials, and cross-platform inline browser auto-discovery with --browser/--browser-bin overrides.",
     "Converge the public contract with no legacy aliases: flat *_file artifact paths, one profile per host, an opt-in storage artifact (localStorage/sessionStorage/IndexedDB), CLI flags and response fields aligned with Agent-First Data conventions, and afhttp's own injected secrets (CDP/ops token, diagnostics proxy userinfo) redacted via afdata 0.10."
   ],
   "bonds": [

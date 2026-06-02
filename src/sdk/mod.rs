@@ -15,3 +15,5 @@ pub mod inline;
 pub use client::Client;
 pub use endpoint::Endpoint;
 pub use fetch::{FetchBuilder, FetchCookie, FetchCookieSameSite, FetchResult, RenderMode, Wait};
+#[cfg(feature = "host")]
+pub use inline::InlineConfig;

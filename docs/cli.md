@@ -120,6 +120,10 @@ Fetch a URL
 
 * `--endpoint-url <ENDPOINT>` — CDP endpoint of a running host. Omit to spawn an inline ephemeral host for this one fetch
 * `--token-secret <TOKEN>` — Bearer token, if the host was started with `--token-secret`
+* `--browser <BROWSER>` — Browser backend for the inline host: auto, chromium, chrome, chrome_shell, fingerprint-chromium, edge, brave, lightpanda, camoufox. Ignored when --endpoint-url is set (the host owns its browser)
+
+  Default value: `auto`
+* `--browser-bin <PATH>` — Browser binary path for the inline host, for when auto-discovery can't find one. Ignored when --endpoint-url is set
 * `--render <RENDER>` — Render strategy: none (HTTP fast path, no browser), auto (HTTP first, escalate to the browser on failure), or always (browser only)
 
   Default value: `auto`

@@ -133,23 +133,10 @@ pub async fn run(args: Args) -> Result<(), Error> {
         }
         display = DisplayMode::Headful;
     }
-    let browser = match args.browser.as_str() {
-        "auto" => BrowserChoice::Auto,
-        "chromium" => BrowserChoice::Chromium,
-        "chrome" => BrowserChoice::Chrome,
-        "chrome_shell" | "chrome-headless-shell" => BrowserChoice::ChromeShell,
-        "fingerprint_chromium" | "fingerprint-chromium" => BrowserChoice::FingerprintChromium,
-        "edge" => BrowserChoice::Edge,
-        "brave" => BrowserChoice::Brave,
-        "lightpanda" => BrowserChoice::Lightpanda,
-        "camoufox" => BrowserChoice::Camoufox,
-        other => {
-            return Err(Error::new(
-                ErrorCode::InvalidArgument,
-                format!("--browser: unknown {other:?}"),
-            ));
-        }
-    };
+    let browser = args
+        .browser
+        .parse::<BrowserChoice>()
+        .map_err(|e| Error::new(ErrorCode::InvalidArgument, format!("--browser: {e}")))?;
     let health_public = match args.health_public.as_str() {
         "off" => HealthPublic::Off,
         "minimal" => HealthPublic::Minimal,

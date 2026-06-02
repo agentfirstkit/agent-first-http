@@ -9,7 +9,25 @@ use crate::sdk::endpoint::Endpoint;
 use crate::shared::error::{Error, ErrorCode};
 
 #[cfg(feature = "host")]
+use std::path::PathBuf;
+#[cfg(feature = "host")]
 use std::sync::Arc;
+
+#[cfg(feature = "host")]
+use crate::host::bootstrap::BrowserChoice;
+
+/// Browser configuration for an inline ephemeral host.
+///
+/// `Default` keeps the historical behavior — `BrowserChoice::Auto` with no
+/// explicit binary, i.e. auto-discovery. Set `browser_bin` to point at a
+/// specific browser when auto-discovery can't find one (e.g. a non-standard
+/// install location).
+#[cfg(feature = "host")]
+#[derive(Debug, Clone, Default)]
+pub struct InlineConfig {
+    pub browser: BrowserChoice,
+    pub browser_bin: Option<PathBuf>,
+}
 
 #[cfg(feature = "host")]
 #[derive(Clone)]
@@ -19,6 +37,7 @@ pub(crate) struct InlineHost {
 
 #[cfg(feature = "host")]
 struct InlineHostInner {
+    config: InlineConfig,
     launched: tokio::sync::Mutex<Option<LaunchedInlineHost>>,
 }
 
@@ -47,16 +66,17 @@ impl Drop for InlineHostGuard {
 
 #[cfg(feature = "host")]
 impl InlineHost {
-    pub(crate) fn lazy() -> Self {
+    pub(crate) fn lazy(config: InlineConfig) -> Self {
         Self {
             inner: Arc::new(InlineHostInner {
+                config,
                 launched: tokio::sync::Mutex::new(None),
             }),
         }
     }
 
-    pub(crate) async fn launch_now() -> Result<Self, Error> {
-        let host = Self::lazy();
+    pub(crate) async fn launch_now(config: InlineConfig) -> Result<Self, Error> {
+        let host = Self::lazy(config);
         let _ = host.endpoint().await?;
         Ok(host)
     }
@@ -66,7 +86,7 @@ impl InlineHost {
         if let Some(launched) = guard.as_ref() {
             return Ok(launched.endpoint.clone());
         }
-        let launched = launch_inline_host().await?;
+        let launched = launch_inline_host(&self.inner.config).await?;
         let endpoint = launched.endpoint.clone();
         *guard = Some(launched);
         Ok(endpoint)
@@ -78,7 +98,7 @@ impl InlineHost {
 
     #[cfg(test)]
     async fn from_state_for_tests(state: crate::host::listener::AppState) -> Result<Self, Error> {
-        let host = Self::lazy();
+        let host = Self::lazy(InlineConfig::default());
         let launched = serve_state(state).await?;
         *host.inner.launched.lock().await = Some(launched);
         Ok(host)
@@ -110,14 +130,21 @@ impl Client {
     /// in the same process as a tokio task and is shut down when the
     /// last clone of the returned `Client` is dropped.
     pub async fn inline_ephemeral() -> Result<Self, Error> {
-        let inline = InlineHost::launch_now().await?;
+        Self::inline_ephemeral_with(InlineConfig::default()).await
+    }
+
+    /// Like [`inline_ephemeral`](Self::inline_ephemeral) but with explicit
+    /// browser configuration (backend choice and/or binary path). Use this when
+    /// auto-discovery can't find a browser on the host.
+    pub async fn inline_ephemeral_with(config: InlineConfig) -> Result<Self, Error> {
+        let inline = InlineHost::launch_now(config).await?;
         let endpoint = inline.endpoint().await?;
         let client = Client::connect(&endpoint.cdp_ws_url())?.with_inline_host(inline);
         Ok(client)
     }
 
-    pub(crate) async fn inline_ephemeral_lazy() -> Result<Self, Error> {
-        let inline = InlineHost::lazy();
+    pub(crate) async fn inline_ephemeral_lazy(config: InlineConfig) -> Result<Self, Error> {
+        let inline = InlineHost::lazy(config);
         Ok(Client::connect("ws://127.0.0.1:0")?.with_inline_host(inline))
     }
 }
@@ -134,10 +161,8 @@ impl Client {
 }
 
 #[cfg(feature = "host")]
-async fn launch_inline_host() -> Result<LaunchedInlineHost, Error> {
-    use crate::host::bootstrap::{
-        BrowserChoice, DisplayMode, HealthPublic, HostArgs, ProfileChoice, Takeover,
-    };
+async fn launch_inline_host(config: &InlineConfig) -> Result<LaunchedInlineHost, Error> {
+    use crate::host::bootstrap::{DisplayMode, HealthPublic, HostArgs, ProfileChoice, Takeover};
     use crate::host::listener::AppState;
 
     let args = HostArgs {
@@ -146,8 +171,8 @@ async fn launch_inline_host() -> Result<LaunchedInlineHost, Error> {
         display: DisplayMode::Headless,
         takeover: Takeover::Off,
         display_quality: 100,
-        browser: BrowserChoice::Auto,
-        browser_bin: None,
+        browser: config.browser.clone(),
+        browser_bin: config.browser_bin.clone(),
         token: None,
         ops_enabled: false,
         health_enabled: true,

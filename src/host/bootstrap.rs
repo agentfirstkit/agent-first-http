@@ -68,8 +68,9 @@ pub enum Takeover {
     KasmVnc,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum BrowserChoice {
+    #[default]
     Auto,
     Chromium,
     Chrome,
@@ -82,6 +83,25 @@ pub enum BrowserChoice {
     /// CDP→Juggler proxy. The host spawns foxbridge which in turn
     /// spawns camoufox; the agent sees a chromium-style WS endpoint.
     Camoufox,
+}
+
+impl std::str::FromStr for BrowserChoice {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "auto" => Self::Auto,
+            "chromium" => Self::Chromium,
+            "chrome" => Self::Chrome,
+            "chrome_shell" | "chrome-headless-shell" => Self::ChromeShell,
+            "fingerprint_chromium" | "fingerprint-chromium" => Self::FingerprintChromium,
+            "edge" => Self::Edge,
+            "brave" => Self::Brave,
+            "lightpanda" => Self::Lightpanda,
+            "camoufox" => Self::Camoufox,
+            other => return Err(format!("unknown {other:?}")),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,4 +120,69 @@ pub async fn run(args: HostArgs) -> Result<(), Error> {
     install_rustls_provider();
     let state = AppState::launch(&args).await?;
     state.serve(&args.listen).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn browser_choice_default_is_auto() {
+        assert_eq!(BrowserChoice::default(), BrowserChoice::Auto);
+    }
+
+    #[test]
+    fn browser_choice_parses_every_variant_and_aliases() {
+        assert_eq!(
+            "auto".parse::<BrowserChoice>().unwrap(),
+            BrowserChoice::Auto
+        );
+        assert_eq!(
+            "chromium".parse::<BrowserChoice>().unwrap(),
+            BrowserChoice::Chromium
+        );
+        assert_eq!(
+            "chrome".parse::<BrowserChoice>().unwrap(),
+            BrowserChoice::Chrome
+        );
+        // Both spellings of the headless-shell and fingerprint backends.
+        assert_eq!(
+            "chrome_shell".parse::<BrowserChoice>().unwrap(),
+            BrowserChoice::ChromeShell
+        );
+        assert_eq!(
+            "chrome-headless-shell".parse::<BrowserChoice>().unwrap(),
+            BrowserChoice::ChromeShell
+        );
+        assert_eq!(
+            "fingerprint_chromium".parse::<BrowserChoice>().unwrap(),
+            BrowserChoice::FingerprintChromium
+        );
+        assert_eq!(
+            "fingerprint-chromium".parse::<BrowserChoice>().unwrap(),
+            BrowserChoice::FingerprintChromium
+        );
+        assert_eq!(
+            "edge".parse::<BrowserChoice>().unwrap(),
+            BrowserChoice::Edge
+        );
+        assert_eq!(
+            "brave".parse::<BrowserChoice>().unwrap(),
+            BrowserChoice::Brave
+        );
+        assert_eq!(
+            "lightpanda".parse::<BrowserChoice>().unwrap(),
+            BrowserChoice::Lightpanda
+        );
+        assert_eq!(
+            "camoufox".parse::<BrowserChoice>().unwrap(),
+            BrowserChoice::Camoufox
+        );
+    }
+
+    #[test]
+    fn browser_choice_rejects_unknown() {
+        let err = "netscape".parse::<BrowserChoice>().unwrap_err();
+        assert!(err.contains("netscape"), "error was {err:?}");
+    }
 }

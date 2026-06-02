@@ -357,6 +357,52 @@ fn resolve_browser_bin(args: &HostArgs) -> Result<PathBuf, Error> {
             }
         }
     }
+
+    // Standard app-bundle / Program Files locations the name×dir loop can't
+    // express: macOS binaries contain a space ("Google Chrome") and Windows
+    // installs live outside $PATH. Only meaningful for the chromium/chrome
+    // family; on Linux this block is compiled out entirely.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    if matches!(
+        args.browser,
+        BrowserChoice::Auto | BrowserChoice::Chromium | BrowserChoice::Chrome
+    ) {
+        let mut app_candidates: Vec<PathBuf> = Vec::new();
+        #[cfg(target_os = "macos")]
+        {
+            let mut roots = vec![PathBuf::from("/Applications")];
+            if let Ok(home) = std::env::var("HOME") {
+                roots.push(PathBuf::from(home).join("Applications"));
+            }
+            for root in roots {
+                app_candidates.push(root.join("Google Chrome.app/Contents/MacOS/Google Chrome"));
+                app_candidates.push(root.join(
+                    "Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+                ));
+                app_candidates.push(root.join("Chromium.app/Contents/MacOS/Chromium"));
+            }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let mut roots: Vec<PathBuf> = ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"]
+                .iter()
+                .filter_map(|var| std::env::var(var).ok())
+                .map(PathBuf::from)
+                .collect();
+            roots.push(PathBuf::from(r"C:\Program Files"));
+            roots.push(PathBuf::from(r"C:\Program Files (x86)"));
+            for root in roots {
+                app_candidates.push(root.join(r"Google\Chrome\Application\chrome.exe"));
+                app_candidates.push(root.join(r"Chromium\Application\chrome.exe"));
+            }
+        }
+        for p in app_candidates {
+            if p.exists() {
+                return Ok(resolve_chromium_wrapper_target(&p));
+            }
+        }
+    }
+
     Err(Error::new(
         ErrorCode::BrowserLaunchFailed,
         "no browser binary found; set --browser-bin or install chromium",

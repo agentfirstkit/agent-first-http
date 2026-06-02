@@ -22,7 +22,7 @@ use agent_first_http::host::bootstrap::{
     BrowserChoice, DisplayMode, HealthPublic, HostArgs, ProfileChoice, Takeover,
 };
 use agent_first_http::host::{browser, listener::router_for_tests, listener::test_state};
-use agent_first_http::sdk::Client;
+use agent_first_http::sdk::{Client, InlineConfig};
 use serde_json::json;
 use tokio::net::TcpListener;
 
@@ -192,12 +192,21 @@ async fn ops_panel_assets_have_right_mime_types() {
 
 #[tokio::test]
 async fn inline_ephemeral_yields_a_usable_client() {
-    if support::env::discover_browser().is_none() {
+    let Some(bin) = support::env::discover_browser() else {
         println!("(skipping: no chromium)");
         return;
-    }
+    };
     support::ensure_rustls_provider();
-    let client = Client::inline_ephemeral().await.expect("inline_ephemeral");
+    // Pass the discovered binary explicitly so the test is deterministic across
+    // platforms (CI runners install Chrome in non-standard, sometimes
+    // non-auto-discoverable, locations); the auto-discovery path itself is
+    // covered by the Docker integration job.
+    let client = Client::inline_ephemeral_with(InlineConfig {
+        browser_bin: Some(bin),
+        ..Default::default()
+    })
+    .await
+    .expect("inline_ephemeral_with");
     let h = client.health().await.expect("health");
     assert_eq!(h.status, "ok");
     let backend = h.backend.expect("backend");
