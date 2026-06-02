@@ -5,42 +5,164 @@ on:
   push:
     branches: [main]
 
-jobs:
-  test:
-    runs-on: ubuntu-latest
+# afhttp depends on a sibling crate at ../agent-first-data/rust via a
+# Cargo path override (see .cargo/config.toml). CI checks out both repos
+# in the layout the override expects.
 
+jobs:
+  static:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: taiki-e/install-action@cargo-llvm-cov
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
-
-      - name: Install Python test deps
-        run: pip install websockets
-
-      - name: Static (fmt + clippy)
+          path: kit/spores/agent-first-http
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          repository: agentfirstkit/agent-first-data
+          path: kit/spores/agent-first-data
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: fmt
+        working-directory: kit/spores/agent-first-http
+        run: cargo fmt --all --check
+      - name: build --all-features
+        working-directory: kit/spores/agent-first-http
+        run: cargo build --all-features
+      - name: build --no-default-features --features sdk
+        working-directory: kit/spores/agent-first-http
+        run: cargo build --no-default-features --features sdk
+      - name: SDK-only build excludes chromiumoxide
+        working-directory: kit/spores/agent-first-http
         run: |
-          cargo fmt --all --check
-          cargo build
-          cargo clippy -- -D warnings
+          if cargo tree --no-default-features --features sdk | grep -q chromiumoxide; then
+            echo "::error::SDK-only build linked chromiumoxide"
+            exit 1
+          fi
+      - name: clippy --all-features
+        working-directory: kit/spores/agent-first-http
+        run: cargo clippy --all-features --all-targets -- -D warnings
+      - name: clippy --no-default-features --features sdk
+        working-directory: kit/spores/agent-first-http
+        run: cargo clippy --no-default-features --features sdk --all-targets -- -D warnings
 
-      - name: Unit + Component
+  unit:
+    runs-on: ubuntu-latest
+    needs: [static]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: kit/spores/agent-first-http
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          repository: agentfirstkit/agent-first-data
+          path: kit/spores/agent-first-data
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Unit + bin tests
+        working-directory: kit/spores/agent-first-http
+        run: cargo test --lib --bins --features sdk,cli
+      - name: Regression list
+        working-directory: kit/spores/agent-first-http
+        run: bash tests/check_regressions.sh
+
+  integration:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            install: |
+              sudo apt-get update
+              sudo apt-get install -y --no-install-recommends chromium-browser libnss3 libatk-bridge2.0-0 libdrm2 libgbm1 libxkbcommon0 fonts-liberation
+            browser_bin: /usr/bin/chromium-browser
+          - os: macos-latest
+            install: ""
+            browser_bin: /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
+          - os: windows-latest
+            install: ""
+            browser_bin: C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe
+    runs-on: ${{ matrix.os }}
+    needs: [static]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: kit/spores/agent-first-http
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          repository: agentfirstkit/agent-first-data
+          path: kit/spores/agent-first-data
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install browser
+        if: matrix.install != ''
+        shell: bash
+        run: ${{ matrix.install }}
+      - name: Browser integration suite
+        working-directory: kit/spores/agent-first-http
+        env:
+          AFHTTP_TEST_BROWSER_BIN: ${{ matrix.browser_bin }}
+        shell: bash
         run: |
-          cargo test --bin afhttp
-          bash tests/check_regressions.sh
+          cargo test --features sdk,cli \
+            --test fetch_http_only \
+            --test health_capabilities \
+            --test cdp_proxy \
+            --test browser_fetch \
+            --test host_extras
 
-      - name: End-to-end Stress
+  # Full integration suite through the Docker harness. The cross-platform
+  # `integration` job above is a portability smoke (chromium-only flows); this
+  # job runs every integration test with all backends (lightpanda, camoufox,
+  # fingerprint-chromium) and KasmVNC present — the paths the apt-chromium
+  # runners cannot exercise. This is the real integration gate.
+  integration-docker:
+    runs-on: ubuntu-latest
+    needs: [static]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: kit/spores/agent-first-http
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          repository: agentfirstkit/agent-first-data
+          path: kit/spores/agent-first-data
+          fetch-depth: 1
+      # The harness builds tests/Dockerfile.test on first use (chromium + 4
+      # backends + KasmVNC), mounts the spores/ parent, and resolves the afdata
+      # path override from the sibling checkout.
+      - name: Full integration suite (Docker harness)
+        working-directory: kit/spores/agent-first-http
+        run: tests/test.sh integration
+
+  coverage:
+    runs-on: ubuntu-latest
+    needs: [static, unit, integration]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: kit/spores/agent-first-http
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          repository: agentfirstkit/agent-first-data
+          path: kit/spores/agent-first-data
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Install chromium
         run: |
-          cargo build
-          python3 tests/stress.py
-          python3 tests/cli_stress.py
-          python3 tests/ws_stress.py
-
-      - name: Coverage Gate
-        run: python3 tests/coverage_gate.py
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends chromium-browser libnss3 libatk-bridge2.0-0 libdrm2 libgbm1 libxkbcommon0 fonts-liberation
+      - name: Coverage gate
+        working-directory: kit/spores/agent-first-http
+        env:
+          AFHTTP_TEST_BROWSER_BIN: /usr/bin/chromium-browser
+        run: cargo llvm-cov --all-features --tests --fail-under-lines 68 --fail-under-regions 65

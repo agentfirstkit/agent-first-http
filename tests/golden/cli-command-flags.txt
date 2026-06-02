@@ -1,0 +1,101 @@
+command afhttp
+  command host
+    arg listen --listen
+    arg profile --profile
+    arg display --display
+    arg takeover --takeover
+    arg display_quality --display-quality-percent
+    arg browser --browser
+    arg browser_bin --browser-bin
+    arg token --token-secret
+    arg health --health
+    arg health_public --health-public
+    arg engine_envs --engine-env
+    arg browser_args --browser-arg
+    arg proxy --proxy-url
+    arg recent_requests_cap --recent-requests-cap
+  command fetch
+    arg url
+    arg endpoint --endpoint-url
+    arg token --token-secret
+    arg render --render
+    arg tab --tab
+    arg wait --wait
+    arg headers --header
+    arg cookies --cookie
+    arg user_agent --user-agent
+    arg evaluate_after_wait --evaluate-after-wait
+    arg want --want
+    arg method --method
+    arg data --data
+    arg data_file --data-file
+    arg form --form
+    arg network_bodies --network-bodies
+    arg network_body_max_bytes --network-body-max-bytes
+    arg network_redact --network-redact
+    arg out --out
+    arg cookie_jar --cookie-jar
+    arg no_cookie_jar --no-cookie-jar
+    arg observe_main_wait_ms --observe-main-wait-ms
+    arg max_response_bytes --max-response-bytes
+    arg retry --retry
+    arg backoff_ms --backoff-ms
+    arg proxy --proxy-url
+    arg ca_cert --ca-cert
+    arg tls_insecure --tls-insecure
+    arg timeout --timeout
+    arg capture_ws --capture-ws
+    arg capture_sse --capture-sse
+  command upload
+    arg endpoint --endpoint-url
+    arg token --token-secret
+    arg tab --tab
+    arg selector --selector
+    arg file --file
+  command cdp
+    arg method
+    arg endpoint --endpoint-url
+    arg token --token-secret
+    arg tab --tab
+    arg params --params
+    arg wait --wait
+  command ui
+    arg endpoint --endpoint-url
+    arg token --token-secret
+  command health
+    arg endpoint --endpoint-url
+    arg token --token-secret
+  command capabilities
+    arg endpoint --endpoint-url
+    arg token --token-secret
+  command profile
+    command list
+      arg profile_root --profile-root
+    command info
+      arg name
+      arg profile_root --profile-root
+    command lock-status
+      arg name
+      arg profile_root --profile-root
+    command downloads
+      arg name
+      arg profile_root --profile-root
+    command delete
+      arg name
+      arg confirm --confirm
+      arg profile_root --profile-root
+    command prune
+      arg older_than --older-than
+      arg dry_run --dry-run
+      arg profile_root --profile-root
+    command cookies
+      arg name
+      arg profile_root --profile-root
+  command tabs
+    command list
+      arg endpoint --endpoint-url
+      arg token --token-secret
+    command close
+      arg id
+      arg endpoint --endpoint-url
+      arg token --token-secret

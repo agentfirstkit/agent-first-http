@@ -1,4 +1,20 @@
-# One fully-qualified Rust test name per line.
-# These cases map to previously found defects and must always exist.
-handler::tests::regression_multipart_body_fields_are_mutually_exclusive
-tests::handle_config_rebuild_failure_rolls_back_config
+# Regression test list. Each non-comment line names a test that must exist
+# as a discoverable test in the test binaries. Add an entry every time a
+# production bug is fixed by a new test so deletion of that test is a
+# CI-visible regression.
+#
+shared::error::tests::every_variant_serializes_to_snake_case
+shared::error::tests::retryable_defaults_match_spec_table
+shared::redact::tests::always_redacted_headers_match_case_insensitively
+shared::artifacts::tests::filename_templates_match_spec_table
+sdk::fetch::result::tests::fetch_success_json_is_flat_golden
+shared::contract_tests::readme_and_reference_fetch_json_examples_are_flat
+sdk::inline::tests::inline_guard_drop_closes_port_and_removes_ephemeral_profile
+cli::args::tests::clap_command_flag_snapshot_matches
+cli::args::tests::cli_contract_has_no_legacy_aliases
+cli::cmd::ui::tests::ui_result_has_no_url_alias
+cli_render_none_without_endpoint_does_not_require_browser_env
+secure_cookie_on_http_url_is_skipped_not_invalid
+token_query_parameter_is_percent_decoded
+sdk::fetch::pipeline::browser::tests::err_aborted_is_not_a_download_without_cdp_download_event
+sdk::profile::tests::downloads_lists_profile_download_artifacts

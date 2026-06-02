@@ -1,0 +1,9 @@
+# Build-context excludes for container/docker/Dockerfile (BuildKit reads the
+# <dockerfile>.dockerignore next to the Dockerfile). Paths are relative to the
+# build context, which is the spore root.
+target/
+.venv/
+*.tmp
+.git/
+.DS_Store
+afhttp-out/

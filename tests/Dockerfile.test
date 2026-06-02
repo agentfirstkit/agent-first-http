@@ -1,0 +1,80 @@
+# Test image for agent-first-http.
+#
+# Built on top of rust:bookworm (Debian 12 + recent stable Rust) so the spore's
+# build/test/clippy/coverage cycle runs in a container with chromium preinstalled
+# instead of polluting the host with browser packages and chromiumoxide native deps.
+#
+# Usage is via tests/run-in-docker.sh (which builds from this file with the
+# spore root as the build context). Source is mounted as a volume; cargo registry
+# + target dirs live in named volumes so iteration is fast.
+
+FROM rust:bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Chromium + the runtime deps it needs to start. Build deps cover everything
+# chromiumoxide / aws-lc-rs / axum / openssl-sys / etc. transitively pull in
+# during compilation.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        chromium \
+        chromium-driver \
+        clang \
+        cmake \
+        curl \
+        fonts-liberation \
+        fonts-noto-cjk \
+        git \
+        jq \
+        libatk-bridge2.0-0 \
+        libatk1.0-0 \
+        libclang-dev \
+        libdrm2 \
+        libgbm1 \
+        libnss3 \
+        libssl-dev \
+        libxcomposite1 \
+        libxdamage1 \
+        libxfixes3 \
+        libxkbcommon0 \
+        libxrandr2 \
+        matchbox-window-manager \
+        pkg-config \
+        procps \
+        unzip \
+        xdg-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Browser backends — installed from the single source of truth shared with the
+# runtime image (container/docker/install-backends.sh), so pinned versions can
+# never drift between the test image and the deploy image. The test image
+# installs ALL backends (each self-skips on unsupported arch); the runtime image
+# makes each opt-in. Tests that need a given backend gate on its AFHTTP_TEST_*_BIN.
+COPY container/docker/install-backends.sh /usr/local/bin/install-backends.sh
+RUN chmod +x /usr/local/bin/install-backends.sh \
+    && install-backends.sh chrome-headless-shell \
+    && install-backends.sh lightpanda \
+    && install-backends.sh fingerprint-chromium \
+    && install-backends.sh camoufox \
+    && install-backends.sh kasmvnc
+
+# Cargo caches live on named volumes so docker rebuilds don't redownload crates.
+ENV CARGO_HOME=/cargo-home \
+    CARGO_TARGET_DIR=/cargo-target \
+    AFHTTP_TEST_BROWSER_BIN=/usr/bin/chromium \
+    AFHTTP_TEST_CHROME_SHELL_BIN=/usr/local/bin/chrome-headless-shell \
+    AFHTTP_TEST_LIGHTPANDA_BIN=/usr/local/bin/lightpanda \
+    AFHTTP_TEST_FINGERPRINT_CHROMIUM_BIN=/usr/local/bin/fingerprint-chromium \
+    AFHTTP_TEST_FOXBRIDGE_BIN=/usr/local/bin/foxbridge \
+    AFHTTP_TEST_CAMOUFOX_BIN=/usr/local/bin/camoufox \
+    AFHTTP_TEST_KASMVNC_BIN=/usr/bin/Xvnc \
+    AFHTTP_KASMVNC_BIN=/usr/bin/Xvnc \
+    AFHTTP_KASMVNC_WEB_ROOT=/usr/share/kasmvnc/www \
+    RUST_BACKTRACE=1
+
+# Install cargo-llvm-cov ahead of time so the coverage gate doesn't refetch each run.
+RUN rustup component add llvm-tools-preview clippy rustfmt \
+    && cargo install cargo-llvm-cov --locked --version "^0.6"
+
+WORKDIR /work

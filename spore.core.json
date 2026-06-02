@@ -2,27 +2,31 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-http",
   "name": "Agent-First HTTP",
-  "version": "0.4.3",
+  "version": "0.5.0",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
-  "synopsis": "Persistent HTTP client for AI agents — JSONL in, JSONL out, connections managed transparently so agents never think about transport",
+  "synopsis": "A URL acquisition tool for AI agents — give it a URL, get back the rendered page and the artifacts (HTML, screenshot, network and console logs, DOM observation) an agent needs to decide what to do next.",
   "intent": [
-    "Give AI agents a persistent HTTP client that maintains connection pools per host, reuses TCP+TLS connections across requests, and multiplexes concurrent streams over HTTP/2 — the agent writes JSON requests to stdin and reads JSON responses from stdout, never managing sockets, TLS handshakes, or connection lifecycles",
-    "Bridge the gap between curl (one connection per invocation, human-oriented output) and protocol-locked framing — afhttp is transport-only, works with any HTTP API, and uses Agent-First Data suffix conventions for self-describing fields in every request and response",
-    "Provide first-class SSE streaming support where server-sent events arrive as individual JSONL lines on stdout, enabling agents to process streaming responses (LLM tokens, progress updates, real-time feeds) without buffering the entire response"
+    "Give AI agents a deterministic URL acquisition layer that reports status, final URL, headers, body artifacts, redirects, timing, and typed transport failures as structured JSONL instead of prose",
+    "Focus on pages and web resources that are hard for agents to acquire through a simple shell fetch: JavaScript-rendered, cookie- or session-bound, bot-walled, or XHR-injected pages a plain HTTP request cannot turn into usable artifacts",
+    "Preserve session identity for multi-step web workflows: scoped request defaults, concurrent requests, streaming bodies, downloads, and future browser-backed fetch state belong in one agent-readable session"
   ],
   "license": "MIT",
   "mutations": [
-    "Migrate to the agentfirstkit identity: publish under cmn://agentfirstkit.com and update repository + bond URIs",
-    "Rewrite README around agent ergonomics, with the full guide moved to docs/overview.md",
-    "Bump agent-first-data dependency to 0.8",
-    "Tighten clippy: deny unwrap, expect, panic, and stdout/stderr prints to lock in structured-JSON-only output",
-    "Overhaul release infrastructure: CI builds platform binaries with sha256 checksums, and the release script updates Homebrew + Scoop locally"
+    "Turn afhttp from an HTTP client into a full URL-acquisition tool: one `afhttp fetch` spans the range via --render none|auto|always, returning the page plus artifacts (rendered HTML, DOM observation, screenshot, network and console logs) an agent can branch on.",
+    "Split into a long-lived browser host and an agent-driver: `afhttp host` exposes CDP/HTTP and fetches attach to it, or spawn an ephemeral inline host per fetch; ship a host container image.",
+    "Add deep network capture — Network.* aggregation with XHR/fetch/GraphQL response bodies (--network-bodies xhr|all) and WebSocket/SSE payload capture — for pages whose useful data never reaches the initial document.",
+    "Add four browser backends (chrome_shell, lightpanda, fingerprint-chromium, camoufox+foxbridge) plus a generic --browser-arg, spanning fast-headless to fingerprint-stealth acquisition.",
+    "Add persistent, sandboxed per-host profiles with an internal cookie jar, multiple named profiles per host, and `afhttp profile cookies` inspection, keeping strict isolation from system browser data.",
+    "Add an ops panel with CDP screencast and optional KasmVNC display takeover (--takeover, --display-quality) so a human can complete login/captcha/2FA inside an otherwise headless session.",
+    "Add host introspection endpoints /recent-requests and /diagnostics, plus side-effect-free tab inspection and `afhttp tabs list/close`.",
+    "Broaden the request surface: HTTP methods/bodies (--method/--data/--data-file/--form), --retry/--backoff, layout-aware Wait::SelectorVisible, streamed-and-capped fast-path body, and explicit proxy+TLS options that never leak ambient proxy credentials.",
+    "Converge the public contract with no legacy aliases: flat *_file artifact paths, one profile per host, an opt-in storage artifact (localStorage/sessionStorage/IndexedDB), CLI flags and response fields aligned with Agent-First Data conventions, and afhttp's own injected secrets (CDP/ops token, diagnostics proxy userinfo) redacted via afdata 0.10."
   ],
   "bonds": [
     {
       "relation": "depends_on",
-      "uri": "cmn://agentfirstkit.com/b3.DRSaYD5qjBZoBHEukpEoRzDoBk3aangKVgYo8hBrftqZ",
+      "uri": "cmn://agentfirstkit.com/b3.4AKgj3TGJJcFpigFeidz9Y9FFYKGjEDJPAVA9xwTwMYV",
       "id": "agent-first-data",
       "reason": "All request/response fields use Agent-First Data suffix conventions, and runtime protocol/log events are emitted on stdout only"
     }

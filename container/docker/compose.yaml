@@ -1,0 +1,34 @@
+# Sample deployment of the afhttp *host*. The driver runs separately, wherever
+# the agent is, and connects to this host's endpoint.
+#
+#   docker compose -f container/docker/compose.yaml up --build
+#
+# Toggle optional backends with the WITH_* build args (chromium is always on).
+# Set AFHTTP_TOKEN to pin the bearer token; leave it empty to let the host
+# generate and persist one to the profile volume (printed on startup).
+services:
+  afhttp-host:
+    build:
+      context: ../../
+      dockerfile: container/docker/Dockerfile
+      args:
+        WITH_CHROME_HEADLESS_SHELL: "${WITH_CHROME_HEADLESS_SHELL:-0}"
+        WITH_LIGHTPANDA: "${WITH_LIGHTPANDA:-0}"
+        WITH_FINGERPRINT_CHROMIUM: "${WITH_FINGERPRINT_CHROMIUM:-0}"
+        WITH_CAMOUFOX: "${WITH_CAMOUFOX:-0}"
+        WITH_KASMVNC: "${WITH_KASMVNC:-0}"
+    environment:
+      AFHTTP_TOKEN: "${AFHTTP_TOKEN:-}"
+      AFHTTP_PROFILE: "${AFHTTP_PROFILE:-work}"
+      AFHTTP_PORT: "${AFHTTP_PORT:-9222}"
+    # Chromium needs more than the default 64MB /dev/shm even with
+    # --disable-dev-shm-usage on some pages.
+    shm_size: "1g"
+    ports:
+      - "${AFHTTP_PORT:-9222}:${AFHTTP_PORT:-9222}"
+    volumes:
+      - afhttp-profile:/data
+    restart: unless-stopped
+
+volumes:
+  afhttp-profile:
