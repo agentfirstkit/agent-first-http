@@ -158,16 +158,10 @@ jobs:
           repository: agentfirstkit/agent-first-data
           path: kit/spores/agent-first-data
           fetch-depth: 1
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - name: Install chromium
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends chromium-browser libnss3 libatk-bridge2.0-0 libdrm2 libgbm1 libxkbcommon0 fonts-liberation
-      - name: Coverage gate
+      # Run coverage in the Docker harness (real chromium + all backends), like
+      # integration-docker. The ubuntu runner's chromium is a confined snap that
+      # can't complete download-to-disk / CDP tests, which falsely failed the
+      # coverage gate; the threshold lives in tests/test.sh (single source).
+      - name: Coverage gate (Docker harness)
         working-directory: kit/spores/agent-first-http
-        env:
-          AFHTTP_TEST_BROWSER_BIN: /usr/bin/chromium-browser
-        run: cargo llvm-cov --all-features --tests --fail-under-lines 66 --fail-under-regions 65
+        run: tests/test.sh coverage
