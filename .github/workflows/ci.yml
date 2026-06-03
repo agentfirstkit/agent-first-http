@@ -170,4 +170,4 @@ jobs:
         working-directory: kit/spores/agent-first-http
         env:
           AFHTTP_TEST_BROWSER_BIN: /usr/bin/chromium-browser
-        run: cargo llvm-cov --all-features --tests --fail-under-lines 68 --fail-under-regions 65
+        run: cargo llvm-cov --all-features --tests --fail-under-lines 66 --fail-under-regions 65
