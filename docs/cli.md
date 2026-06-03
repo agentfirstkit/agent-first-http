@@ -30,6 +30,15 @@ This document contains the help content for the `afhttp` command-line program.
 * [`afhttp tabs`↴](#afhttp-tabs)
 * [`afhttp tabs list`↴](#afhttp-tabs-list)
 * [`afhttp tabs close`↴](#afhttp-tabs-close)
+* [`afhttp skill`↴](#afhttp-skill)
+* [`afhttp skill status`↴](#afhttp-skill-status)
+* [`afhttp skill install`↴](#afhttp-skill-install)
+* [`afhttp skill uninstall`↴](#afhttp-skill-uninstall)
+* [`afhttp container`↴](#afhttp-container)
+* [`afhttp container install`↴](#afhttp-container-install)
+* [`afhttp container uninstall`↴](#afhttp-container-uninstall)
+* [`afhttp container status`↴](#afhttp-container-status)
+* [`afhttp container logs`↴](#afhttp-container-logs)
 
 ## `afhttp`
 
@@ -64,6 +73,8 @@ error_code. The tool never decides what a page means — the agent does.
 * `capabilities` — Query /capabilities
 * `profile` — Local profile lifecycle commands
 * `tabs` — List and close CDP targets attached to the host
+* `skill` — Install, remove, or check the embedded Agent Skill (Codex, Claude Code, opencode)
+* `container` — Build and run the host container (Docker or Apple) from the embedded recipe
 
 
 
@@ -427,3 +438,182 @@ Close a target by its CDP target id
 
 * `--endpoint-url <ENDPOINT>` — CDP endpoint URL (e.g. `ws://127.0.0.1:9222`)
 * `--token-secret <TOKEN>` — Bearer token, if the host was started with `--token-secret`
+
+
+
+## `afhttp skill`
+
+Install, remove, or check the embedded Agent Skill (Codex, Claude Code, opencode)
+
+**Usage:** `afhttp skill <COMMAND>`
+
+###### **Subcommands:**
+
+* `status` — Show whether the skill is installed, valid, and up to date
+* `install` — Install or refresh the skill
+* `uninstall` — Remove a managed skill
+
+
+
+## `afhttp skill status`
+
+Show whether the skill is installed, valid, and up to date
+
+**Usage:** `afhttp skill status [OPTIONS]`
+
+###### **Options:**
+
+* `--agent <AGENT>` — Agent to manage: all, codex, claude-code, opencode
+
+  Default value: `all`
+* `--scope <SCOPE>` — Skill scope: personal or project (project is Claude Code / opencode only)
+
+  Default value: `personal`
+* `--skills-dir <SKILLS_DIR>` — Skills directory; requires a single concrete --agent
+
+
+
+## `afhttp skill install`
+
+Install or refresh the skill
+
+**Usage:** `afhttp skill install [OPTIONS]`
+
+###### **Options:**
+
+* `--agent <AGENT>` — Agent to manage: all, codex, claude-code, opencode
+
+  Default value: `all`
+* `--scope <SCOPE>` — Skill scope: personal or project (project is Claude Code / opencode only)
+
+  Default value: `personal`
+* `--skills-dir <SKILLS_DIR>` — Skills directory; requires a single concrete --agent
+* `--force` — Overwrite or remove a skill this tool did not manage
+
+
+
+## `afhttp skill uninstall`
+
+Remove a managed skill
+
+**Usage:** `afhttp skill uninstall [OPTIONS]`
+
+###### **Options:**
+
+* `--agent <AGENT>` — Agent to manage: all, codex, claude-code, opencode
+
+  Default value: `all`
+* `--scope <SCOPE>` — Skill scope: personal or project (project is Claude Code / opencode only)
+
+  Default value: `personal`
+* `--skills-dir <SKILLS_DIR>` — Skills directory; requires a single concrete --agent
+* `--force` — Overwrite or remove a skill this tool did not manage
+
+
+
+## `afhttp container`
+
+Build and run the host container (Docker or Apple) from the embedded recipe
+
+**Usage:** `afhttp container <COMMAND>`
+
+###### **Subcommands:**
+
+* `install` — Build the host image if missing and run the container; print the client command
+* `uninstall` — Stop and remove the container (--purge also removes the image and cache)
+* `status` — Report whether the host is running, with its endpoint and client command
+* `logs` — Stream the container logs (raw passthrough, not a JSON envelope)
+
+
+
+## `afhttp container install`
+
+Build the host image if missing and run the container; print the client command
+
+**Usage:** `afhttp container install [OPTIONS] [HOST_ARGS]...`
+
+###### **Arguments:**
+
+* `<HOST_ARGS>` — Extra args passed through to `afhttp host` inside the container
+
+###### **Options:**
+
+* `--runtime <RUNTIME>` — Container runtime: docker, podman, or apple (auto-detected if omitted)
+
+  Possible values: `docker`, `podman`, `apple`
+
+* `--name <NAME>` — Container name
+
+  Default value: `afhttp-host`
+* `--port <PORT>` — Host CDP port, published on 127.0.0.1
+
+  Default value: `9222`
+* `--profile <PROFILE>` — Profile name inside the container
+
+  Default value: `work`
+* `--shm-size <SHM_SIZE>` — Chromium /dev/shm size
+
+  Default value: `1g`
+* `--with <BACKEND>` — Optional backend to build in (repeatable): chrome-headless-shell, lightpanda, fingerprint-chromium, camoufox, kasmvnc
+* `--rebuild` — Rebuild the image even if it already exists
+* `--from-source` — Build the full image from a source checkout (container/docker/Dockerfile) instead of downloading the prebuilt release. Needs the source tree
+* `--context <DIR>` — Source checkout to build from with --from-source (default: current dir)
+
+
+
+## `afhttp container uninstall`
+
+Stop and remove the container (--purge also removes the image and cache)
+
+**Usage:** `afhttp container uninstall [OPTIONS]`
+
+###### **Options:**
+
+* `--runtime <RUNTIME>` — Container runtime: docker, podman, or apple (auto-detected if omitted)
+
+  Possible values: `docker`, `podman`, `apple`
+
+* `--name <NAME>` — Container name
+
+  Default value: `afhttp-host`
+* `--purge` — Also remove the built image and the cached build context
+
+
+
+## `afhttp container status`
+
+Report whether the host is running, with its endpoint and client command
+
+**Usage:** `afhttp container status [OPTIONS]`
+
+###### **Options:**
+
+* `--runtime <RUNTIME>` — Container runtime: docker, podman, or apple (auto-detected if omitted)
+
+  Possible values: `docker`, `podman`, `apple`
+
+* `--name <NAME>` — Container name
+
+  Default value: `afhttp-host`
+* `--port <PORT>` — Published host port, used to format the endpoint and client command
+
+  Default value: `9222`
+
+
+
+## `afhttp container logs`
+
+Stream the container logs (raw passthrough, not a JSON envelope)
+
+**Usage:** `afhttp container logs [OPTIONS]`
+
+###### **Options:**
+
+* `--runtime <RUNTIME>` — Container runtime: docker, podman, or apple (auto-detected if omitted)
+
+  Possible values: `docker`, `podman`, `apple`
+
+* `--name <NAME>` — Container name
+
+  Default value: `afhttp-host`
+* `-f`, `--follow` — Follow the log output

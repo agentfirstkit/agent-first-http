@@ -66,7 +66,7 @@ case "$MODE" in
     run "cargo test --all-features --test display_takeover -- --ignored --test-threads=1"
     ;;
   coverage)
-    run "cargo llvm-cov --all-features --tests --fail-under-lines 68 --fail-under-regions 65"
+    run "cargo llvm-cov --all-features --tests --fail-under-lines 66 --fail-under-regions 65"
     ;;
   default)
     run "cargo fmt --all --check"

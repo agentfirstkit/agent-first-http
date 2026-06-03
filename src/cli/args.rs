@@ -49,6 +49,10 @@ pub enum Command {
     Profile(crate::cli::cmd::profile::Args),
     /// List and close CDP targets attached to the host.
     Tabs(crate::cli::cmd::tabs::Args),
+    /// Install, remove, or check the embedded Agent Skill (Codex, Claude Code, opencode).
+    Skill(crate::cli::cmd::skill::Args),
+    /// Build and run the host container (Docker or Apple) from the embedded recipe.
+    Container(crate::cli::cmd::container::Args),
 }
 
 pub struct Parsed {
@@ -99,7 +103,7 @@ mod tests {
     #[test]
     fn cli_contract_has_no_legacy_aliases() {
         let command = Cli::command();
-        assert_eq!(command.get_subcommands().count(), 9);
+        assert_eq!(command.get_subcommands().count(), 11);
         let mut snapshot = String::new();
         write_command_snapshot(&command, 0, &mut snapshot);
         for forbidden in [

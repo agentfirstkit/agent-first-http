@@ -93,15 +93,30 @@ bash tests/test.sh integration
 # tests/display_takeover.rs, tests/network_artifact.rs, and tests/tabs_management.rs
 ```
 
-### CI matrix
+### CI (`.github/workflows/ci.yml`)
+
+Linux is covered by the **`integration-docker`** job, which runs the full
+integration suite through the Docker harness (real chromium + every backend +
+KasmVNC, `AFHTTP_NO_SANDBOX=1` so the in-container sandbox is off). There is no
+ubuntu *native* leg: the ubuntu runner's chromium is a confined snap that can't
+complete download-to-disk tests.
+
+The **native** `integration` matrix validates the binaries actually shipped, and
+runs with Chromium's sandbox **on** (no `AFHTTP_NO_SANDBOX`) since these are
+normal desktops:
 
 | OS | Browser | Source |
 | --- | --- | --- |
-| ubuntu-latest | Chromium | apt `chromium-browser` or `browser-actions/setup-chrome` |
-| macos-latest | Chrome | preinstalled by GitHub-hosted runner |
-| windows-latest | Chrome | preinstalled by GitHub-hosted runner |
+| macos-latest | Chrome | preinstalled by GitHub-hosted runner (Homebrew binary) |
+| windows-latest | Chrome | preinstalled by GitHub-hosted runner (Scoop binary) |
 
-The Lightpanda backend is exercised in a separate optional job (not gating) when the binary is available.
+The matrix sets `RUST_MIN_STACK=16 MiB` so the deep fetch/host future chain
+doesn't overflow Windows' small default thread stack.
+
+The flaky-by-design **ops-panel and display-takeover** suites run in their own
+non-blocking nightly workflow (`.github/workflows/ops-takeover.yml`), not in the
+gating `ci.yml`. The Lightpanda backend is exercised inside `integration-docker`
+when its binary is present.
 
 ## Ops Panel Tests
 

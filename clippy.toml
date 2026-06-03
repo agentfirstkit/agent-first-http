@@ -1,15 +1,8 @@
-# Canonical clippy config for every Rust spore in this kit.
+# Canonical clippy config for every Rust spore in this kit. Every binary spore
+# is an Agent-First Data emitter — structured events on stdout, never stderr.
 #
-# Source of truth — `sync-spore-meta.py` mirrors this file into:
-#   spores/agent-first-data/rust/clippy.toml   (multi-language: rust subdir)
-#   spores/agent-first-http/clippy.toml
-#   spores/agent-first-mail/clippy.toml
-#   spores/agent-first-pay/clippy.toml
-#   spores/agent-first-psql/clippy.toml
-#   spores/agent-first-ui/clippy.toml          (workspace root)
-#
-# Edit this file, then `python3 scripts/sync-spore-meta.py <spore> --no-github`
-# (release pipeline runs the propagation automatically).
+# Source of truth — `sync-clippy.sh` mirrors this file into each spore's
+# clippy.toml. Edit this file, then `bash scripts/sync-clippy.sh`.
 
 disallowed-macros = [
   { path = "std::eprintln", reason = "AFDATA protocol/log events must use stdout only; stderr is not a protocol channel." },

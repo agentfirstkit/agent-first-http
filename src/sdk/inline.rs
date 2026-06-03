@@ -162,8 +162,15 @@ impl Client {
 
 #[cfg(feature = "host")]
 async fn launch_inline_host(config: &InlineConfig) -> Result<LaunchedInlineHost, Error> {
-    use crate::host::bootstrap::{DisplayMode, HealthPublic, HostArgs, ProfileChoice, Takeover};
+    use crate::host::bootstrap::{
+        install_rustls_provider, DisplayMode, HealthPublic, HostArgs, ProfileChoice, Takeover,
+    };
     use crate::host::listener::AppState;
+
+    // The host side builds a reqwest client (CDP /json fetch) before the SDK
+    // client's own provider guard runs; install it up front so SDK callers of
+    // inline_ephemeral_with don't panic.
+    install_rustls_provider();
 
     let args = HostArgs {
         listen: "tcp:127.0.0.1:0".into(),

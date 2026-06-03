@@ -10,13 +10,14 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agent-first-data"
-version = "0.10.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "754ef5eab4f5a8857c77f62674565aad97f89730dc3b6d5e021e0c559b26b9a0"
+checksum = "72c9bc8e1bbe2cec54e694bcd452888fe4831a418c8766acdbadca8a42ac3cba"
 dependencies = [
  "chrono",
  "clap",
  "clap-markdown",
+ "serde",
  "serde_json",
  "url",
 ]

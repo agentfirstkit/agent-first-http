@@ -2,11 +2,14 @@
 name = "agent-first-http"
 version = "0.5.0"
 edition = "2021"
-description = "A URL acquisition tool for AI agents — give it a URL, get back the rendered page and the artifacts (HTML, screenshot, network and console logs, DOM observation) an agent needs to decide what to do next."
+description = "Give an AI agent any URL and get back a usable page — fetched directly, or rendered in a real browser when the page needs one — with a human able to take over the same browser for a login, captcha, or 2FA."
 license = "MIT"
 repository = "https://github.com/agentfirstkit/agent-first-http"
 readme = "README.md"
-exclude = [".github/", "container/", "tests/Dockerfile.test", "tests/Dockerfile.test.dockerignore"]
+# container/docker/{Dockerfile,install-backends.sh,entrypoint.sh} are embedded
+# via include_str! in cli/cmd/container.rs, so they must ship in the crate; the
+# rest of container/ (compose, dockerignore) is build/deploy-only.
+exclude = [".github/", "container/docker/compose.yaml", "container/docker/Dockerfile.dockerignore", "tests/Dockerfile.test", "tests/Dockerfile.test.dockerignore"]
 
 [[bin]]
 name = "afhttp"
@@ -32,7 +35,7 @@ host = [
     "dep:hyper",
     "dep:hyper-util",
 ]
-cli = ["sdk", "host", "dep:clap", "agent-first-data/cli-help", "agent-first-data/cli-help-markdown"]
+cli = ["sdk", "host", "dep:clap", "agent-first-data/cli-help", "agent-first-data/cli-help-markdown", "agent-first-data/skill-admin"]
 
 [dependencies]
 # SDK floor — always compiled.
@@ -64,8 +67,11 @@ hyper = { version = "1", optional = true, features = ["full"] }
 hyper-util = { version = "0.1", optional = true, features = ["server-auto", "tokio"] }
 
 # SDK floor — used for URL secret redaction (redact_url_secrets); the cli-help
-# features are enabled only by the `cli` feature.
-agent-first-data = { version = "0.10", default-features = false }
+# and skill-admin features are enabled only by the `cli` feature. Resolves from
+# crates.io; local monorepo development overrides it to the sibling crate via
+# `.cargo/config.toml` (`paths = ["../agent-first-data/rust"]`), which is not
+# copied into image builds — so they get the published 0.11 from the registry.
+agent-first-data = { version = "0.11", default-features = false }
 # CLI feature deps.
 clap = { version = "4", optional = true, features = ["derive"] }
 cookie = "0.18"

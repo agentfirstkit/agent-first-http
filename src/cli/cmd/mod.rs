@@ -3,10 +3,12 @@
 
 pub mod capabilities;
 pub mod cdp;
+pub mod container;
 pub mod fetch;
 pub mod health;
 pub mod host;
 pub mod profile;
+pub mod skill;
 pub mod tabs;
 pub mod ui;
 pub mod upload;

@@ -71,6 +71,7 @@ ENV CARGO_HOME=/cargo-home \
     AFHTTP_TEST_KASMVNC_BIN=/usr/bin/Xvnc \
     AFHTTP_KASMVNC_BIN=/usr/bin/Xvnc \
     AFHTTP_KASMVNC_WEB_ROOT=/usr/share/kasmvnc/www \
+    AFHTTP_NO_SANDBOX=1 \
     RUST_BACKTRACE=1
 
 # Install cargo-llvm-cov ahead of time so the coverage gate doesn't refetch each run.

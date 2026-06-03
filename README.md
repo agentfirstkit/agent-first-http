@@ -1,86 +1,99 @@
 # Agent-First HTTP
 
-A URL acquisition tool for AI agents — give it a URL, get back the rendered page and the artifacts (HTML, screenshot, network and console logs, DOM observation) an agent needs to decide what to do next.
+Give an AI agent any URL and get back a usable page — fetched directly, or rendered in a real browser when the page needs one — with a human able to take over the same browser for a login, captcha, or 2FA.
 
-## The problem: agents often cannot reach the page
+## The basics: hand it a URL, get the page back as data
 
-The hard part for an agent is not fetching bytes. It is that many useful URLs do not turn into a usable page from a simple shell request. Modern pages depend on JavaScript rendering, cookies, session state, captchas, and sometimes a browser fingerprint the target site recognizes. When acquisition fails, a human can open a browser and inspect; an agent needs the same facts as data it can branch on.
+Give afhttp a URL; it writes the page to disk and prints one line of JSON saying what it got:
 
-## What `afhttp` does
+```bash
+$ afhttp fetch https://example.com
+{"code":"fetch","status":200,"final_url":"https://example.com/","body_file":"afhttp-out/<id>/body.html","text_file":"afhttp-out/<id>/text.txt"}
+```
 
-`afhttp` covers the whole acquisition range behind one structured contract:
+That is the whole job: **hand it a URL, get the page back as files an agent can read** — never a terminal blob to scrape, and every failure a stable `error_code` rather than a guess.
 
-- **Plain HTTP fetch** when the page works without a browser.
-- **Browser-backed fetch** when it does not, producing rendered HTML, an observation snapshot, screenshot, and network/console logs as artifacts.
-- **Deep network capture** when the useful data arrives through XHR/fetch/GraphQL instead of the initial document.
-- **Raw CDP escape hatch** when the agent needs to drive the browser directly (DOM inspection, form submission, custom waits) without a "click/type" abstraction layer.
-- **Ops panel** when a human needs to step in (manual login, captcha, 2FA) on the same browser the agent is using — the default panel needs no VNC/X server, and an optional KasmVNC display-takeover mode is available for hard sites.
-- **Health/capabilities endpoints and profile tools** for host readiness, backend planning, captured-download listing, and local persistent-profile lifecycle management.
-
-Every output is structured JSON. Every failure carries a stable `error_code`. The tool never decides what a page means or what to do next — the agent does.
-
-## Two roles
-
-| Role | Command | What it does |
-| --- | --- | --- |
-| **browser-host** | `afhttp host` | Long-running process. Holds Chromium + an on-disk profile. Exposes a CDP endpoint and the ops panel. |
-| **agent-driver** | `afhttp fetch`, `afhttp upload`, `afhttp cdp`, `afhttp ui`, `afhttp health`, `afhttp capabilities`, `afhttp profile`, `afhttp tabs`, or the Rust SDK | Short-lived client. Connects to a host's endpoint when needed, does work, writes artifacts locally. |
-
-Hosts and drivers are independently locatable: run the host where the browser needs to be (residential IP, GUI machine, datacenter); run the driver wherever the agent runs. Connectivity is your mesh's problem.
-
-
-The CLI has 9 commands: `host`, `fetch`, `upload`, `cdp`, `ui`, `health`, `capabilities`, `profile`, and `tabs`.
-
-Fetch success output keeps artifact paths flat at the top level:
+By default afhttp sends a **plain HTTP request** and only starts a **real browser** when the page actually needs one (`--render none` forces the fast path, `--render always` forces the browser, `--render auto` decides). A browser-backed fetch captures more of what a human would look at — rendered HTML, a screenshot, a DOM observation, the network and console logs — each a flat `*_file` field on the same JSON, never nested:
 
 ```json
 {
   "code": "fetch",
   "status": 200,
   "final_url": "https://example.com/",
-  "body_file": "/work/afhttp-out/req/body.html",
-  "rendered_html_file": "/work/afhttp-out/req/rendered.html",
-  "network_file": "/work/afhttp-out/req/network.json",
-  "trace": {"render_decision": "browser", "render_used": true, "duration_ms": 820}
+  "body_file": "afhttp-out/<id>/body.html",
+  "rendered_html_file": "afhttp-out/<id>/rendered.html",
+  "text_file": "afhttp-out/<id>/text.txt",
+  "screenshot_file": "afhttp-out/<id>/page.png",
+  "network_file": "afhttp-out/<id>/network.json",
+  "console_file": "afhttp-out/<id>/console.json",
+  "observation_file": "afhttp-out/<id>/observation.json"
 }
 ```
 
-## Running the host
+## Browser backends: meet each site with the engine it demands
 
-The **driver** commands are a thin client — install the binary and run them
-wherever the agent is. The **host** runs a real browser (launched `--no-sandbox`,
-so the container is the isolation boundary), holds a profile, and serves a
-full-control CDP endpoint — so **run the host in a container**. This spore ships
-one at [`container/docker/`](container/docker/) (chromium by default, other
-backends opt-in via build args, token-by-default):
+afhttp is not "headless Chromium." How hard a site fights back decides which engine actually reaches it, so afhttp drives a whole spectrum behind one CDP contract — pick one with `--browser` (or point `--browser-bin` at a binary):
 
-```bash
-docker build -t afhttp-host -f container/docker/Dockerfile .
-docker run --rm -p 9222:9222 --shm-size=1g -v afhttp-profile:/data afhttp-host
-```
+- **chromium / chrome** — the default: full rendering, screenshots, downloads.
+- **chrome-headless-shell** — a lean headless build for fast, low-overhead fetches.
+- **fingerprint-chromium** — Chromium that randomizes its fingerprint per profile, for bot-walled sites.
+- **camoufox** — a Firefox stealth fork (via foxbridge) for sites that fingerprint Chromium.
+- **lightpanda** — an ultralight engine covering a rendering subset without a full browser.
+- **edge / brave** — when a target expects that specific engine.
 
-See [docs/deployment.md](docs/deployment.md) for backends, security, and human takeover.
+## Human takeover: a person drives the same browser when a step needs it
 
-## Install
+For a manual login, captcha, or 2FA, a person drives the *same* browser the agent is using — through an ops panel that needs no VNC/X server by default, or an optional KasmVNC display for hard sites — then hands it back with session state intact.
 
-**macOS / Linux — Homebrew**
+## Running it: inline for a one-shot, a host for sessions
 
-```bash
-brew install agentfirstkit/tap/afhttp
-```
+`afhttp fetch <url>` with no `--endpoint-url` runs **inline** — it spins up a sandboxed browser for that one fetch and tears it down. Zero setup; use it for stateless, one-shot acquisition.
 
-**Windows — Scoop**
-
-```powershell
-scoop bucket add agentfirstkit https://github.com/agentfirstkit/scoop-bucket
-scoop install afhttp
-```
-
-**Any platform — Cargo**
+For state that outlives a single fetch — a reused login, a warmed profile, human takeover — run a long-lived **host** in a container (the isolation boundary) and point the driver at it with `--endpoint-url`. One command builds the image from a recipe embedded in the binary and runs it (Docker, Podman, or Apple `container`, auto-detected — override with `--runtime`); it prints a bearer token and a ready-to-run driver command:
 
 ```bash
-cargo install agent-first-http
+afhttp container install
 ```
+
+Building from a source checkout instead? `docker compose -f container/docker/compose.yaml up --build` is the from-source path. See [docs/deployment.md](docs/deployment.md) for the full container setup and security posture.
+
+## Adopt it: hand afhttp to your agent
+
+The quickest way to find out whether afhttp earns a place in your toolkit is to
+let your agent read it and tell you. Paste this to your agent:
+
+> Read what Agent-First HTTP is at https://agentfirstkit.com/agent-first-http,
+> then tell me in plain terms what it would do for me and whether it fits what
+> I'm working on. If it's a fit, install it — the prebuilt package for the quick
+> path, or build from source after a quick security review of the repo if you'd
+> rather read what you run — then run `afhttp skill install` so you follow its
+> behavior rules.
+
+If it's a fit, install it — a prebuilt package, or from source if you want to
+read it first:
+
+```bash
+# prebuilt binary
+brew install agentfirstkit/tap/afhttp   # macOS / Linux
+scoop bucket add agentfirstkit https://github.com/agentfirstkit/scoop-bucket && scoop install afhttp   # Windows
+
+# or build from source after reviewing the repo
+git clone https://github.com/agentfirstkit/agent-first-http
+cargo install --path agent-first-http
+```
+
+Then install the embedded [Agent Skill](skills/agent-first-http.md) so the agent
+follows afhttp's behavior rules — when to escalate `--render`, when to reach for
+human takeover, how to read the artifacts. `skill install` targets Codex, Claude
+Code, and opencode; `skill status` reports whether each install is present,
+valid, and current:
+
+```bash
+afhttp skill install
+afhttp skill status
+```
+
+To remove it, run `afhttp skill uninstall`.
 
 ## Docs
 

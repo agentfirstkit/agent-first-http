@@ -2,19 +2,31 @@
 #
 # The driver (`afhttp fetch`/`cdp`/`upload`/…) is a thin client and runs directly
 # wherever the agent is — it does NOT need this image. The host runs a real
-# browser (launched `--no-sandbox`, so the container is the isolation boundary),
-# holds a persistent profile, and exposes a CDP endpoint; that is what belongs in
-# a container. See docs/deployment.md.
+# browser with Chromium's own sandbox disabled (the image sets AFHTTP_NO_SANDBOX,
+# so the container itself is the isolation boundary; afhttp keeps the sandbox ON
+# when run natively), holds a persistent profile, and exposes a CDP endpoint; that
+# is what belongs in a container. See docs/deployment.md.
 #
-# Build context is the spore root:
-#   docker build -t afhttp-host -f container/docker/Dockerfile .
-# Optional backends are opt-in (chromium is always present):
+# The afhttp binary comes from ONE of two source stages, picked by the
+# AFHTTP_BIN_FROM build-arg:
+#   builder    — compile from a source checkout (default; dev / `--from-source`).
+#                Build context is the spore root:
+#                  docker build -t afhttp-host -f container/docker/Dockerfile .
+#   downloader — download the matching prebuilt release; what `afhttp container
+#                install` uses. Needs --build-arg AFHTTP_VERSION + AFHTTP_TARGET.
+# BuildKit only builds the selected stage, so the download path pulls no Rust
+# toolchain and needs no source tree, while the from-source path makes no network
+# call for a release. Optional backends are opt-in (chromium is always present):
 #   docker build --build-arg WITH_CAMOUFOX=1 --build-arg WITH_KASMVNC=1 ...
 #
-# This is NOT the test image — tests/Dockerfile.test (rust toolchain + all backends +
-# coverage tooling, source mounted as a volume) is for build/test/clippy/coverage.
+# This is NOT the test image — tests/Dockerfile.test (rust toolchain + all backends
+# + coverage tooling, source mounted as a volume) is for build/test/clippy/coverage.
 
-# ── Build stage ──
+# Selects which source stage below provides the binary (see FROM ${AFHTTP_BIN_FROM}).
+# Global (before the first FROM) so it is usable on a FROM line.
+ARG AFHTTP_BIN_FROM=builder
+
+# ── Source stage A: compile from a checkout (default) ──
 FROM rust:bookworm AS builder
 WORKDIR /src
 # Only the crate inputs — NOT .cargo/ (its dev path override to
@@ -25,10 +37,38 @@ COPY src/ src/
 COPY assets/ assets/
 COPY tests/ tests/
 COPY examples/ examples/
+# Embedded at compile time via include_str!: the skill (skill.rs) and the
+# container build recipe + shared scripts (container.rs).
+COPY skills/ skills/
+COPY container/ container/
 RUN cargo build --release --bin afhttp \
     && cp target/release/afhttp /usr/local/bin/afhttp
 
-# ── Runtime stage ──
+# ── Source stage B: download the matching prebuilt release ──
+FROM debian:bookworm-slim AS downloader
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+# Hard-pinned by the driver: its own version + the linux triple for the image
+# arch. A 404 here means no release asset exists for this version/arch — the
+# driver surfaces that and points at the from-source path.
+ARG AFHTTP_VERSION
+ARG AFHTTP_TARGET
+RUN set -eu; \
+    base="https://github.com/agentfirstkit/agent-first-http/releases/download/v${AFHTTP_VERSION}"; \
+    archive="afhttp-v${AFHTTP_VERSION}-${AFHTTP_TARGET}.tar.gz"; \
+    cd /tmp; \
+    curl -fsSL -o "$archive" "${base}/${archive}"; \
+    curl -fsSL -o "${archive}.sha256" "${base}/${archive}.sha256"; \
+    sha256sum -c "${archive}.sha256"; \
+    tar -xzf "$archive" -C /usr/local/bin afhttp; \
+    chmod +x /usr/local/bin/afhttp
+
+# ── Pick the source stage that provides /usr/local/bin/afhttp ──
+FROM ${AFHTTP_BIN_FROM} AS afhttp_bin
+
+# ── Runtime image (single source of truth for the host) ──
 FROM debian:bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -77,17 +117,19 @@ RUN if [ "$WITH_FINGERPRINT_CHROMIUM" = "1" ]; then install-backends.sh fingerpr
 RUN if [ "$WITH_CAMOUFOX" = "1" ]; then install-backends.sh camoufox; fi
 RUN if [ "$WITH_KASMVNC" = "1" ]; then install-backends.sh kasmvnc; fi
 
-COPY --from=builder /usr/local/bin/afhttp /usr/local/bin/afhttp
+COPY --from=afhttp_bin /usr/local/bin/afhttp /usr/local/bin/afhttp
 COPY container/docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-# Non-root: chromium runs `--no-sandbox` so it does not need root. Profiles live
-# under $XDG_DATA_HOME (a volume). KasmVNC env is harmless when Xvnc isn't built
-# in — the host only reads it for `--takeover kasmvnc`.
+# Non-root: AFHTTP_NO_SANDBOX makes chromium run with its sandbox off (the
+# container is the boundary), so it does not need root. Profiles live under
+# $XDG_DATA_HOME (a volume). KasmVNC env is harmless when Xvnc isn't built in —
+# the host only reads it for `--takeover kasmvnc`.
 RUN useradd --create-home --uid 10001 afhttp \
     && mkdir -p /data \
     && chown -R afhttp:afhttp /data
 ENV XDG_DATA_HOME=/data \
+    AFHTTP_NO_SANDBOX=1 \
     AFHTTP_KASMVNC_BIN=/usr/bin/Xvnc \
     AFHTTP_KASMVNC_WEB_ROOT=/usr/share/kasmvnc/www
 

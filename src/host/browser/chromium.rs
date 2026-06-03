@@ -54,7 +54,6 @@ pub(super) async fn launch(args: &HostArgs) -> Result<BrowserHandle, Error> {
             ));
             continue;
         }
-
         let ws_url = match read_chromium_ws_url(port).await {
             Ok(ws_url) => ws_url,
             Err(e) => {
@@ -96,7 +95,6 @@ pub(super) async fn launch(args: &HostArgs) -> Result<BrowserHandle, Error> {
                 // open their own CDP sessions through the proxy.
             }
         });
-
         let version = match browser.version().await {
             Ok(v) => v.product,
             Err(_) => "unknown".into(),
@@ -145,8 +143,15 @@ fn chromium_args(args: &HostArgs, profile_dir: &std::path::Path, port: u16) -> V
     out.push("--remote-debugging-address=127.0.0.1".to_string());
     out.push(format!("--user-data-dir={}", profile_dir.display()));
     out.push("--disable-extensions".to_string());
-    out.push("--no-sandbox".to_string());
-    out.push("--disable-setuid-sandbox".to_string());
+    // Secure by default: keep Chromium's OS sandbox ON. Containers (and the
+    // Docker test image) — root, no user namespaces, where the sandbox can't
+    // initialize and the container is itself the isolation boundary — opt back
+    // in via AFHTTP_NO_SANDBOX. Native runs (e.g. the inline ephemeral host)
+    // keep the sandbox. See docs/deployment.md.
+    if std::env::var_os("AFHTTP_NO_SANDBOX").is_some() {
+        out.push("--no-sandbox".to_string());
+        out.push("--disable-setuid-sandbox".to_string());
+    }
     out.push("--disable-gpu".to_string());
     match args.proxy.as_deref() {
         Some(url) => out.push(format!("--proxy-server={url}")),

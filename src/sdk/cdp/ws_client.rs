@@ -84,6 +84,51 @@ impl Connection {
             None => endpoint_ws_url.to_string(),
         };
         let request = build_ws_request(&url, token)?;
+        let uri: Uri = url
+            .parse()
+            .map_err(|e| Error::new(ErrorCode::InvalidEndpoint, format!("CDP url {url:?}: {e}")))?;
+        let secure = uri
+            .scheme_str()
+            .is_some_and(|s| s.eq_ignore_ascii_case("wss"));
+        if !secure {
+            // Plaintext ws:// (all local CDP, and ws:// remote hosts): connect the
+            // TCP stream directly and run the handshake with client_async. We
+            // avoid connect_async because, with the rustls-tls-native-roots
+            // feature, it builds a TLS connector and loads the OS root-cert store
+            // even for ws:// — wasted work for every CDP connect, and stack-heavy
+            // enough to overflow Windows' 1 MiB main-thread stack.
+            let host = uri.host().ok_or_else(|| {
+                Error::new(
+                    ErrorCode::InvalidEndpoint,
+                    format!("CDP url has no host: {url:?}"),
+                )
+            })?;
+            let port = uri.port_u16().unwrap_or(80);
+            let stream = tokio::net::TcpStream::connect((host, port))
+                .await
+                .map_err(|e| {
+                    Error::new(
+                        ErrorCode::HostUnreachable,
+                        format!(
+                            "CDP connect {}: {e}",
+                            agent_first_data::redact_url_secrets(&url)
+                        ),
+                    )
+                })?;
+            let (ws, _resp) = tokio_tungstenite::client_async(request, stream)
+                .await
+                .map_err(|e| {
+                    Error::new(
+                        ErrorCode::HostUnreachable,
+                        format!(
+                            "CDP websocket {}: {e}",
+                            agent_first_data::redact_url_secrets(&url)
+                        ),
+                    )
+                })?;
+            return Ok(Self::from_ws(ws));
+        }
+        // wss:// — keep the TLS-capable connector.
         let (ws, _resp) = tokio_tungstenite::connect_async(request)
             .await
             .map_err(|e| {

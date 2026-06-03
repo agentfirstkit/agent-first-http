@@ -202,7 +202,38 @@ fn apply_subprocess_env(cmd: &mut Command, engine_envs: &[(String, String)]) {
     const ALLOWLIST: &[&str] = &[
         "PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "DISPLAY",
     ];
+    // Windows-essential variables. Without SYSTEMROOT the browser cannot
+    // initialize winsock (`WSALookupServiceBegin` fails) and the CDP/DevTools
+    // HTTP server never binds — so a scrubbed env silently breaks every
+    // browser-backed fetch on Windows. These are OS plumbing, not ambient
+    // browsing config (HTTP_PROXY/XDG/BROWSER stay scrubbed per the isolation
+    // invariant).
+    #[cfg(windows)]
+    const WINDOWS_ALLOWLIST: &[&str] = &[
+        "SYSTEMROOT",
+        "SystemDrive",
+        "windir",
+        "TEMP",
+        "TMP",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "USERPROFILE",
+        "ProgramData",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "ProgramW6432",
+        "PATHEXT",
+        "COMSPEC",
+        "NUMBER_OF_PROCESSORS",
+        "PROCESSOR_ARCHITECTURE",
+    ];
     for key in ALLOWLIST {
+        if let Ok(value) = std::env::var(key) {
+            cmd.env(key, value);
+        }
+    }
+    #[cfg(windows)]
+    for key in WINDOWS_ALLOWLIST {
         if let Ok(value) = std::env::var(key) {
             cmd.env(key, value);
         }

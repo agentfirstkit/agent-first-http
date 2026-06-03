@@ -101,3 +101,42 @@ command afhttp
       arg id
       arg endpoint --endpoint-url
       arg token --token-secret
+  command skill
+    command status
+      arg agent --agent
+      arg scope --scope
+      arg skills_dir --skills-dir
+    command install
+      arg agent --agent
+      arg scope --scope
+      arg skills_dir --skills-dir
+      arg force --force
+    command uninstall
+      arg agent --agent
+      arg scope --scope
+      arg skills_dir --skills-dir
+      arg force --force
+  command container
+    command install
+      arg runtime --runtime
+      arg name --name
+      arg port --port
+      arg profile --profile
+      arg shm_size --shm-size
+      arg with --with
+      arg rebuild --rebuild
+      arg from_source --from-source
+      arg context --context
+      arg host_args
+    command uninstall
+      arg runtime --runtime
+      arg name --name
+      arg purge --purge
+    command status
+      arg runtime --runtime
+      arg name --name
+      arg port --port
+    command logs
+      arg runtime --runtime
+      arg name --name
+      arg follow --follow

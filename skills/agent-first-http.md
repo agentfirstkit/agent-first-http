@@ -13,6 +13,22 @@ sits behind a bot wall, or the useful data arrives over XHR/WebSocket/SSE. `afht
 returns one line of structured JSON plus artifact files the agent can branch on,
 and escalates to a real browser only when needed.
 
+## Inline fetch vs. a running host
+
+By default `afhttp fetch <url>` runs **inline**: it launches its own sandboxed
+browser for that one fetch and tears it down. Zero setup, no persistence — use it
+for stateless, one-shot acquisition.
+
+Run against a **host** (`--endpoint-url ws://… --token-secret …`) when you need
+state that outlives a single fetch: a session reused across fetches, a
+warmed/authenticated profile, human takeover, or reading browser state via `cdp`.
+The host runs a real browser in a **container** (the supported, isolated
+deployment — see the deployment docs); start it first, then point the driver
+commands at it. `afhttp container install` brings one up in a single command
+(Docker or Apple `container`) and prints its endpoint and token; `afhttp
+container status` reprints them later. The multi-step, takeover, and recovery
+flows below all assume a running host.
+
 ## When to use which render mode
 
 - `--render none` — HTTP only, no browser. Fast; use for APIs, login forms,

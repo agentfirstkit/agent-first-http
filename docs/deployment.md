@@ -12,10 +12,16 @@
 
 ## Why the host belongs in a container
 
-`afhttp host` launches Chromium with `--no-sandbox --disable-setuid-sandbox`, so
-Chromium's own sandbox is off — **the container is the isolation boundary.** The
-host also loads untrusted, often adversarial web content and holds live
-cookies/sessions, so it should run isolated and disposable:
+afhttp keeps Chromium's OS sandbox **on by default** — running unsandboxed
+against untrusted, often adversarial pages is the weakest posture, so it must be
+opt-in, not the default. The shipped image sets `AFHTTP_NO_SANDBOX=1`, which
+makes the host launch Chromium with `--no-sandbox --disable-setuid-sandbox`
+(Chromium's own sandbox can't initialize as root without user namespaces anyway)
+— **the container then is the isolation boundary.** Run `afhttp host` natively
+only on a trusted host; there the sandbox stays on (set `AFHTTP_NO_SANDBOX=1`
+yourself only in an environment where Chromium's sandbox can't start). The host
+loads untrusted web content and holds live cookies/sessions, so it should run
+isolated and disposable:
 
 - non-root (the image already runs as an unprivileged `afhttp` user),
 - the default seccomp profile and dropped capabilities,
@@ -23,6 +29,70 @@ cookies/sessions, so it should run isolated and disposable:
 - on a private network — never host networking with the port exposed publicly.
 
 ## Quick start
+
+The driver embeds the host image recipe, so a brew-only install (no source tree)
+can stand up a host in one command:
+
+```bash
+# Build the image if needed and run the host. Auto-detects Docker or Apple
+# `container`; add optional backends with repeated --with (see below).
+afhttp container install
+
+# Show the running host, its endpoint, and a ready-to-run driver command:
+afhttp container status
+
+# Tail logs / tear it down (--purge also drops the image and build cache):
+afhttp container logs -f
+afhttp container uninstall --purge
+```
+
+`install` does **not** compile afhttp: it builds the canonical
+`container/docker/Dockerfile` with `--build-arg AFHTTP_BIN_FROM=downloader`,
+selecting a stage that **downloads the prebuilt release binary** matching the
+driver's own version and the image architecture (`x86_64-unknown-linux-gnu` for
+Docker on Intel, `aarch64-unknown-linux-gnu` for Apple `container` and arm64
+Docker). BuildKit skips the unused `builder` (Rust) stage, so the image stays a
+slim `debian:bookworm-slim` with no toolchain and needs no source tree. The
+version is hard-pinned: if no release asset exists for this version/arch (e.g. a
+dev build of an unreleased version), the build fails with a pointer to the
+from-source path below — it never installs a different version.
+
+**Runtime selection** is `--runtime docker|podman|apple` (auto-detected in that
+order: `docker`, then `podman`, then Apple `container`), or the
+`AFHTTP_CONTAINER_RUNTIME` env var. Podman behaves like Docker (rootless, no
+daemon); Apple `container` builds `linux/arm64` and is started for you
+(`container system start`) and has no compose, so on macOS the `afhttp container`
+path — not compose — is how you run a host.
+
+**From a source checkout** (development, or to run an unreleased version that has
+no published release asset), pass `--from-source`: instead of downloading the
+prebuilt binary, it builds the full `container/docker/Dockerfile` from the current
+directory (or `--context <dir>`). This works under any runtime — the Dockerfile is
+runtime-agnostic — giving a 2×2 of {prebuilt, from-source} × {docker/podman, apple}:
+
+```bash
+afhttp container install                              # prebuilt, auto runtime
+afhttp container install --from-source                # source build, auto runtime
+afhttp container install --runtime apple --from-source  # source build under Apple
+```
+
+Caveat for `--from-source` **under Apple `container`**: its builder runs in a
+separate persistent VM that defaults to **2 GiB**, and compiling afhttp pulls
+`chromiumoxide` (its CDP-bindings crate needs several GB for one `rustc`), so the
+build OOM-kills at the default size. The `-m` flag on `container build` does **not**
+resize that VM — you must resize the builder itself once (**8 GiB is enough**; the
+2 GiB default is not):
+
+```bash
+container builder stop && container builder delete
+container builder start --cpus 4 --memory 8g
+```
+
+After that, from-source builds and runs fine under Apple `container`. (The prebuilt
+download path never compiles, so it is unaffected and needs no resizing.)
+
+Or drive the runtime CLI directly (Apple's `container` is docker-shaped, so the
+same Dockerfile builds under it with `--platform linux/arm64`):
 
 ```bash
 cd spores/agent-first-http
@@ -33,11 +103,8 @@ docker build -t afhttp-host -f container/docker/Dockerfile .
 # Run it. The entrypoint generates a bearer token on first start and prints it
 # along with a ready-to-run driver command. The profile persists in the volume.
 docker run --rm -p 9222:9222 --shm-size=1g -v afhttp-profile:/data afhttp-host
-```
 
-or with compose (toggles backends via `WITH_*` env, see below):
-
-```bash
+# …or with compose (toggles backends via WITH_* env, see below):
 docker compose -f container/docker/compose.yaml up --build
 ```
 

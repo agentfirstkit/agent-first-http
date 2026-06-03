@@ -12,6 +12,12 @@ use crate::shared::error::Error;
 /// response (success *or* error); the response itself carries the
 /// success/failure shape on stdout.
 pub fn run() -> ExitCode {
+    // Install the process-wide rustls crypto provider before anything builds a
+    // reqwest/TLS client. On the inline-fetch path the host-side CDP fetch runs
+    // before the SDK client's own guard, so without this `afhttp fetch` panics
+    // with "no rustls crypto provider is configured".
+    crate::host::bootstrap::install_rustls_provider();
+
     // Help is rendered without spinning up the async runtime. `--help-markdown`
     // feeds scripts/projects/agent-first-http/generate-cli-doc.sh; top-level
     // `--help` mirrors afpsql's recursive afdata-rendered help. Subcommand help
@@ -19,8 +25,36 @@ pub fn run() -> ExitCode {
     if let Some(code) = maybe_render_help() {
         return code;
     }
+    // The fetch/host pipeline polls a deeply nested future chain (inline host
+    // launch → CDP handshake → …). Polling that depth builds a deep synchronous
+    // call stack that overflows Windows' default 1 MiB main-thread stack
+    // (Linux/macOS default to 8 MiB). Run the runtime on a thread with a generous
+    // stack so behavior is uniform across platforms.
+    match std::thread::Builder::new()
+        .name("afhttp-main".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(run_blocking)
+    {
+        Ok(handle) => match handle.join() {
+            Ok(code) => code,
+            Err(_) => {
+                emit_bootstrap_error("afhttp worker thread panicked");
+                ExitCode::from(2)
+            }
+        },
+        Err(e) => {
+            emit_bootstrap_error(&format!("spawn worker thread: {e}"));
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// Build the tokio runtime and drive the dispatched command to completion.
+/// Runs on a dedicated large-stack thread spawned by `run`.
+fn run_blocking() -> ExitCode {
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
+        .thread_stack_size(16 * 1024 * 1024)
         .build()
     {
         Ok(rt) => rt,
@@ -92,6 +126,8 @@ async fn dispatch(parsed: args::Parsed) -> Result<(), Error> {
         args::Command::Capabilities(a) => cmd::capabilities::run(a).await,
         args::Command::Profile(a) => cmd::profile::run(a).await,
         args::Command::Tabs(a) => cmd::tabs::run(a).await,
+        args::Command::Skill(a) => cmd::skill::run(a).await,
+        args::Command::Container(a) => cmd::container::run(a).await,
     };
     if let Err(ref e) = res {
         emit_cli_error(e);

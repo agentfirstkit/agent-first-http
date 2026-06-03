@@ -13,6 +13,13 @@ scoop bucket add agentfirstkit https://github.com/agentfirstkit/scoop-bucket \
 cargo install agent-first-http                                                    # any platform
 ```
 
+Install the embedded Agent Skill for Codex and Claude Code straight from the
+binary (check with `afhttp skill status`, remove with `afhttp skill uninstall`):
+
+```bash
+afhttp skill install
+```
+
 ## What `afhttp` is for
 
 The hard part for an agent is not fetching bytes. It is that many useful URLs do not turn into a usable page from a simple shell request — they require JavaScript rendering, cookies, session state, or a real browser fingerprint. When that happens, a human can open a browser and inspect; an agent needs the same facts as data it can branch on.
