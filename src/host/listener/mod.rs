@@ -1,5 +1,5 @@
 //! Axum listener: serves the CDP-over-WS proxy, `/health`, `/capabilities`,
-//! `/profile`, and (when enabled) the `/ops` panel routes, all behind the
+//! `/profile`, and (when enabled) the `/ops/*` takeover routes, all behind the
 //! bearer-token middleware.
 
 pub mod capabilities;
@@ -26,6 +26,7 @@ use tokio::net::TcpListener;
 use crate::host::bootstrap::{BrowserChoice, HealthPublic, HostArgs, ProfileChoice, Takeover};
 use crate::host::browser::BrowserHandle;
 use crate::host::display::DisplayProxyState;
+use crate::sdk::fetch::DEFAULT_NETWORK_BODY_MAX_BYTES;
 use crate::shared::error::{Error, ErrorCode};
 
 /// A single running profile with its browser handle.
@@ -57,7 +58,7 @@ pub struct AppState {
     pub profile: Option<ProfileEntry>,
     /// Recent-requests ring. `None` = feature disabled.
     pub recent_requests: Option<recent_requests::RecentRequests>,
-    /// KasmVNC display-takeover proxy target and process keepalive.
+    /// Real-display takeover proxy target and provider process keepalive.
     pub display_takeover: Option<DisplayProxyState>,
 }
 
@@ -83,17 +84,17 @@ enum TokenSource {
 impl AppState {
     /// Launch the host browser and return a complete, ready-to-serve state.
     pub async fn launch(args: &HostArgs) -> Result<Self, Error> {
-        let display_takeover = if matches!(args.takeover, Takeover::KasmVnc) {
+        let display_takeover = if let Takeover::Display { provider } = args.takeover {
             if matches!(args.browser, BrowserChoice::Lightpanda) {
                 return Err(Error::new(
                     ErrorCode::BackendUnsupported,
-                    "KasmVNC display takeover requires a rendered browser; lightpanda has no display",
+                    "display takeover requires a rendered browser; lightpanda has no display",
                 ));
             }
-            Some(DisplayProxyState::new(
-                crate::host::display::launch_kasmvnc().await?,
-                args.display_quality,
-            ))
+            Some(
+                crate::host::display::launch_display_provider(provider, args.display_quality)
+                    .await?,
+            )
         } else {
             None
         };
@@ -112,7 +113,7 @@ impl AppState {
             browser_args
                 .engine_envs
                 .push(("DISPLAY".to_string(), display));
-            // The KasmVNC X display has no window manager, so the headful
+            // The current display provider may have no window manager, so the headful
             // browser opens at its default size and floats in a corner of
             // the framebuffer. Pin the window to fill the display geometry
             // so the page uses the full width. Chromium-family only;
@@ -296,33 +297,33 @@ pub fn build_router(state: AppState) -> Router {
         .route("/cdp", axum::routing::get(self::cdp_proxy::handler));
     if state.ops_enabled {
         router = router
-            .route("/ops", axum::routing::get(self::ops_routes::index))
             .route(
-                "/ops/assets/app.js",
+                "/ops/screencast",
+                axum::routing::get(self::ops_routes::screencast_entry),
+            )
+            .route(
+                "/ops/screencast/assets/app.js",
                 axum::routing::get(self::ops_routes::js),
             )
             .route(
-                "/ops/assets/app.css",
+                "/ops/screencast/assets/app.css",
                 axum::routing::get(self::ops_routes::css),
             )
             .route(
-                "/ops/screencast",
+                "/ops/screencast/ws",
                 axum::routing::get(self::ops_routes::screencast_route),
             )
             .route(
-                "/ops/input",
+                "/ops/screencast/input",
                 axum::routing::get(self::ops_routes::input_route),
-            );
-    }
-    if state.display_takeover.is_some() {
-        router = router
+            )
             .route(
                 "/ops/display",
                 axum::routing::any(self::ops_routes::display_proxy),
             )
             // The bare `/ops/display/` (the redirect target) must have its own
             // route: axum's `{*path}` wildcard does not match an empty segment,
-            // so without this the KasmVNC landing page 404s and only deep
+            // so without this the display landing page 404s and only deep
             // asset/ws paths resolve.
             .route(
                 "/ops/display/",
@@ -580,7 +581,7 @@ impl AppState {
         self
     }
 
-    /// Test helper: attach a fake display-takeover upstream listener.
+    /// Test helper: attach a fake display provider upstream listener.
     #[cfg(any(test, feature = "host"))]
     pub fn with_display_takeover_for_tests(mut self, web_port: u16) -> Self {
         self.display_takeover = Some(DisplayProxyState::for_tests(web_port));
@@ -615,7 +616,7 @@ pub(crate) fn default_limits() -> BTreeMap<String, serde_json::Value> {
     let mut m = BTreeMap::new();
     m.insert(
         "network_body_max_bytes_default".into(),
-        serde_json::Value::from(1_048_576u64),
+        serde_json::Value::from(DEFAULT_NETWORK_BODY_MAX_BYTES),
     );
     m
 }

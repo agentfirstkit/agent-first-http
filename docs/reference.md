@@ -4,14 +4,16 @@
 
 All command outputs are single JSON objects on stdout unless otherwise stated. Artifact files are referenced by absolute `*_file` paths in those JSON envelopes.
 
-Every failure envelope carries:
+Every failure envelope carries the standard fields below. `afhttp fetch`
+execution failures also include `trace`; parse/configuration failures from
+other commands may omit it.
 
 | Field | Description |
 | --- | --- |
 | `error_code` | Stable machine-readable enum. Agents match on this field, not `error`. |
 | `error` | Human-readable detail for logs. |
 | `retryable` | Whether retrying the same operation may help. |
-| `trace` | Best-effort timings and phase details when available. |
+| `trace` | Best-effort timings and phase details on fetch execution failures. |
 
 ## Fetch Result
 
@@ -37,7 +39,7 @@ Every failure envelope carries:
 | `download_url` | with `download_file` | URL that triggered the download. |
 | `download_state` | with `download_file` | Mechanical state, currently `"completed"`. |
 | `warnings` | if non-empty | Per-artifact or per-entry non-fatal failures. |
-| `trace` | always | Render decision, phase timings, redirect count, bytes, and escalation signals. |
+| `trace` | always | Render decision, readiness, phase timings, bytes, and escalation signals. |
 
 Example:
 
@@ -56,7 +58,27 @@ Example:
   "console_file": "/work/afhttp-out/req/console.json",
   "observation_file": "/work/afhttp-out/req/observation.json",
   "storage_file": "/work/afhttp-out/req/storage.json",
-  "trace": {"render_decision": "browser", "render_used": true, "main_request_observed": true, "duration_ms": 820, "navigation_duration_ms": 540}
+  "trace": {
+    "render_decision": "browser",
+    "render_mode": "auto",
+    "render_used": true,
+    "main_request_observed": true,
+    "current_stage": "complete",
+    "duration_ms": 820,
+    "timeout_ms": 30000,
+    "navigation_duration_ms": 540,
+    "wait_mode": "auto",
+    "wait_satisfied_by": "network_quiet_dom_text_stable",
+    "network_quiet": true,
+    "dom_stable": true,
+    "text_stable": true,
+    "capture_reason": "wait_satisfied",
+    "stages": [
+      {"name": "navigate", "status": "ok", "duration_ms": 340},
+      {"name": "wait_readiness", "status": "ok", "duration_ms": 180},
+      {"name": "capture_rendered_html", "status": "ok", "duration_ms": 25}
+    ]
+  }
 }
 ```
 
@@ -73,18 +95,52 @@ Warnings do not fail the whole fetch.
 
 ## Trace
 
-`duration_ms` is always present when timing began. Other fields are best-effort.
+`duration_ms`, `timeout_ms`, `current_stage`, and `stages` are always present once fetch execution begins. Successful and failed fetch envelopes use the same trace shape.
 
 | Field | Description |
 | --- | --- |
 | `duration_ms` | Total wall-clock time. |
+| `timeout_ms` | Overall fetch budget from `--timeout-ms`. |
+| `current_stage` | Stage active at snapshot time; `complete` on successful completion. |
 | `render_decision` | `http_only` when the HTTP fast path was used, `browser` when a CDP-driven render was used. |
+| `render_mode` | Requested render mode (`none`, `auto`, or `always`). |
+| `render_used` | Convenience boolean mirroring whether the browser path actually ran. |
 | `escalation_reason` | Stable token describing why the browser path was taken. Values: `"empty_html_shell"` (HTTP returned a JS-bootstrap with no visible text), `"http_status_NNN"` (HTTP returned status NNN), `"http_failed_<code>"` (transport error, `<code>` is the `error_code`). |
 | `main_request_observed` | Whether the main document request was observed by the active fetch path. HTTP-only successes set this true; browser-internal URLs like `about:blank` or cancelled navigations may set it false. |
 | `navigation_duration_ms` | Browser-path only: wall-clock from `Page.navigate` to the wait condition resolving. |
+| `wait_mode` | Browser-path wait mode (`auto`, `load`, `idle`, `selector`, `selector_visible`, or `ms`). |
+| `wait_satisfied_by` | Mechanical readiness condition that allowed capture, such as `network_quiet_dom_text_stable`, `load`, `selector`, or `network_idle_event`. |
+| `network_quiet` / `dom_stable` / `text_stable` | `--wait auto` booleans showing whether afhttp's own network collector and DOM/text stabilization checks were satisfied at capture time. |
+| `capture_reason` | Why artifacts were captured, for example `wait_satisfied`, `readiness_timeout`, or `download`. |
 | `cookie_jar_file` | Absolute cookie jar path used for this fetch, when a jar was resolved. |
 | `cookie_jar_warning` | Structured note when `/profile` was unavailable and implicit cookie-jar persistence was disabled. |
 | `sensitive_capture` | Non-empty when `--network-redact off`, `--capture-ws`, or `--capture-sse` may write tokens/PII into artifacts. |
+| `stages[]` | Ordered stage timings. Each stage has `name`, `status`, and `duration_ms`; `status` is one of `ok`, `error`, `timeout`, or `started`. |
+
+Failure envelopes for `afhttp fetch` also include this trace:
+
+```json
+{
+  "code": "error",
+  "error_code": "navigation_timeout",
+  "error": "fetch timed out after 90000ms during capture_text",
+  "retryable": true,
+  "trace": {
+    "render_decision": "browser",
+    "render_mode": "always",
+    "render_used": true,
+    "current_stage": "capture_text",
+    "duration_ms": 90001,
+    "timeout_ms": 90000,
+    "main_request_observed": true,
+    "stages": [
+      {"name": "navigate", "status": "ok", "duration_ms": 929},
+      {"name": "wait_readiness", "status": "ok", "duration_ms": 5000},
+      {"name": "capture_text", "status": "timeout", "duration_ms": 84072}
+    ]
+  }
+}
+```
 
 ## Artifact Schemas
 
@@ -183,7 +239,12 @@ Deep network artifact. Top-level shape:
   "entries": [],
   "summary": {
     "requests_total": 12,
+    "responses_total": 11,
+    "finished_total": 10,
     "failed_total": 1,
+    "incomplete_total": 1,
+    "inflight_total_at_capture": 1,
+    "pending_by_resource_type": {"XHR": 1},
     "captured_body_files": 2,
     "redacted": true
   }
@@ -195,6 +256,7 @@ Each `entries[]` item may include:
 | Field | Description |
 | --- | --- |
 | `request_id` | Stable request id from the browser backend. |
+| `state` | Mechanical lifecycle state: `pending`, `responded`, `finished`, or `failed`. |
 | `redirect_from_request_id` | Prior request id for redirect chains. |
 | `frame_id` / `loader_id` | CDP frame/loader ids when known. |
 | `resource_type` | `Document`, `XHR`, `Fetch`, `Script`, `Stylesheet`, `Image`, etc. |
@@ -218,6 +280,13 @@ Network body capture modes:
 | `all` | Attempt every exposed response body up to the configured per-body limit. |
 
 Body capture failures become warnings, not fetch failures. `--capture-ws` and `--capture-sse` write WebSocket/SSE payloads to frame/event files and may expose bearer tokens, session identifiers, chat content, or other PII.
+
+When `--wait auto` is used, XHR/fetch/EventSource body capture is enabled by
+default so the network artifact can explain pages whose visible DOM is only a
+shell. Pending requests are not hidden: `network.summary.incomplete_total`,
+`network.summary.inflight_total_at_capture`, and
+`network.summary.pending_by_resource_type` stay non-zero, and entries remain in
+`state: "pending"` or `state: "responded"`.
 
 ## CDP Result
 
@@ -257,8 +326,8 @@ Unauthenticated public health, when enabled, returns only `status`.
 | `backend` | Browser family/version. |
 | `artifacts` | Per-artifact `supported` booleans and notes. |
 | `wait_modes` | Supported wait modes. |
-| `display_takeover` | Whether the backend can expose a real KasmVNC display when the host is launched with `--takeover kasmvnc` (`true` for Chromium-family and camoufox, `false` for lightpanda). |
-| `ops_panel` | Screencast/input support. |
+| `display_takeover` | Whether the backend can expose real-display takeover when the host is launched with `--takeover display --display-provider kasmvnc` (`true` for Chromium-family and camoufox, `false` for lightpanda). |
+| `ops_panel` | Screencast/input support plus provider-neutral display fields (`display_url`, `display_provider`) when display takeover is enabled. |
 | `profile` | Persistent/ephemeral support. |
 | `features` | Implemented feature support such as `selector_visible`, `network_body_capture`, `capture_ws`, `capture_sse`, `display_takeover`, `ops_panel`, `recent_requests`, and `profile_persistence`; risky captures include a `risk` string. |
 | `limits` | Defaults and hard limits relevant to fetch planning. |
@@ -274,8 +343,8 @@ The distributed afhttp binary does not bundle browser engines or KasmVNC. It loc
 | Chromium/Chrome/Edge/Brave/fingerprint-chromium | Browser-backed fetch, screenshots, default ops panel | Set `--browser-bin` to override discovery for the primary browser binary. |
 | lightpanda | `--browser lightpanda` | Rendering subset; no display takeover. |
 | foxbridge + camoufox | `--browser camoufox` | `--browser-bin` may point at foxbridge; camoufox is discovered separately on `PATH`. |
-| KasmVNC `Xvnc` | `--takeover kasmvnc` | GPLv2 external process only. Install it in the container and ensure `Xvnc` plus the KasmVNC web root are present; optional env overrides are `AFHTTP_KASMVNC_BIN` and `AFHTTP_KASMVNC_WEB_ROOT`. |
-| matchbox-window-manager (or openbox) | `--takeover kasmvnc` | Optional. Keeps the headful browser maximized so the client can resize the framebuffer to the operator's window (`resize=remote`); absent, the panel falls back to scaled rendering. Discovered on `PATH`. |
+| KasmVNC `Xvnc` | `--takeover display --display-provider kasmvnc` | GPLv2 external process only. Install it in the container and ensure `Xvnc` plus the KasmVNC web root are present; optional env overrides are `AFHTTP_KASMVNC_BIN` and `AFHTTP_KASMVNC_WEB_ROOT`. |
+| matchbox-window-manager (or openbox) | KasmVNC display provider | Optional. Keeps the headful browser maximized so the client can resize the framebuffer to the operator's window (`resize=remote`); absent, the panel falls back to scaled rendering. Discovered on `PATH`. |
 
 ## Profile Results
 
@@ -340,7 +409,7 @@ Examples below are representative `error` / Chromium `errorText` strings.
 | Code | Example detail | Agent should |
 | --- | --- | --- |
 | `navigation_timeout` | `Wait::Load: readyState never became complete` | Retry with a longer timeout or weaker wait condition; preserve artifacts already written. |
-| `wait_selector_unmatched` | `selector "#ready" did not appear before --timeout` | Distinguish from `navigation_timeout`: page itself loaded fine, only the CSS selector never matched. Verify the selector against the captured `observation.json` rather than blind-retrying. |
+| `wait_selector_unmatched` | `selector "#ready" did not appear before --timeout-ms` | Distinguish from `navigation_timeout`: page itself loaded fine, only the CSS selector never matched. Verify the selector against the captured `observation.json` rather than blind-retrying. |
 | `render_unavailable` | `browser fetch requires --endpoint-url pointing at an afhttp host` | Start/connect a browser host or use `--render none` if HTTP-only is enough. |
 | `host_unreachable` | `CDP connect ws://127.0.0.1:9222/cdp: connection refused` | Check the afhttp host endpoint/token and retry after the host is reachable. |
 | `dns_resolution_failed` | `net::ERR_NAME_NOT_RESOLVED` | Check spelling/DNS/network; retry later only if DNS may recover. |
@@ -354,7 +423,14 @@ Examples below are representative `error` / Chromium `errorText` strings.
 | `cdp_timeout` | `wait_event: timed out` | Retry with a longer timeout or different event/wait strategy. |
 | `backend_unsupported` | `Page.captureScreenshot not supported by backend` | Drop that artifact/action or switch to a backend that supports it. |
 | `artifact_capture_failed` | `DOM.getOuterHTML: missing outerHTML` | Use other artifacts if sufficient; retry if the page/backend state changed. |
-| `network_body_truncated` | `body for 1234.1 truncated to 1048576 bytes` | Increase `--network-body-max-bytes` if the omitted suffix matters. |
+| `artifact_capture_timeout` | `fetch timed out after 30000ms during capture_screenshot` | Use the partial result or retry with a larger `--timeout-ms` / smaller artifact set. |
+| `artifact_empty` | `text artifact was empty after trimming whitespace` | Check `trace` readiness fields and `network.json`; the page may still be a shell. |
+| `artifact_tiny` | `text artifact was 12 bytes; threshold is 32` | Inspect network bodies or retry with a larger timeout if the page is still rendering. |
+| `network_not_idle` | `1 request(s) were still pending/responded at capture` | Inspect pending entries and captured XHR bodies before deciding whether to retry. |
+| `pending_xhr_at_capture` | `pending XHR/fetch/EventSource at capture` | Treat `status: 200` as incomplete acquisition until network payloads are checked. |
+| `observation_empty` | `observation contained zero projected nodes` | Fall back to rendered/text/network artifacts or retry after readiness improves. |
+| `readiness_timeout` | `--wait auto captured before all readiness signals settled` | Partial capture succeeded; inspect warnings/trace/network before bounded retry. |
+| `network_body_truncated` | `body for 1234.1 truncated to 10485760 bytes` | Increase `--network-body-max-bytes` if the omitted suffix matters. |
 | `profile_not_found` | `profile "work" does not exist` | Create/select an existing profile name. |
 | `profile_delete_locked` | `profile "work" is locked; refusing delete` | Stop the owning host before delete/prune. |
 | `profile_invalid_name` | `profile name "../work" is invalid` | Use a simple non-hidden profile name without path separators. |

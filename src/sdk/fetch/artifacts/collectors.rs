@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tokio::sync::{Mutex, Notify};
@@ -17,7 +17,7 @@ use tokio::task::JoinHandle;
 use crate::sdk::cdp::ws_client::Connection;
 use crate::sdk::fetch::artifacts::{
     console::{ConsoleEvent, ConsoleLevel, ConsoleLog},
-    network::{NetworkEntry, NetworkLog, NetworkSummary, NetworkTiming},
+    network::{NetworkEntry, NetworkEntryState, NetworkLog, NetworkSummary, NetworkTiming},
 };
 use crate::shared::redact;
 
@@ -29,6 +29,7 @@ struct NetworkSlot {
 fn default_entry() -> NetworkEntry {
     NetworkEntry {
         request_id: String::new(),
+        state: NetworkEntryState::Pending,
         redirect_from_request_id: None,
         frame_id: None,
         loader_id: None,
@@ -75,6 +76,17 @@ struct NetworkInner {
     ws_frames: HashMap<String, Vec<Value>>,
     /// SSE events keyed by requestId. Populated when capture_sse=true.
     sse_events: HashMap<String, Vec<Value>>,
+    /// Last time any network event changed the aggregate. Used for the
+    /// default readiness wait instead of Chrome's lifecycle-only networkIdle.
+    last_activity: Option<Instant>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NetworkQuietSnapshot {
+    pub quiet: bool,
+    pub idle_for: Duration,
+    pub inflight_total: usize,
+    pub pending_by_resource_type: BTreeMap<String, usize>,
 }
 
 impl NetworkCollector {
@@ -178,6 +190,25 @@ impl NetworkCollector {
         guard.slots.get(request_id).map(|s| s.entry.clone())
     }
 
+    /// Mechanical network quiet signal for readiness: no pending/responded
+    /// requests, and no Network.* activity for at least `idle`.
+    pub async fn quiet_snapshot(&self, idle: Duration) -> NetworkQuietSnapshot {
+        let guard = self.inner.lock().await;
+        let pending_by_resource_type =
+            pending_by_resource_type(guard.slots.values().map(|slot| &slot.entry));
+        let inflight_total: usize = pending_by_resource_type.values().copied().sum();
+        let idle_for = guard
+            .last_activity
+            .map(|last| last.elapsed())
+            .unwrap_or_else(|| Duration::from_secs(u64::MAX / 2));
+        NetworkQuietSnapshot {
+            quiet: inflight_total == 0 && idle_for >= idle,
+            idle_for,
+            inflight_total,
+            pending_by_resource_type,
+        }
+    }
+
     /// Attach a captured body file path to the entry.
     pub async fn set_body_file(&self, request_id: &str, path: std::path::PathBuf) {
         let mut guard = self.inner.lock().await;
@@ -201,19 +232,12 @@ impl NetworkCollector {
         let mut guard = self.inner.lock().await;
         let mut entries: Vec<NetworkEntry> = guard.slots.drain().map(|(_, s)| s.entry).collect();
         entries.sort_by(|a, b| a.request_id.cmp(&b.request_id));
-        let failed_total = entries.iter().filter(|e| e.failure.is_some()).count();
-        let captured_body_files = entries.iter().filter(|e| e.body_file.is_some()).count();
-        let requests_total = entries.len();
+        let summary = summarize_entries(&entries, self.redact_headers);
         NetworkLog {
             schema_version: 1,
             main_request_id: guard.main_request_id.clone(),
             entries,
-            summary: NetworkSummary {
-                requests_total,
-                failed_total,
-                captured_body_files,
-                redacted: self.redact_headers,
-            },
+            summary,
         }
     }
 
@@ -233,6 +257,7 @@ fn handle_event(
 ) -> bool {
     match ev.method.as_str() {
         "Network.requestWillBeSent" => {
+            inner.last_activity = Some(Instant::now());
             let req_id = string_field(&ev.params, "requestId");
             let frame_id = ev
                 .params
@@ -283,6 +308,7 @@ fn handle_event(
                         .and_then(|v| v.as_u64())
                         .map(|s| s as u16);
                     existing.entry.status = status;
+                    existing.entry.state = NetworkEntryState::Finished;
                     let mut h = headers_map(redirect.get("headers"));
                     if redact_headers {
                         redact_inplace(&mut h);
@@ -336,6 +362,7 @@ fn handle_event(
             return inner.main_request_id.as_deref() == Some(req_id.as_str());
         }
         "Network.responseReceived" => {
+            inner.last_activity = Some(Instant::now());
             let req_id = string_field(&ev.params, "requestId");
             let response = &ev.params["response"];
             let status = response
@@ -360,6 +387,7 @@ fn handle_event(
                 .map(str::to_string);
             if let Some(s) = inner.slots.get_mut(&req_id) {
                 s.entry.status = status;
+                s.entry.state = NetworkEntryState::Responded;
                 if mime_type.is_some() {
                     s.entry.mime_type = mime_type;
                 }
@@ -376,6 +404,7 @@ fn handle_event(
             return inner.main_request_id.as_deref() == Some(req_id.as_str());
         }
         "Network.loadingFinished" => {
+            inner.last_activity = Some(Instant::now());
             let req_id = string_field(&ev.params, "requestId");
             let timestamp = ev
                 .params
@@ -385,6 +414,7 @@ fn handle_event(
             let encoded = ev.params.get("encodedDataLength").and_then(|v| v.as_u64());
             if let Some(s) = inner.slots.get_mut(&req_id) {
                 s.entry.timing.end_ms = Some((timestamp * 1000.0) as u64);
+                s.entry.state = NetworkEntryState::Finished;
                 if let Some(n) = encoded {
                     s.entry
                         .hints
@@ -396,6 +426,7 @@ fn handle_event(
             return is_main;
         }
         "Network.loadingFailed" => {
+            inner.last_activity = Some(Instant::now());
             let req_id = string_field(&ev.params, "requestId");
             let err = ev
                 .params
@@ -405,12 +436,14 @@ fn handle_event(
                 .to_string();
             if let Some(s) = inner.slots.get_mut(&req_id) {
                 s.entry.failure = Some(err);
+                s.entry.state = NetworkEntryState::Failed;
             }
             let is_main = inner.main_request_id.as_deref() == Some(req_id.as_str());
             inner.finished.push(req_id);
             return is_main;
         }
         "Network.requestServedFromCache" => {
+            inner.last_activity = Some(Instant::now());
             let req_id = string_field(&ev.params, "requestId");
             if let Some(s) = inner.slots.get_mut(&req_id) {
                 s.entry
@@ -451,6 +484,49 @@ fn redact_inplace(map: &mut BTreeMap<String, String>) {
             *value = redact::REDACTED_VALUE.to_string();
         }
     }
+}
+
+fn summarize_entries(entries: &[NetworkEntry], redacted: bool) -> NetworkSummary {
+    let requests_total = entries.len();
+    let responses_total = entries.iter().filter(|e| e.status.is_some()).count();
+    let finished_total = entries
+        .iter()
+        .filter(|e| e.state == NetworkEntryState::Finished)
+        .count();
+    let failed_total = entries
+        .iter()
+        .filter(|e| e.state == NetworkEntryState::Failed || e.failure.is_some())
+        .count();
+    let pending_by_resource_type = pending_by_resource_type(entries.iter());
+    let inflight_total_at_capture = pending_by_resource_type.values().copied().sum();
+    let captured_body_files = entries.iter().filter(|e| e.body_file.is_some()).count();
+    NetworkSummary {
+        requests_total,
+        responses_total,
+        finished_total,
+        failed_total,
+        incomplete_total: inflight_total_at_capture,
+        inflight_total_at_capture,
+        pending_by_resource_type,
+        captured_body_files,
+        redacted,
+    }
+}
+
+fn pending_by_resource_type<'a, I>(entries: I) -> BTreeMap<String, usize>
+where
+    I: IntoIterator<Item = &'a NetworkEntry>,
+{
+    let mut out = BTreeMap::new();
+    for entry in entries {
+        if matches!(
+            entry.state,
+            NetworkEntryState::Pending | NetworkEntryState::Responded
+        ) {
+            *out.entry(entry.resource_type.clone()).or_insert(0) += 1;
+        }
+    }
+    out
 }
 
 // -- Console collector -------------------------------------------------------

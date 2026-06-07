@@ -6,7 +6,7 @@
 #   tests/test.sh unit                  # lib + bin unit tests
 #   tests/test.sh integration           # full browser-integration suite
 #   tests/test.sh ops                   # ops-panel chromium tests (serialized)
-#   tests/test.sh takeover              # display-takeover proxy + KasmVNC smoke
+#   tests/test.sh takeover              # display takeover proxy + KasmVNC smoke
 #   tests/test.sh coverage              # cargo-llvm-cov with gate
 #   tests/test.sh all                   # static + unit + integration + coverage
 #   tests/test.sh release               # everything: all + ops + takeover (release gate)

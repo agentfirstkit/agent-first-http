@@ -26,6 +26,9 @@ const ENTRYPOINT: &str = include_str!("../../../container/docker/entrypoint.sh")
 
 /// This binary's version — the image downloads exactly this release.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Source checkout used to compile this binary. Useful when `--from-source` is
+/// requested from a different working directory, such as an agent scratch dir.
+const MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
 /// Default container name and image repository.
 const DEFAULT_NAME: &str = "afhttp-host";
 const IMAGE_REPO: &str = "afhttp-host";
@@ -53,7 +56,7 @@ pub enum ContainerSub {
 pub struct CommonArgs {
     /// Container runtime: docker, podman, or apple (auto-detected if omitted).
     #[arg(long, value_enum)]
-    pub runtime: Option<RuntimeArg>,
+    pub runtime: Option<Runtime>,
     /// Container name.
     #[arg(long, default_value = DEFAULT_NAME)]
     pub name: String,
@@ -83,7 +86,8 @@ pub struct InstallArgs {
     /// instead of downloading the prebuilt release. Needs the source tree.
     #[arg(long = "from-source")]
     pub from_source: bool,
-    /// Source checkout to build from with --from-source (default: current dir).
+    /// Source checkout to build from with --from-source (default: current dir,
+    /// then the checkout this afhttp binary was built from).
     #[arg(long, value_name = "DIR")]
     pub context: Option<String>,
     /// Extra args passed through to `afhttp host` inside the container.
@@ -118,29 +122,16 @@ pub struct LogsArgs {
     pub follow: bool,
 }
 
-/// CLI spelling of the runtime selector.
+/// Container runtime selector. Parsed from `--runtime` (clap `ValueEnum`) and
+/// from `AFHTTP_CONTAINER_RUNTIME` via [`runtime_from_str`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum RuntimeArg {
+pub enum Runtime {
     Docker,
     Podman,
+    /// Apple's `container` CLI. Accepts `apple` or `container` on the
+    /// command line; its binary is `container` (see [`Runtime::bin`]).
+    #[value(alias = "container")]
     Apple,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Runtime {
-    Docker,
-    Podman,
-    Apple,
-}
-
-impl From<RuntimeArg> for Runtime {
-    fn from(arg: RuntimeArg) -> Self {
-        match arg {
-            RuntimeArg::Docker => Runtime::Docker,
-            RuntimeArg::Podman => Runtime::Podman,
-            RuntimeArg::Apple => Runtime::Apple,
-        }
-    }
 }
 
 impl Runtime {
@@ -189,6 +180,7 @@ struct InstallResult {
 async fn install(args: InstallArgs) -> Result<(), Error> {
     let runtime = resolve_runtime(args.common.runtime)?;
     let backends = resolve_backends(&args.with)?;
+    validate_install_args(&args, &backends)?;
     let image = image_tag();
 
     start_daemon(runtime);
@@ -215,6 +207,7 @@ async fn install(args: InstallArgs) -> Result<(), Error> {
         );
         exec_inherit(runtime.bin(), &build).map_err(|_| build_failed_error(target))?;
     }
+    validate_container_image_host_args(runtime, &image, &args.host_args)?;
 
     // Recreate cleanly. The profile + token live in the named volume, so the
     // token is stable across recreation.
@@ -233,6 +226,7 @@ async fn install(args: InstallArgs) -> Result<(), Error> {
 
     let token = read_token(runtime, &args.common.name).await?;
     let endpoint = endpoint_url(args.port);
+    wait_for_container_health(runtime, &args.common.name, args.port, &token).await?;
     output::emit(
         "container_install",
         &InstallResult {
@@ -342,9 +336,9 @@ fn logs(args: LogsArgs) -> Result<(), Error> {
 
 // ── runtime resolution ───────────────────────────────────────────────────────
 
-fn resolve_runtime(explicit: Option<RuntimeArg>) -> Result<Runtime, Error> {
+fn resolve_runtime(explicit: Option<Runtime>) -> Result<Runtime, Error> {
     if let Some(r) = explicit {
-        return Ok(r.into());
+        return Ok(r);
     }
     if let Some(v) = std::env::var_os("AFHTTP_CONTAINER_RUNTIME") {
         return runtime_from_str(v.to_string_lossy().trim());
@@ -475,6 +469,81 @@ fn resolve_backends(names: &[String]) -> Result<Vec<Backend>, Error> {
     Ok(out)
 }
 
+fn validate_install_args(args: &InstallArgs, backends: &[Backend]) -> Result<(), Error> {
+    let camoufox_built = backends.iter().any(|b| b.name == "camoufox");
+    if args.profile != "-" && camoufox_built && host_args_select_camoufox(&args.host_args) {
+        return Err(Error::new(
+            ErrorCode::InvalidArgument,
+            "camoufox does not yet support persistent profiles in afhttp; `container install` defaults to `--profile work`. Use `afhttp container install --profile - --with camoufox -- --browser camoufox`.",
+        ));
+    }
+    Ok(())
+}
+
+fn host_args_select_camoufox(host_args: &[String]) -> bool {
+    host_args
+        .windows(2)
+        .any(|pair| pair[0] == "--browser" && pair[1].as_str() == "camoufox")
+        || host_args.iter().any(|arg| arg == "--browser=camoufox")
+}
+
+fn validate_container_image_host_args(
+    runtime: Runtime,
+    image: &str,
+    host_args: &[String],
+) -> Result<(), Error> {
+    if !host_args_need_display_takeover_support(host_args) {
+        return Ok(());
+    }
+    let Some(help) = container_image_host_help(runtime, image) else {
+        return Ok(());
+    };
+    if help.contains("--display-provider") {
+        return Ok(());
+    }
+    Err(Error::new(
+        ErrorCode::InvalidArgument,
+        format!(
+            "container image `{image}` contains an older afhttp host binary that does not support `--takeover display --display-provider kasmvnc`; rebuild the image from this source checkout: `afhttp container install --from-source --with kasmvnc -- --takeover display --display-provider kasmvnc`"
+        ),
+    ))
+}
+
+fn host_args_need_display_takeover_support(host_args: &[String]) -> bool {
+    host_args.iter().any(|arg| arg == "--display-provider")
+        || host_args
+            .iter()
+            .any(|arg| arg.starts_with("--display-provider="))
+        || host_args
+            .windows(2)
+            .any(|pair| pair[0] == "--takeover" && pair[1].as_str() == "display")
+        || host_args.iter().any(|arg| arg == "--takeover=display")
+}
+
+fn container_image_host_help(runtime: Runtime, image: &str) -> Option<String> {
+    let argv = image_host_help_args(image);
+    let out = capture(runtime.bin(), &argv).ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let mut help = String::new();
+    help.push_str(&String::from_utf8_lossy(&out.stdout));
+    help.push_str(&String::from_utf8_lossy(&out.stderr));
+    Some(help)
+}
+
+fn image_host_help_args(image: &str) -> Vec<String> {
+    vec![
+        "run".into(),
+        "--rm".into(),
+        "--entrypoint".into(),
+        "/usr/local/bin/afhttp".into(),
+        image.to_string(),
+        "host".into(),
+        "--help".into(),
+    ]
+}
+
 /// Which `AFHTTP_BIN_FROM` stage of the canonical Dockerfile provides the binary.
 /// `Embedded` selects the `downloader` stage (prebuilt release, the default
 /// `container install` path); `FromSource` selects the `builder` stage (compile
@@ -529,23 +598,46 @@ fn build_args(
 
 /// Resolve and validate the source checkout for `--from-source`.
 fn resolve_source_context(arg: Option<&str>) -> Result<PathBuf, Error> {
-    let dir = match arg {
-        Some(p) => PathBuf::from(p),
-        None => std::env::current_dir()
-            .map_err(|e| Error::new(ErrorCode::IoError, format!("cannot read current dir: {e}")))?,
-    };
+    if let Some(p) = arg {
+        return validate_source_context(PathBuf::from(p), "--context");
+    }
+    let cwd = std::env::current_dir()
+        .map_err(|e| Error::new(ErrorCode::IoError, format!("cannot read current dir: {e}")))?;
+    if is_source_context(&cwd) {
+        return Ok(cwd);
+    }
+    let manifest_dir = PathBuf::from(MANIFEST_DIR);
+    if manifest_dir != cwd && is_source_context(&manifest_dir) {
+        return Ok(manifest_dir);
+    }
+    Err(Error::new(
+        ErrorCode::InvalidArgument,
+        format!(
+            "--from-source needs a source checkout: checked {} and {} \
+             (run from the spore root or pass --context <dir>)",
+            cwd.display(),
+            manifest_dir.display()
+        ),
+    ))
+}
+
+fn validate_source_context(dir: PathBuf, source: &str) -> Result<PathBuf, Error> {
     let dockerfile = dir.join("container/docker/Dockerfile");
     if !dockerfile.is_file() {
         return Err(Error::new(
             ErrorCode::InvalidArgument,
             format!(
-                "--from-source needs a source checkout: {} not found \
+                "--from-source {source} needs a source checkout: {} not found \
                  (run from the spore root or pass --context <dir>)",
                 dockerfile.display()
             ),
         ));
     }
     Ok(dir)
+}
+
+fn is_source_context(dir: &Path) -> bool {
+    dir.join("container/docker/Dockerfile").is_file()
 }
 
 fn run_args(
@@ -642,7 +734,7 @@ async fn read_token(runtime: Runtime, name: &str) -> Result<String, Error> {
         "cat".into(),
         "/data/afhttp/host-token".into(),
     ];
-    for attempt in 0..10 {
+    for attempt in 0..20 {
         if let Ok(out) = capture(runtime.bin(), &argv) {
             if out.status.success() {
                 let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -651,14 +743,100 @@ async fn read_token(runtime: Runtime, name: &str) -> Result<String, Error> {
                 }
             }
         }
-        if attempt < 9 {
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        if !container_running(runtime, name) {
+            return Err(container_launch_failure_error(
+                runtime,
+                name,
+                "container exited before the host token could be read",
+            ));
+        }
+        if attempt < 19 {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
     }
-    Err(Error::new(
-        ErrorCode::InternalError,
-        format!("could not read host token from container `{name}`"),
+    Err(container_launch_failure_error(
+        runtime,
+        name,
+        "host token was not available before the startup deadline",
     ))
+}
+
+async fn wait_for_container_health(
+    runtime: Runtime,
+    name: &str,
+    port: u16,
+    token: &str,
+) -> Result<(), Error> {
+    let endpoint = endpoint_url(port);
+    let client = crate::sdk::Client::connect(&endpoint)?.with_token(token.to_string());
+    for attempt in 0..30 {
+        if !container_running(runtime, name) {
+            return Err(container_launch_failure_error(
+                runtime,
+                name,
+                "container exited before /health became ready",
+            ));
+        }
+        match client.health().await {
+            Ok(health) if health.status == "ok" => return Ok(()),
+            Ok(health) => {
+                if let Some(backend_error) = health.backend_error {
+                    return Err(Error::new(
+                        backend_error.error_code,
+                        format!(
+                            "container host /health reported {}: {}",
+                            health.status, backend_error.error
+                        ),
+                    ));
+                }
+            }
+            Err(_) => {}
+        }
+        if attempt < 29 {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }
+    Err(container_launch_failure_error(
+        runtime,
+        name,
+        "container host did not pass /health before the startup deadline",
+    ))
+}
+
+fn container_launch_failure_error(runtime: Runtime, name: &str, reason: &str) -> Error {
+    let logs = container_logs_summary(runtime, name);
+    let lower = logs.to_ascii_lowercase();
+    let code = if lower.contains("backend_unsupported")
+        || lower.contains("persistent profiles")
+        || lower.contains("does not yet support")
+    {
+        ErrorCode::BackendUnsupported
+    } else {
+        ErrorCode::BrowserLaunchFailed
+    };
+    let mut detail = format!("container host launch failed: {reason}");
+    if !logs.is_empty() {
+        detail.push_str("; recent logs: ");
+        detail.push_str(&logs);
+    }
+    Error::new(code, detail)
+}
+
+fn container_logs_summary(runtime: Runtime, name: &str) -> String {
+    let Ok(out) = capture(runtime.bin(), &["logs".into(), name.to_string()]) else {
+        return String::new();
+    };
+    let mut combined = String::new();
+    combined.push_str(&String::from_utf8_lossy(&out.stdout));
+    combined.push_str(&String::from_utf8_lossy(&out.stderr));
+    let lines: Vec<&str> = combined.lines().rev().take(60).collect();
+    let mut summary = lines.into_iter().rev().collect::<Vec<_>>().join(" | ");
+    const MAX: usize = 4000;
+    if summary.len() > MAX {
+        let start = summary.len() - MAX;
+        summary = format!("...{}", &summary[start..]);
+    }
+    summary
 }
 
 fn build_failed_error(target: &str) -> Error {
@@ -721,11 +899,11 @@ mod tests {
     #[test]
     fn explicit_runtime_wins_over_detection() {
         assert_eq!(
-            resolve_runtime(Some(RuntimeArg::Apple)).unwrap(),
+            resolve_runtime(Some(Runtime::Apple)).unwrap(),
             Runtime::Apple
         );
         assert_eq!(
-            resolve_runtime(Some(RuntimeArg::Docker)).unwrap(),
+            resolve_runtime(Some(Runtime::Docker)).unwrap(),
             Runtime::Docker
         );
     }
@@ -770,6 +948,82 @@ mod tests {
             resolve_backends(&["nope".into()]).unwrap_err().error_code,
             ErrorCode::InvalidArgument
         );
+    }
+
+    #[test]
+    fn install_precheck_rejects_camoufox_with_persistent_profile() {
+        let args = InstallArgs {
+            common: CommonArgs {
+                runtime: Some(Runtime::Docker),
+                name: "afhttp-host".into(),
+            },
+            port: 9222,
+            profile: "work".into(),
+            shm_size: "1g".into(),
+            with: vec!["camoufox".into()],
+            rebuild: false,
+            from_source: false,
+            context: None,
+            host_args: vec!["--browser".into(), "camoufox".into()],
+        };
+        let backends = resolve_backends(&args.with).unwrap();
+        let err = validate_install_args(&args, &backends).unwrap_err();
+        assert_eq!(err.error_code, ErrorCode::InvalidArgument);
+        assert!(err.detail.contains("--profile -"));
+    }
+
+    #[test]
+    fn install_precheck_allows_camoufox_ephemeral_profile() {
+        let args = InstallArgs {
+            common: CommonArgs {
+                runtime: Some(Runtime::Docker),
+                name: "afhttp-host".into(),
+            },
+            port: 9222,
+            profile: "-".into(),
+            shm_size: "1g".into(),
+            with: vec!["camoufox".into()],
+            rebuild: false,
+            from_source: false,
+            context: None,
+            host_args: vec!["--browser=camoufox".into()],
+        };
+        let backends = resolve_backends(&args.with).unwrap();
+        validate_install_args(&args, &backends).unwrap();
+    }
+
+    #[test]
+    fn display_host_args_trigger_image_support_probe() {
+        assert!(host_args_need_display_takeover_support(&[
+            "--takeover".into(),
+            "display".into()
+        ]));
+        assert!(host_args_need_display_takeover_support(&[
+            "--takeover=display".into()
+        ]));
+        assert!(host_args_need_display_takeover_support(&[
+            "--display-provider".into(),
+            "kasmvnc".into()
+        ]));
+        assert!(host_args_need_display_takeover_support(&[
+            "--display-provider=kasmvnc".into()
+        ]));
+        assert!(!host_args_need_display_takeover_support(&[
+            "--takeover".into(),
+            "screencast".into()
+        ]));
+    }
+
+    #[test]
+    fn image_host_help_args_bypasses_entrypoint() {
+        let args = image_host_help_args("afhttp-host:dev");
+        assert_eq!(args[0], "run");
+        assert!(args.contains(&"--rm".to_string()));
+        assert!(args.contains(&"--entrypoint".to_string()));
+        assert!(args.contains(&"/usr/local/bin/afhttp".to_string()));
+        assert_eq!(args[args.len() - 3], "afhttp-host:dev");
+        assert_eq!(args[args.len() - 2], "host");
+        assert_eq!(args[args.len() - 1], "--help");
     }
 
     #[test]

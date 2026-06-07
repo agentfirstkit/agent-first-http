@@ -29,6 +29,16 @@ pub enum ErrorCode {
     WaitSelectorUnmatched,
     BackendUnsupported,
     ArtifactCaptureFailed,
+    ArtifactCaptureTimeout,
+    ArtifactEmpty,
+    ArtifactTiny,
+    BotWallDetected,
+    SecurityChallengeDetected,
+    NetworkNotIdle,
+    NavigationStale,
+    ObservationEmpty,
+    PendingXhrAtCapture,
+    ReadinessTimeout,
     NetworkBodyTruncated,
     ProfileNotFound,
     ProfileDeleteLocked,
@@ -62,6 +72,16 @@ impl ErrorCode {
             | Self::CdpUnavailable
             | Self::WaitSelectorUnmatched
             | Self::BackendUnsupported
+            | Self::ArtifactCaptureTimeout
+            | Self::ArtifactEmpty
+            | Self::ArtifactTiny
+            | Self::BotWallDetected
+            | Self::SecurityChallengeDetected
+            | Self::NetworkNotIdle
+            | Self::NavigationStale
+            | Self::ObservationEmpty
+            | Self::PendingXhrAtCapture
+            | Self::ReadinessTimeout
             | Self::NetworkBodyTruncated
             | Self::ProfileNotFound
             | Self::ProfileDeleteLocked
@@ -98,6 +118,16 @@ impl ErrorCode {
             Self::WaitSelectorUnmatched => "wait_selector_unmatched",
             Self::BackendUnsupported => "backend_unsupported",
             Self::ArtifactCaptureFailed => "artifact_capture_failed",
+            Self::ArtifactCaptureTimeout => "artifact_capture_timeout",
+            Self::ArtifactEmpty => "artifact_empty",
+            Self::ArtifactTiny => "artifact_tiny",
+            Self::BotWallDetected => "bot_wall_detected",
+            Self::SecurityChallengeDetected => "security_challenge_detected",
+            Self::NetworkNotIdle => "network_not_idle",
+            Self::NavigationStale => "navigation_stale",
+            Self::ObservationEmpty => "observation_empty",
+            Self::PendingXhrAtCapture => "pending_xhr_at_capture",
+            Self::ReadinessTimeout => "readiness_timeout",
             Self::NetworkBodyTruncated => "network_body_truncated",
             Self::ProfileNotFound => "profile_not_found",
             Self::ProfileDeleteLocked => "profile_delete_locked",
@@ -183,6 +213,22 @@ mod tests {
             (ErrorCode::WaitSelectorUnmatched, "wait_selector_unmatched"),
             (ErrorCode::BackendUnsupported, "backend_unsupported"),
             (ErrorCode::ArtifactCaptureFailed, "artifact_capture_failed"),
+            (
+                ErrorCode::ArtifactCaptureTimeout,
+                "artifact_capture_timeout",
+            ),
+            (ErrorCode::ArtifactEmpty, "artifact_empty"),
+            (ErrorCode::ArtifactTiny, "artifact_tiny"),
+            (ErrorCode::BotWallDetected, "bot_wall_detected"),
+            (
+                ErrorCode::SecurityChallengeDetected,
+                "security_challenge_detected",
+            ),
+            (ErrorCode::NetworkNotIdle, "network_not_idle"),
+            (ErrorCode::NavigationStale, "navigation_stale"),
+            (ErrorCode::ObservationEmpty, "observation_empty"),
+            (ErrorCode::PendingXhrAtCapture, "pending_xhr_at_capture"),
+            (ErrorCode::ReadinessTimeout, "readiness_timeout"),
             (ErrorCode::NetworkBodyTruncated, "network_body_truncated"),
             (ErrorCode::ProfileNotFound, "profile_not_found"),
             (ErrorCode::ProfileDeleteLocked, "profile_delete_locked"),

@@ -13,6 +13,9 @@
 
 mod support;
 
+use std::time::Duration;
+
+use agent_first_http::sdk::fetch::result::TraceStageStatus;
 use agent_first_http::sdk::fetch::RenderMode;
 use agent_first_http::sdk::Client;
 use agent_first_http::shared::artifacts::Artifact;
@@ -73,6 +76,46 @@ async fn http_only_fetch_writes_body_artifact() {
         result.trace.render_mode,
         agent_first_http::sdk::fetch::result::TraceRenderMode::None,
         "render_mode should echo the agent's --render none request",
+    );
+    assert_eq!(result.trace.current_stage, "complete");
+    assert_eq!(result.trace.timeout_ms, 30_000);
+    assert!(
+        result
+            .trace
+            .stages
+            .iter()
+            .any(|stage| { stage.name == "navigate" && stage.status == TraceStageStatus::Ok }),
+        "success trace should include navigate stage: {:?}",
+        result.trace.stages
+    );
+}
+
+#[tokio::test]
+async fn http_only_flags_cloudflare_turnstile_as_bot_wall() {
+    let fixture = support::fixture_server::spawn().await;
+    let tmpdir = tempfile::tempdir().expect("tempdir");
+
+    let client = Client::connect("ws://localhost:9999").expect("client");
+    let result = client
+        .fetch(format!("{}/cloudflare-turnstile.html", fixture.base_url()))
+        .render(RenderMode::None)
+        .want([Artifact::Body])
+        .out_dir(tmpdir.path().to_path_buf())
+        .send()
+        .await
+        .expect("fetch");
+
+    assert_eq!(
+        result.page_kind,
+        Some(agent_first_http::sdk::fetch::PageKind::BotWallDetected)
+    );
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|w| w.code == ErrorCode::BotWallDetected && w.detail.contains("human takeover")),
+        "expected bot-wall warning with takeover guidance; got {:?}",
+        result.warnings
     );
 }
 
@@ -382,6 +425,36 @@ async fn http_only_fetch_on_unreachable_host_returns_target_unreachable() {
 }
 
 #[tokio::test]
+async fn detailed_fetch_error_preserves_timeout_trace() {
+    let fixture = support::fixture_server::spawn().await;
+    let tmpdir = tempfile::tempdir().expect("tempdir");
+    let client = Client::connect("ws://localhost:9999").expect("client");
+
+    let err = client
+        .fetch(format!("{}/slow.html", fixture.base_url()))
+        .render(RenderMode::None)
+        .timeout(Duration::from_millis(50))
+        .want([Artifact::Body])
+        .out_dir(tmpdir.path().to_path_buf())
+        .send_detailed()
+        .await
+        .err()
+        .expect("expected timeout");
+
+    assert_eq!(err.error_code, ErrorCode::NavigationTimeout);
+    assert_eq!(err.trace.timeout_ms, 50);
+    assert_eq!(err.trace.current_stage, "navigate");
+    assert!(
+        err.trace
+            .stages
+            .iter()
+            .any(|stage| { stage.name == "navigate" && stage.status == TraceStageStatus::Timeout }),
+        "timeout trace should mark navigate timeout: {:?}",
+        err.trace.stages
+    );
+}
+
+#[tokio::test]
 async fn cli_render_none_without_endpoint_does_not_require_browser_env() {
     let fixture = support::fixture_server::spawn().await;
     let tmpdir = tempfile::tempdir().expect("tempdir");
@@ -392,6 +465,8 @@ async fn cli_render_none_without_endpoint_does_not_require_browser_env() {
         .arg("none")
         .arg("--want")
         .arg("body")
+        .arg("--timeout-ms")
+        .arg("5000")
         .arg("--out")
         .arg(tmpdir.path())
         .env_remove("AFHTTP_TEST_BROWSER_BIN")
@@ -407,10 +482,74 @@ async fn cli_render_none_without_endpoint_does_not_require_browser_env() {
     let body: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
     assert_eq!(body["code"], "fetch");
     assert_eq!(body["trace"]["render_decision"], "http_only");
+    assert_eq!(body["trace"]["timeout_ms"], 5000);
+    assert!(body["trace"]["stages"]
+        .as_array()
+        .is_some_and(|s| !s.is_empty()));
     assert!(body.get("artifacts").is_none(), "fetch output must be flat");
     let body_file = body["body_file"].as_str().expect("body_file");
     assert!(
         std::path::Path::new(body_file).is_absolute(),
         "body_file must be absolute: {body_file}"
     );
+}
+
+#[tokio::test]
+async fn cli_fetch_error_envelope_includes_trace() {
+    let tmpdir = tempfile::tempdir().expect("tempdir");
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_afhttp"))
+        .arg("fetch")
+        .arg("http://127.0.0.1:1/will-fail")
+        .arg("--render")
+        .arg("none")
+        .arg("--want")
+        .arg("body")
+        .arg("--timeout-ms")
+        .arg("1000")
+        .arg("--out")
+        .arg(tmpdir.path())
+        .output()
+        .await
+        .expect("run afhttp");
+    assert!(
+        !output.status.success(),
+        "fetch unexpectedly succeeded: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let body: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(body["code"], "error");
+    assert!(
+        body["trace"].is_object(),
+        "error body missing trace: {body}"
+    );
+    assert_eq!(body["trace"]["timeout_ms"], 1000);
+    assert_eq!(body["trace"]["render_mode"], "none");
+    assert!(body["trace"]["stages"]
+        .as_array()
+        .is_some_and(|s| !s.is_empty()));
+}
+
+#[tokio::test]
+async fn cli_fetch_rejects_legacy_timeout_flag() {
+    let fixture = support::fixture_server::spawn().await;
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_afhttp"))
+        .arg("fetch")
+        .arg(format!("{}/plain.html", fixture.base_url()))
+        .arg("--render")
+        .arg("none")
+        .arg("--timeout")
+        .arg("1s")
+        .output()
+        .await
+        .expect("run afhttp");
+    assert!(
+        !output.status.success(),
+        "legacy --timeout unexpectedly succeeded: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let body: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(body["code"], "error");
+    assert_eq!(body["error_code"], "invalid_argument");
 }

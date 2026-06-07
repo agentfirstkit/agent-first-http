@@ -1,11 +1,13 @@
 //! HTTP-only fast path and SPA-shell detector.
 
+use std::borrow::Cow;
 use std::time::Instant;
 
 use url::Url;
 
 use crate::sdk::fetch::artifacts::body as body_artifact;
-use crate::sdk::fetch::result::{FetchResult, RenderDecision, Trace, Warning};
+use crate::sdk::fetch::deadline::FetchDeadline;
+use crate::sdk::fetch::result::{FetchResult, RenderDecision, Warning};
 use crate::sdk::fetch::writer;
 use crate::sdk::fetch::FetchBuilder;
 use crate::shared::artifacts::{Artifact, ArtifactPaths};
@@ -13,6 +15,7 @@ use crate::shared::error::{Error, ErrorCode};
 use crate::shared::ids::RequestId;
 use crate::shared::time::duration_ms;
 
+use super::super::page_classification;
 use super::cookie_jar_resolve::persist_set_cookies;
 use super::request_opts::{prepare_cookie, BodyPayload, PreparedRequestOptions};
 
@@ -29,40 +32,24 @@ pub(super) async fn http_only(
     paths: &ArtifactPaths,
     start: Instant,
     escalation_from: Option<String>,
+    deadline: &FetchDeadline,
 ) -> Result<HttpOnlyOutcome, Error> {
+    deadline.set_stage("prepare_http_fetch");
     writer::ensure_dir(&paths.root).await?;
 
-    let mut local_options;
-    let opts_ref: &PreparedRequestOptions = if let Some(jar_path) = &builder.cookie_jar {
-        let url = Url::parse(&builder.url).map_err(|e| {
-            Error::new(
-                ErrorCode::InvalidArgument,
-                format!("cookie jar: invalid request url {:?}: {e}", builder.url),
-            )
-        })?;
-        let jar = crate::sdk::profile::cookie_jar::CookieJar::load(jar_path)?;
-        let applicable = jar.applicable_cookies(&url);
-        let mut prepared = Vec::with_capacity(applicable.len());
-        for c in applicable {
-            if let Ok(p) = prepare_cookie(&c, "cookie_jar") {
-                prepared.push(p);
-            }
-        }
-        local_options = request_options.clone();
-        local_options.merge_jar_cookies(prepared);
-        &local_options
-    } else {
-        request_options
-    };
+    let opts = resolve_jar_cookies(builder, request_options)?;
+    let opts_ref: &PreparedRequestOptions = &opts;
 
     let http_owned;
-    let http_client =
-        if builder.proxy.is_some() || builder.ca_cert.is_some() || builder.tls_insecure {
-            http_owned = build_per_fetch_http_client(builder).await?;
-            &http_owned
-        } else {
-            builder.client.http()
-        };
+    let http_client = if builder.http.proxy.is_some()
+        || builder.http.ca_cert.is_some()
+        || builder.http.tls_insecure
+    {
+        http_owned = build_per_fetch_http_client(builder).await?;
+        &http_owned
+    } else {
+        builder.client.http()
+    };
 
     let http_method = reqwest::Method::from_bytes(opts_ref.method.as_bytes()).map_err(|_| {
         Error::new(
@@ -81,25 +68,31 @@ pub(super) async fn http_only(
         BodyPayload::Form(fields) => request.form(fields),
     };
 
-    let resp = tokio::time::timeout(builder.timeout, request.send())
-        .await
-        .map_err(|_| {
-            Error::new(
-                ErrorCode::NavigationTimeout,
-                format!("HTTP fetch timed out after {:?}", builder.timeout),
-            )
-        })?
-        .map_err(|e| {
-            let code = classify_http_error(&e);
-            let prefix = if e.is_timeout() {
-                "HTTP timeout"
-            } else if e.is_connect() {
-                "HTTP connect"
-            } else {
-                "HTTP error"
-            };
-            Error::new(code, format!("{prefix}: {e}"))
-        })?;
+    deadline.update_trace(|trace| {
+        trace.render_decision = RenderDecision::HttpOnly;
+        trace.render_used = false;
+        trace.escalation_reason = escalation_from.clone();
+        trace.main_request_observed = true;
+        trace.cookie_jar_file = builder.cookie_jar.path.clone();
+        trace.cookie_jar_warning = builder.cookie_jar.warning.clone();
+        trace.sensitive_capture = super::sensitive_capture(builder);
+    });
+
+    let resp = deadline
+        .run_result("navigate", ErrorCode::NavigationTimeout, async {
+            request.send().await.map_err(|e| {
+                let code = classify_http_error(&e);
+                let prefix = if e.is_timeout() {
+                    "HTTP timeout"
+                } else if e.is_connect() {
+                    "HTTP connect"
+                } else {
+                    "HTTP error"
+                };
+                Error::new(code, format!("{prefix}: {e}"))
+            })
+        })
+        .await?;
 
     let final_url = resp.url().to_string();
     let final_url_parsed = resp.url().clone();
@@ -115,45 +108,31 @@ pub(super) async fn http_only(
         .iter()
         .filter_map(|v| v.to_str().ok().map(String::from))
         .collect();
-    let (bytes, truncated_at) = read_body_with_cap(resp, builder.max_response_bytes).await?;
+    let (bytes, truncated_at) = deadline
+        .run_result(
+            "capture_body",
+            ErrorCode::NavigationTimeout,
+            read_body_with_cap(resp, builder.http.max_response_bytes),
+        )
+        .await?;
 
-    if let Some(jar_path) = &builder.cookie_jar {
-        persist_set_cookies(jar_path, &set_cookie_lines, &final_url_parsed)?;
+    if let Some(jar_path) = &builder.cookie_jar.path {
+        deadline
+            .run_result(
+                "sync_cookie_jar",
+                ErrorCode::NavigationTimeout,
+                std::future::ready(persist_set_cookies(
+                    jar_path,
+                    &set_cookie_lines,
+                    &final_url_parsed,
+                )),
+            )
+            .await?;
     }
 
-    let mut result = FetchResult {
-        request_id,
-        url: builder.url.clone(),
-        final_url,
-        status,
-        tab_id: None,
-        trace: Trace {
-            render_decision: RenderDecision::HttpOnly,
-            render_mode: builder.render.as_trace(),
-            render_used: false,
-            escalation_reason: escalation_from,
-            main_request_observed: true,
-            duration_ms: duration_ms(start.elapsed()),
-            navigation_duration_ms: None,
-            cookie_jar_file: builder.cookie_jar.clone(),
-            cookie_jar_warning: builder.cookie_jar_warning.clone(),
-            sensitive_capture: super::sensitive_capture(builder),
-        },
-        warnings: Vec::new(),
-        body_file: None,
-        rendered_html_file: None,
-        text_file: None,
-        screenshot_file: None,
-        network_file: None,
-        console_file: None,
-        observation_file: None,
-        storage_file: None,
-        download_file: None,
-        download_bytes: None,
-        download_filename: None,
-        download_url: None,
-        download_state: None,
-    };
+    let mut result = FetchResult::new(request_id, builder.url.clone(), deadline.snapshot());
+    result.final_url = final_url;
+    result.status = status;
 
     if builder.want.contains(&Artifact::Body) {
         let path = body_artifact::write(paths, content_type.as_deref(), &bytes).await?;
@@ -171,8 +150,19 @@ pub(super) async fn http_only(
             ),
         });
     }
+    if let Some(classification) = classify_http_body(&bytes, content_type.as_deref()) {
+        result.page_kind = Some(classification.kind);
+        result.warnings.push(Warning {
+            artifact: Artifact::Body,
+            code: classification.code,
+            detail: classification.detail,
+        });
+    }
 
-    result.trace.duration_ms = duration_ms(start.elapsed());
+    deadline.update_trace(|trace| {
+        trace.duration_ms = duration_ms(start.elapsed());
+    });
+    result.trace = deadline.complete_trace();
     Ok(HttpOnlyOutcome {
         result,
         body_bytes: bytes.clone(),
@@ -180,10 +170,50 @@ pub(super) async fn http_only(
     })
 }
 
+pub(super) fn classify_http_body(
+    bytes: &[u8],
+    content_type: Option<&str>,
+) -> Option<page_classification::PageClassification> {
+    let ct = content_type.unwrap_or("").to_ascii_lowercase();
+    if !ct.starts_with("text/html") && !ct.contains("application/xhtml") {
+        return None;
+    }
+    let html = std::str::from_utf8(bytes).ok()?;
+    page_classification::classify(Some(html), None, None)
+}
+
+/// Layer cookie-jar cookies on top of `request_options` when a jar is
+/// configured. Borrows `request_options` unchanged when there is no jar,
+/// otherwise returns an owned clone with the jar's applicable cookies merged.
+fn resolve_jar_cookies<'a>(
+    builder: &FetchBuilder,
+    request_options: &'a PreparedRequestOptions,
+) -> Result<Cow<'a, PreparedRequestOptions>, Error> {
+    let Some(jar_path) = &builder.cookie_jar.path else {
+        return Ok(Cow::Borrowed(request_options));
+    };
+    let url = Url::parse(&builder.url).map_err(|e| {
+        Error::new(
+            ErrorCode::InvalidArgument,
+            format!("cookie jar: invalid request url {:?}: {e}", builder.url),
+        )
+    })?;
+    let jar = crate::sdk::profile::cookie_jar::CookieJar::load(jar_path)?;
+    let mut prepared = Vec::new();
+    for c in jar.applicable_cookies(&url) {
+        if let Ok(p) = prepare_cookie(&c, "cookie_jar") {
+            prepared.push(p);
+        }
+    }
+    let mut owned = request_options.clone();
+    owned.merge_jar_cookies(prepared);
+    Ok(Cow::Owned(owned))
+}
+
 async fn build_per_fetch_http_client(builder: &FetchBuilder) -> Result<reqwest::Client, Error> {
     let mut b =
         reqwest::Client::builder().user_agent(concat!("afhttp/", env!("CARGO_PKG_VERSION")));
-    match &builder.proxy {
+    match &builder.http.proxy {
         Some(url) => {
             let proxy = reqwest::Proxy::all(url).map_err(|e| {
                 Error::new(
@@ -197,7 +227,7 @@ async fn build_per_fetch_http_client(builder: &FetchBuilder) -> Result<reqwest::
             b = b.no_proxy();
         }
     }
-    if let Some(path) = &builder.ca_cert {
+    if let Some(path) = &builder.http.ca_cert {
         let pem = tokio::fs::read(path).await.map_err(|e| {
             Error::new(
                 ErrorCode::IoError,
@@ -212,7 +242,7 @@ async fn build_per_fetch_http_client(builder: &FetchBuilder) -> Result<reqwest::
         })?;
         b = b.add_root_certificate(cert);
     }
-    if builder.tls_insecure {
+    if builder.http.tls_insecure {
         b = b.danger_accept_invalid_certs(true);
     }
     b.build().map_err(|e| {

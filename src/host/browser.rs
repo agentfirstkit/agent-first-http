@@ -286,18 +286,22 @@ pub(crate) fn resolve_named_bin(
             return Ok(candidate);
         }
     }
-    if let Ok(path) = std::env::var("PATH") {
-        for dir in path.split(':') {
-            let candidate = PathBuf::from(dir).join(name);
-            if candidate.exists() {
-                return Ok(candidate);
-            }
-        }
+    if let Some(candidate) = find_on_path(name) {
+        return Ok(candidate);
     }
     Err(Error::new(
         ErrorCode::BrowserLaunchFailed,
         format!("could not find {name} binary on PATH"),
     ))
+}
+
+/// Walk `$PATH` for an executable named `name`, returning the first existing
+/// match. Uses the platform path separator so it works on Windows too.
+fn find_on_path(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.exists())
 }
 
 /// Reserve a localhost port by binding a TCP listener, reading its assigned
@@ -378,14 +382,8 @@ fn resolve_browser_bin(args: &HostArgs) -> Result<PathBuf, Error> {
                 return Ok(resolve_chromium_wrapper_target(&p));
             }
         }
-        // Walk $PATH.
-        if let Ok(path) = std::env::var("PATH") {
-            for dir in path.split(':') {
-                let p = PathBuf::from(dir).join(name);
-                if p.exists() {
-                    return Ok(resolve_chromium_wrapper_target(&p));
-                }
-            }
+        if let Some(p) = find_on_path(name) {
+            return Ok(resolve_chromium_wrapper_target(&p));
         }
     }
 

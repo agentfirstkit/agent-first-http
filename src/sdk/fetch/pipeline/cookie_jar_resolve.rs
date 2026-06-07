@@ -10,16 +10,16 @@ use crate::shared::path::absolute_lexical;
 /// Decide the effective cookie-jar path for this fetch and enforce the
 /// isolation invariant on any user-provided override.
 pub(super) async fn resolve_cookie_jar_path(builder: &mut FetchBuilder) -> Result<(), Error> {
-    if builder.cookie_jar_disabled {
-        builder.cookie_jar = None;
+    if builder.cookie_jar.disabled {
+        builder.cookie_jar.path = None;
         return Ok(());
     }
     if builder.client.is_hostless() {
-        builder.cookie_jar = builder.cookie_jar.take().map(absolute_lexical);
+        builder.cookie_jar.path = builder.cookie_jar.path.take().map(absolute_lexical);
         return Ok(());
     }
     if builder.client.has_inline_host() && !builder.client.inline_host_started().await {
-        builder.cookie_jar = builder.cookie_jar.take().map(absolute_lexical);
+        builder.cookie_jar.path = builder.cookie_jar.path.take().map(absolute_lexical);
         return Ok(());
     }
     // A `/profile` failure (inline or external afhttp host) is a trace
@@ -29,8 +29,8 @@ pub(super) async fn resolve_cookie_jar_path(builder: &mut FetchBuilder) -> Resul
     let info = match builder.client.profile_info().await {
         Ok(info) => Some(info),
         Err(e) => {
-            if builder.cookie_jar.is_none() {
-                builder.cookie_jar_warning = Some(format!(
+            if builder.cookie_jar.path.is_none() {
+                builder.cookie_jar.warning = Some(format!(
                     "GET /profile unavailable; implicit profile cookie jar disabled: {}",
                     e.detail
                 ));
@@ -38,7 +38,7 @@ pub(super) async fn resolve_cookie_jar_path(builder: &mut FetchBuilder) -> Resul
             None
         }
     };
-    match (&builder.cookie_jar, info.as_ref()) {
+    match (&builder.cookie_jar.path, info.as_ref()) {
         (Some(explicit), Some(info)) => {
             if let Some(expected) = info.canonical_cookie_jar() {
                 let explicit_abs = absolute_lexical(explicit.clone());
@@ -55,20 +55,50 @@ pub(super) async fn resolve_cookie_jar_path(builder: &mut FetchBuilder) -> Resul
                         ),
                     ));
                 }
-                builder.cookie_jar = Some(expected_abs);
+                builder.cookie_jar.path = Some(expected_abs);
             }
         }
         (Some(explicit), None) => {
-            builder.cookie_jar = Some(absolute_lexical(explicit.clone()));
+            builder.cookie_jar.path = Some(absolute_lexical(explicit.clone()));
         }
         (None, Some(info)) => {
             if let Some(jar) = info.canonical_cookie_jar() {
-                builder.cookie_jar = Some(absolute_lexical(jar));
+                if !builder.client.has_inline_host() {
+                    builder.cookie_jar.path = None;
+                    builder.cookie_jar.warning = Some(format!(
+                        "implicit profile cookie jar disabled for external host: host profile path {} is not a client-owned local profile; browser profile cookies remain host-side",
+                        info.path
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "<absent>".into())
+                    ));
+                } else if implicit_profile_path_is_local(info.path.as_deref()) {
+                    builder.cookie_jar.path = Some(absolute_lexical(jar));
+                } else {
+                    builder.cookie_jar.path = None;
+                    builder.cookie_jar.warning = Some(format!(
+                        "implicit profile cookie jar disabled: host profile path {} is not visible as a writable local directory; browser profile cookies remain host-side",
+                        info.path
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "<absent>".into())
+                    ));
+                }
             }
         }
         (None, None) => {}
     }
     Ok(())
+}
+
+fn implicit_profile_path_is_local(path: Option<&std::path::Path>) -> bool {
+    let Some(path) = path else {
+        return false;
+    };
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    meta.is_dir() && !meta.permissions().readonly()
 }
 
 fn jar_paths_match(a: &std::path::Path, b: &std::path::Path) -> bool {
@@ -177,4 +207,80 @@ fn cdp_cookie_to_set_cookie(entry: &serde_json::Value) -> Option<cookie::Cookie<
         }
     }
     Some(b.build())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn implicit_profile_path_locality_checks_existing_writable_dirs_only() {
+        let dir = tempfile::tempdir().expect("dir");
+        let file = dir.path().join("file");
+        std::fs::write(&file, "not a dir").expect("write file");
+        let missing = dir.path().join("missing");
+
+        assert!(!implicit_profile_path_is_local(None));
+        assert!(!implicit_profile_path_is_local(Some(&missing)));
+        assert!(!implicit_profile_path_is_local(Some(&file)));
+        assert!(implicit_profile_path_is_local(Some(dir.path())));
+    }
+
+    #[test]
+    fn jar_paths_match_normalizes_current_dir_only() {
+        let a = std::path::Path::new("/tmp/afhttp/./cookies.jar.json");
+        let b = std::path::Path::new("/tmp/afhttp/cookies.jar.json");
+        let c = std::path::Path::new("/tmp/other/cookies.jar.json");
+
+        assert!(jar_paths_match(a, b));
+        assert!(!jar_paths_match(a, c));
+    }
+
+    #[test]
+    fn persist_set_cookies_ignores_invalid_lines_and_writes_valid_cookie() {
+        let dir = tempfile::tempdir().expect("dir");
+        let jar_path = dir.path().join("cookies.jar.json");
+        let url = Url::parse("https://example.test/path/page").expect("url");
+        let lines = vec![
+            "sid=abc; Path=/path; Secure; HttpOnly".to_string(),
+            "not a cookie; bad".to_string(),
+        ];
+
+        persist_set_cookies(&jar_path, &lines, &url).expect("persist");
+        let jar = crate::sdk::profile::cookie_jar::CookieJar::load(&jar_path).expect("load");
+        let cookies = jar.applicable_cookies(&url);
+
+        assert_eq!(cookies.len(), 1);
+        assert_eq!(cookies[0].name(), "sid");
+        assert_eq!(cookies[0].value(), "abc");
+    }
+
+    #[test]
+    fn cdp_cookie_to_set_cookie_maps_supported_attributes() {
+        let entry = serde_json::json!({
+            "name": "sid",
+            "value": "abc",
+            "domain": ".example.test",
+            "path": "/account",
+            "secure": true,
+            "httpOnly": true,
+            "expires": 1893456000.0
+        });
+
+        let cookie = cdp_cookie_to_set_cookie(&entry).expect("cookie");
+
+        assert_eq!(cookie.name(), "sid");
+        assert_eq!(cookie.value(), "abc");
+        assert_eq!(cookie.domain(), Some("example.test"));
+        assert_eq!(cookie.path(), Some("/account"));
+        assert_eq!(cookie.secure(), Some(true));
+        assert_eq!(cookie.http_only(), Some(true));
+        assert!(cookie.expires().is_some());
+    }
+
+    #[test]
+    fn cdp_cookie_to_set_cookie_rejects_missing_required_fields() {
+        assert!(cdp_cookie_to_set_cookie(&serde_json::json!({"value": "abc"})).is_none());
+        assert!(cdp_cookie_to_set_cookie(&serde_json::json!({"name": "sid"})).is_none());
+    }
 }

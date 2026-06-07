@@ -2,7 +2,7 @@
 # Manual ops-panel takeover smoke test.
 #
 # Runs `examples/manual_screencast_takeover.rs` inside the test container with
-# port 9222 forwarded to localhost. Open http://127.0.0.1:9222/ops in
+# port 9222 forwarded to localhost. Open http://127.0.0.1:9222/ops/screencast in
 # your own browser, click the gray box, then press K. The terminal
 # walks window.stage 0 → 1 → 2 as your input is replayed to the
 # in-container chromium through the ops panel relay.

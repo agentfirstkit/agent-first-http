@@ -21,6 +21,12 @@ pub fn build(state: &AppState) -> CapabilitiesResponse {
     // capability gating stays mechanical.
     let is_subset_backend = family == "lightpanda" || family == "camoufox";
     let display_takeover = backend_ready && family != "lightpanda";
+    let screencast_supported = backend_ready && state.ops_enabled && !is_subset_backend;
+    let display_enabled = state.display_takeover.is_some();
+    let display_provider = state
+        .display_takeover
+        .as_ref()
+        .map(|display| display.provider.as_str().to_string());
 
     let mut artifacts: BTreeMap<String, ArtifactSupport> = BTreeMap::new();
     artifacts.insert(
@@ -115,15 +121,15 @@ pub fn build(state: &AppState) -> CapabilitiesResponse {
         "display_takeover".into(),
         FeatureSupport {
             supported: display_takeover,
-            detail: Some("--takeover kasmvnc".into()),
+            detail: Some("--takeover display --display-provider kasmvnc".into()),
             risk: None,
         },
     );
     features.insert(
         "ops_panel".into(),
         FeatureSupport {
-            supported: backend_ready && state.ops_enabled && !is_subset_backend,
-            detail: Some("/ops".into()),
+            supported: screencast_supported || display_enabled,
+            detail: Some("/ops/screencast".into()),
             risk: None,
         },
     );
@@ -157,6 +163,7 @@ pub fn build(state: &AppState) -> CapabilitiesResponse {
         backend: BackendFamily { family, version },
         artifacts,
         wait_modes: vec![
+            "auto".into(),
             "load".into(),
             "idle".into(),
             "selector".into(),
@@ -165,8 +172,12 @@ pub fn build(state: &AppState) -> CapabilitiesResponse {
         ],
         display_takeover,
         ops_panel: OpsPanelSupport {
-            supported: backend_ready && state.ops_enabled && !is_subset_backend,
-            screencast: backend_ready && state.ops_enabled && !is_subset_backend,
+            supported: screencast_supported || display_enabled,
+            screencast: screencast_supported,
+            display: display_enabled,
+            screencast_url: screencast_supported.then(|| "/ops/screencast".to_string()),
+            display_url: display_enabled.then(|| "/ops/display".to_string()),
+            display_provider,
         },
         profile: ProfileSupport {
             persistent: true,

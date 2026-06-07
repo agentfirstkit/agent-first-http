@@ -83,7 +83,7 @@ impl Connection {
             Some(t) => append_query_pairs(endpoint_ws_url, &[("token_secret", t)])?,
             None => endpoint_ws_url.to_string(),
         };
-        let request = build_ws_request(&url, token)?;
+        let request = build_ws_request(&url)?;
         let uri: Uri = url
             .parse()
             .map_err(|e| Error::new(ErrorCode::InvalidEndpoint, format!("CDP url {url:?}: {e}")))?;
@@ -150,7 +150,7 @@ impl Connection {
             Some(t) => append_query_pairs("ws://localhost/cdp", &[("token_secret", t)])?,
             None => "ws://localhost/cdp".to_string(),
         };
-        let request = build_ws_request(&url, token)?;
+        let request = build_ws_request(&url)?;
         let stream = tokio::net::UnixStream::connect(path).await.map_err(|e| {
             Error::new(
                 ErrorCode::HostUnreachable,
@@ -242,6 +242,30 @@ impl Connection {
         params: &P,
         session_id: Option<&str>,
     ) -> Result<Value, Error> {
+        self.send_inner(method, params, session_id, None).await
+    }
+
+    /// Send a CDP command and fail with `cdp_timeout` if the browser does not
+    /// answer within `timeout`. Unlike wrapping [`Self::send`] externally, this
+    /// removes the pending reply slot on timeout.
+    pub async fn send_timeout<P: Serialize>(
+        &self,
+        method: &str,
+        params: &P,
+        session_id: Option<&str>,
+        timeout: Duration,
+    ) -> Result<Value, Error> {
+        self.send_inner(method, params, session_id, Some(timeout))
+            .await
+    }
+
+    async fn send_inner<P: Serialize>(
+        &self,
+        method: &str,
+        params: &P,
+        session_id: Option<&str>,
+        timeout: Option<Duration>,
+    ) -> Result<Value, Error> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let body = match session_id {
             Some(sid) => serde_json::json!({
@@ -267,8 +291,21 @@ impl Connection {
         self.tx
             .send(OutMsg::Text(serialized))
             .map_err(|_| Error::new(ErrorCode::CdpUnavailable, "CDP writer closed before send"))?;
-        let value = resp_rx
-            .await
+        let received = if let Some(timeout) = timeout {
+            match tokio::time::timeout(timeout, resp_rx).await {
+                Ok(value) => value,
+                Err(_) => {
+                    self.pending.lock().await.remove(&id);
+                    return Err(Error::new(
+                        ErrorCode::CdpTimeout,
+                        format!("{method}: CDP reply timed out after {timeout:?}"),
+                    ));
+                }
+            }
+        } else {
+            resp_rx.await
+        };
+        let value = received
             .map_err(|_| Error::new(ErrorCode::CdpUnavailable, "CDP reader closed"))?
             .map_err(|e| Error::new(ErrorCode::CdpError, e.to_string()))?;
         Ok(value)
@@ -362,9 +399,12 @@ fn append_query_pairs(url: &str, pairs: &[(&str, &str)]) -> Result<String, Error
     Ok(parsed.to_string())
 }
 
-fn build_ws_request(url: &str, _token: Option<&str>) -> Result<Request<()>, Error> {
+fn build_ws_request(url: &str) -> Result<Request<()>, Error> {
     // tokio_tungstenite::connect_async accepts &str directly via IntoClientRequest,
     // but we go through the explicit Request type so we can attach headers later.
+    // The bearer token is already baked into the URL as `?token_secret=` by the
+    // caller; a bearer header would also work, but axum's WebSocketUpgrade
+    // ignores it for the upgrade handshake.
     let uri: Uri = url
         .parse()
         .map_err(|e| Error::new(ErrorCode::InvalidEndpoint, format!("CDP url {url:?}: {e}")))?;
@@ -379,9 +419,6 @@ fn build_ws_request(url: &str, _token: Option<&str>) -> Result<Request<()>, Erro
         .header(header::SEC_WEBSOCKET_KEY, generate_key())
         .body(())
         .map_err(|e| Error::new(ErrorCode::InternalError, format!("CDP build request: {e}")))?;
-    // _token is already baked into the URL by the caller; bearer header
-    // would also be acceptable but axum's WebSocketUpgrade ignores it for
-    // the upgrade handshake.
     req.into_client_request().map_err(|e| {
         Error::new(
             ErrorCode::InternalError,

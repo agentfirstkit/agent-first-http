@@ -1,18 +1,20 @@
 //! `afhttp fetch` subcommand.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use clap::Args as ClapArgs;
 use clap::ValueEnum;
 
 use crate::cli::output;
 use crate::host::bootstrap::BrowserChoice;
-use crate::sdk::fetch::{FetchCookie, NetworkBodies, RenderMode, Wait};
+use crate::sdk::fetch::{
+    FetchCookie, NetworkBodies, RenderMode, Wait, DEFAULT_NETWORK_BODY_MAX_BYTES,
+};
 use crate::sdk::{Client, InlineConfig};
 use crate::shared::artifacts::Artifact;
 use crate::shared::error::{Error, ErrorCode};
 use crate::shared::ids::TabId;
-use crate::shared::time::parse_duration;
 
 #[derive(ValueEnum, Debug, Clone, Copy, Default)]
 pub enum NetworkBodiesArg {
@@ -92,8 +94,8 @@ pub struct Args {
     )]
     pub tab: String,
     /// Readiness signal before capture on the browser path:
-    /// load | idle | selector:<css> | selector-visible:<css> | ms:<n>.
-    #[arg(long, default_value = "load", help_heading = "Rendering")]
+    /// auto | load | idle | selector:<css> | selector-visible:<css> | ms:<n>.
+    #[arg(long, default_value = "auto", help_heading = "Rendering")]
     pub wait: String,
     /// Add a request header (repeatable). Format: `Name: value`.
     #[arg(long = "header", value_name = "K:V", help_heading = "Request")]
@@ -133,8 +135,17 @@ pub struct Args {
     #[arg(long, default_value_t = NetworkBodiesArg::Off, help_heading = "Network capture")]
     pub network_bodies: NetworkBodiesArg,
     /// Per-body cap for captured network bodies, in bytes.
-    #[arg(long, default_value_t = 1_048_576, help_heading = "Network capture")]
+    #[arg(long, default_value_t = DEFAULT_NETWORK_BODY_MAX_BYTES, help_heading = "Network capture")]
     pub network_body_max_bytes: u64,
+    /// Network quiet window used by --wait auto, in milliseconds.
+    #[arg(long, default_value_t = 800, help_heading = "Rendering")]
+    pub readiness_idle_ms: u64,
+    /// DOM/text unchanged window used by --wait auto, in milliseconds.
+    #[arg(long, default_value_t = 500, help_heading = "Rendering")]
+    pub readiness_stable_ms: u64,
+    /// Low visible-text byte threshold for --wait auto quality warnings only.
+    #[arg(long, default_value_t = 32, help_heading = "Rendering")]
+    pub readiness_min_text_bytes: u64,
     /// Redact sensitive values in network.json: on or off. On by default;
     /// off writes raw Authorization/Cookie headers and token-bearing query
     /// params to the artifact — only disable for trusted local debugging.
@@ -194,9 +205,13 @@ pub struct Args {
     /// against known-self-signed environments.
     #[arg(long, help_heading = "HTTP transport")]
     pub tls_insecure: bool,
-    /// Overall fetch timeout (e.g. `30s`, `1500ms`).
-    #[arg(long, default_value = "30s", help_heading = "HTTP transport")]
-    pub timeout: String,
+    /// Overall fetch timeout, in milliseconds.
+    #[arg(
+        long = "timeout-ms",
+        default_value_t = 30_000,
+        help_heading = "HTTP transport"
+    )]
+    pub timeout_ms: u64,
     /// Capture WebSocket frame payloads to network-bodies/<id>.frames.jsonl.
     /// Frames may carry bearer tokens, session IDs, and message content —
     /// treat the artifact as sensitive.
@@ -209,82 +224,28 @@ pub struct Args {
 }
 
 pub async fn run(args: Args) -> Result<(), Error> {
+    match run_inner(args).await {
+        Ok(()) => Ok(()),
+        Err(FetchRunError::Plain(err)) => {
+            let stdout = std::io::stdout();
+            let mut handle = stdout.lock();
+            let _ = crate::shared::envelope::emit_error(&mut handle, &err);
+            Err(err)
+        }
+        Err(FetchRunError::Emitted(err)) => Err(err),
+    }
+}
+
+async fn run_inner(args: Args) -> Result<(), FetchRunError> {
     let render = RenderMode::parse(&args.render)?;
     let wait = Wait::parse(&args.wait)?;
-    let timeout = parse_duration(&args.timeout)?;
+    let timeout = Duration::from_millis(args.timeout_ms);
     let network_bodies = NetworkBodies::from(args.network_bodies);
     let network_redact = matches!(args.network_redact, NetworkRedactArg::On);
 
-    // Resolve the request body from --data / --data-file / --form.
-    if args.data.is_some() && args.data_file.is_some() {
-        return Err(Error::new(
-            ErrorCode::InvalidArgument,
-            "--data and --data-file are mutually exclusive",
-        ));
-    }
-    if (args.data.is_some() || args.data_file.is_some()) && !args.form.is_empty() {
-        return Err(Error::new(
-            ErrorCode::InvalidArgument,
-            "--data/--data-file and --form are mutually exclusive",
-        ));
-    }
-    let body_bytes: Option<Vec<u8>> = if let Some(data) = &args.data {
-        if let Some(path) = data.strip_prefix('@') {
-            Some(
-                tokio::fs::read(path)
-                    .await
-                    .map_err(|e| Error::new(ErrorCode::IoError, format!("--data @{path}: {e}")))?,
-            )
-        } else {
-            Some(data.as_bytes().to_vec())
-        }
-    } else if let Some(path) = &args.data_file {
-        Some(tokio::fs::read(path).await.map_err(|e| {
-            Error::new(
-                ErrorCode::IoError,
-                format!("--data-file {}: {e}", path.display()),
-            )
-        })?)
-    } else {
-        None
-    };
-
-    let want: std::collections::BTreeSet<Artifact> = if args.want.is_empty() {
-        Artifact::ALL.iter().copied().collect()
-    } else {
-        let mut s = std::collections::BTreeSet::new();
-        for token in &args.want {
-            let a = parse_artifact(token)?;
-            s.insert(a);
-        }
-        s
-    };
-
-    let client = match args.endpoint.as_deref() {
-        Some(ep) => {
-            let mut c = Client::connect(ep)?;
-            if let Some(t) = args.token.as_deref() {
-                c = c.with_token(t);
-            }
-            c
-        }
-        None if matches!(render, RenderMode::None) => Client::http_only()?,
-        None => {
-            let browser = args
-                .browser
-                .parse::<BrowserChoice>()
-                .map_err(|e| Error::new(ErrorCode::InvalidArgument, format!("--browser: {e}")))?;
-            let cfg = InlineConfig {
-                browser,
-                browser_bin: args.browser_bin.clone(),
-            };
-            if matches!(render, RenderMode::Auto) {
-                Client::inline_ephemeral_lazy(cfg).await?
-            } else {
-                Client::inline_ephemeral_with(cfg).await?
-            }
-        }
-    };
+    let body_bytes = resolve_body(&args).await?;
+    let want = resolve_want(&args.want)?;
+    let client = build_client(&args, render).await?;
 
     let mut builder = client
         .fetch(args.url.clone())
@@ -294,6 +255,9 @@ pub async fn run(args: Args) -> Result<(), Error> {
         .want(want)
         .network_bodies(network_bodies)
         .network_body_max_bytes(args.network_body_max_bytes)
+        .readiness_idle_ms(args.readiness_idle_ms)
+        .readiness_stable_ms(args.readiness_stable_ms)
+        .readiness_min_text_bytes(args.readiness_min_text_bytes)
         .network_redact(network_redact)
         .method(args.method);
     if let Some(bytes) = body_bytes {
@@ -358,8 +322,99 @@ pub async fn run(args: Args) -> Result<(), Error> {
         }
     }
 
-    let result = builder.send().await?;
-    output::emit("fetch", &result)
+    match builder.send_detailed().await {
+        Ok(result) => Ok(output::emit("fetch", &result)?),
+        Err(err) => {
+            output::emit("error", &err)?;
+            Err(FetchRunError::Emitted(err.into_error()))
+        }
+    }
+}
+
+enum FetchRunError {
+    Plain(Error),
+    Emitted(Error),
+}
+
+impl From<Error> for FetchRunError {
+    fn from(err: Error) -> Self {
+        Self::Plain(err)
+    }
+}
+
+/// Resolve the request body from `--data` / `--data-file`, rejecting the
+/// mutually exclusive combinations. `--form` fields are wired separately by
+/// the caller; this only enforces that they don't coexist with a raw body.
+async fn resolve_body(args: &Args) -> Result<Option<Vec<u8>>, Error> {
+    if args.data.is_some() && args.data_file.is_some() {
+        return Err(Error::new(
+            ErrorCode::InvalidArgument,
+            "--data and --data-file are mutually exclusive",
+        ));
+    }
+    if (args.data.is_some() || args.data_file.is_some()) && !args.form.is_empty() {
+        return Err(Error::new(
+            ErrorCode::InvalidArgument,
+            "--data/--data-file and --form are mutually exclusive",
+        ));
+    }
+    if let Some(data) = &args.data {
+        if let Some(path) = data.strip_prefix('@') {
+            return Ok(Some(tokio::fs::read(path).await.map_err(|e| {
+                Error::new(ErrorCode::IoError, format!("--data @{path}: {e}"))
+            })?));
+        }
+        return Ok(Some(data.as_bytes().to_vec()));
+    }
+    if let Some(path) = &args.data_file {
+        return Ok(Some(tokio::fs::read(path).await.map_err(|e| {
+            Error::new(
+                ErrorCode::IoError,
+                format!("--data-file {}: {e}", path.display()),
+            )
+        })?));
+    }
+    Ok(None)
+}
+
+/// Parse the `--want` tokens into an artifact set; an empty list means all
+/// default artifacts.
+fn resolve_want(want: &[String]) -> Result<std::collections::BTreeSet<Artifact>, Error> {
+    if want.is_empty() {
+        return Ok(Artifact::ALL.iter().copied().collect());
+    }
+    want.iter().map(|t| parse_artifact(t)).collect()
+}
+
+/// Construct the SDK client for this fetch: a remote connection when
+/// `--endpoint-url` is set, the HTTP-only client for `--render none`, or an
+/// inline ephemeral host otherwise (lazy for `auto`, eager for `always`).
+async fn build_client(args: &Args, render: RenderMode) -> Result<Client, Error> {
+    match args.endpoint.as_deref() {
+        Some(ep) => {
+            let mut c = Client::connect(ep)?;
+            if let Some(t) = args.token.as_deref() {
+                c = c.with_token(t);
+            }
+            Ok(c)
+        }
+        None if matches!(render, RenderMode::None) => Client::http_only(),
+        None => {
+            let browser = args
+                .browser
+                .parse::<BrowserChoice>()
+                .map_err(|e| Error::new(ErrorCode::InvalidArgument, format!("--browser: {e}")))?;
+            let cfg = InlineConfig {
+                browser,
+                browser_bin: args.browser_bin.clone(),
+            };
+            if matches!(render, RenderMode::Auto) {
+                Client::inline_ephemeral_lazy(cfg).await
+            } else {
+                Client::inline_ephemeral_with(cfg).await
+            }
+        }
+    }
 }
 
 fn parse_artifact(token: &str) -> Result<Artifact, Error> {

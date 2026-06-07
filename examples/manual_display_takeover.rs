@@ -1,9 +1,9 @@
-//! Manual KasmVNC display-takeover smoke test (human in the loop).
+//! Manual real-display takeover smoke test (KasmVNC provider, human in the loop).
 //!
 //! Counterpart of `examples/manual_screencast_takeover.rs`, which exercises the
-//! lightweight CDP ops panel (`/ops`). This one exercises the opt-in
-//! **real-display takeover** mode (`--takeover kasmvnc`, served at
-//! `/ops/display`): the browser runs *headful* on an in-container
+//! lightweight CDP ops panel (`/ops/screencast`). This one exercises the opt-in
+//! **real-display takeover** mode (`--takeover display --display-provider
+//! kasmvnc`, served at `/ops/display`): the browser runs *headful* on an in-container
 //! KasmVNC X display, and the human drives it with real OS-level input
 //! through a browser tab proxied by afhttp's authenticated listener.
 //!
@@ -47,8 +47,8 @@
 use std::time::Duration;
 
 use agent_first_http::host::bootstrap::{
-    install_rustls_provider, BrowserChoice, DisplayMode, HealthPublic, HostArgs, ProfileChoice,
-    Takeover,
+    install_rustls_provider, BrowserChoice, DisplayMode, DisplayProvider, HealthPublic, HostArgs,
+    ProfileChoice, Takeover,
 };
 use agent_first_http::host::listener::{build_router, AppState};
 use agent_first_http::sdk::Client;
@@ -167,7 +167,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         listen: format!("tcp:{LISTEN}"),
         profile,
         display: DisplayMode::Headful,
-        takeover: Takeover::KasmVnc,
+        takeover: Takeover::Display {
+            provider: DisplayProvider::KasmVnc,
+        },
         display_quality: quality,
         browser,
         browser_bin: None,
@@ -221,7 +223,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!();
     println!("================================================================");
-    println!("  Manual KasmVNC display-takeover test");
+    println!("  Manual real-display takeover test (KasmVNC provider)");
     println!("================================================================");
     println!();
     println!("  1. Open this URL in your browser:");

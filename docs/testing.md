@@ -113,7 +113,7 @@ normal desktops:
 The matrix sets `RUST_MIN_STACK=16 MiB` so the deep fetch/host future chain
 doesn't overflow Windows' small default thread stack.
 
-The flaky-by-design **ops-panel and display-takeover** suites run in their own
+The flaky-by-design **ops-panel and display takeover** suites run in their own
 non-blocking nightly workflow (`.github/workflows/ops-takeover.yml`), not in the
 gating `ci.yml`. The Lightpanda backend is exercised inside `integration-docker`
 when its binary is present.
@@ -124,7 +124,7 @@ The ops panel HTML+JS is unit-tested with a headless browser (Chromium via CDP, 
 
 1. Boot a fixture target page.
 2. Boot an `afhttp host`.
-3. Drive a headless Chromium to the host's `/ops` URL.
+3. Drive a headless Chromium to the host's `/ops/screencast` URL.
 4. Synthesize `pointermove` and `keydown` in the headless Chromium.
 5. Assert the target page received the events with intact timing (within tolerance) via `getCoalescedEvents()` in the target page's JS.
 

@@ -24,14 +24,30 @@ pub struct NetworkLog {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NetworkSummary {
     pub requests_total: usize,
+    pub responses_total: usize,
+    pub finished_total: usize,
     pub failed_total: usize,
+    pub incomplete_total: usize,
+    pub inflight_total_at_capture: usize,
+    pub pending_by_resource_type: BTreeMap<String, usize>,
     pub captured_body_files: usize,
     pub redacted: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkEntryState {
+    #[default]
+    Pending,
+    Responded,
+    Finished,
+    Failed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkEntry {
     pub request_id: String,
+    pub state: NetworkEntryState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub redirect_from_request_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

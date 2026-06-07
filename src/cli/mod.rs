@@ -18,10 +18,8 @@ pub fn run() -> ExitCode {
     // with "no rustls crypto provider is configured".
     crate::host::bootstrap::install_rustls_provider();
 
-    // Help is rendered without spinning up the async runtime. `--help-markdown`
-    // feeds scripts/projects/agent-first-http/generate-cli-doc.sh; top-level
-    // `--help` mirrors afpsql's recursive afdata-rendered help. Subcommand help
-    // (e.g. `afhttp fetch --help`) is left to clap.
+    // Help is rendered without spinning up the async runtime so
+    // `--help --recursive --output markdown` can feed generated docs.
     if let Some(code) = maybe_render_help() {
         return code;
     }
@@ -78,50 +76,46 @@ fn run_blocking() -> ExitCode {
     }
 }
 
-/// Render top-level help and return an exit code, or `None` to continue normal
-/// parsing. afhttp has no top-level global flags, so detection is a simple scan.
+/// Render help and return an exit code, or `None` to continue normal parsing.
 fn maybe_render_help() -> Option<ExitCode> {
     use clap::CommandFactory;
     use std::io::Write;
 
     let raw: Vec<String> = std::env::args().collect();
     let mut handle = std::io::stdout();
-
-    // `afhttp --help` / `-h` only (let clap handle `afhttp <sub> --help`).
-    if raw.len() == 2 && matches!(raw[1].as_str(), "--help" | "-h") {
-        let _ = writeln!(
-            handle,
-            "{}",
-            agent_first_data::cli_render_help(&args::Cli::command(), &[])
-        );
-        return Some(ExitCode::SUCCESS);
+    match agent_first_data::cli_handle_help_or_continue(
+        &raw,
+        &args::Cli::command(),
+        &agent_first_data::HelpConfig::human_cli_default(),
+    ) {
+        Ok(Some(help)) => {
+            let _ = write!(handle, "{help}");
+            Some(ExitCode::SUCCESS)
+        }
+        Ok(None) => None,
+        Err(err) => {
+            let _ = writeln!(handle, "{}", agent_first_data::output_json(&err));
+            Some(ExitCode::from(2))
+        }
     }
-
-    // `afhttp --help-markdown` anywhere before a `--` terminator.
-    let wants_markdown = raw
-        .iter()
-        .skip(1)
-        .take_while(|a| a.as_str() != "--")
-        .any(|a| a == "--help-markdown");
-    if wants_markdown {
-        let _ = writeln!(
-            handle,
-            "{}",
-            agent_first_data::cli_render_help_markdown(&args::Cli::command(), &[])
-        );
-        return Some(ExitCode::SUCCESS);
-    }
-
-    None
 }
 
 async fn dispatch(parsed: args::Parsed) -> Result<(), Error> {
-    let res = match parsed.command {
+    let command = match parsed.command {
+        args::Command::Fetch(a) => {
+            // `fetch` owns error emission so it can attach the fetch-local trace
+            // without adding trace fields to the global Error type.
+            return cmd::fetch::run(*a).await;
+        }
+        command => command,
+    };
+    let res = match command {
         args::Command::Host(a) => cmd::host::run(a).await,
-        args::Command::Fetch(a) => cmd::fetch::run(*a).await,
+        args::Command::Fetch(_) => unreachable!("fetch handled above"),
         args::Command::Upload(a) => cmd::upload::run(a).await,
         args::Command::Cdp(a) => cmd::cdp::run(a).await,
         args::Command::Ui(a) => cmd::ui::run(a).await,
+        args::Command::Takeover(a) => cmd::takeover::run(a).await,
         args::Command::Health(a) => cmd::health::run(a).await,
         args::Command::Capabilities(a) => cmd::capabilities::run(a).await,
         args::Command::Profile(a) => cmd::profile::run(a).await,

@@ -13,8 +13,8 @@ pub struct CapabilitiesResponse {
     pub backend: BackendFamily,
     pub artifacts: BTreeMap<String, ArtifactSupport>,
     pub wait_modes: Vec<String>,
-    /// Whether this backend can expose a real display takeover when the host
-    /// is started with `--takeover kasmvnc`.
+    /// Whether this backend can expose a real-display takeover when the host
+    /// is started with `--takeover display --display-provider kasmvnc`.
     pub display_takeover: bool,
     pub ops_panel: OpsPanelSupport,
     pub profile: ProfileSupport,
@@ -42,6 +42,14 @@ pub struct ArtifactSupport {
 pub struct OpsPanelSupport {
     pub supported: bool,
     pub screencast: bool,
+    #[serde(default)]
+    pub display: bool,
+    #[serde(default)]
+    pub screencast_url: Option<String>,
+    #[serde(default)]
+    pub display_url: Option<String>,
+    #[serde(default)]
+    pub display_provider: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

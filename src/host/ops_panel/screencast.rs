@@ -1,4 +1,4 @@
-//! Page.startScreencast frame relay helpers for `/ops/screencast`.
+//! Page.startScreencast frame relay helpers for `/ops/screencast/ws`.
 //!
 //! Each WS client gets a fresh CDP connection to the local browser, picks
 //! a page target, attaches a flattened session, starts a JPEG screencast,

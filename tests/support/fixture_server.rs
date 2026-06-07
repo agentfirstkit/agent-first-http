@@ -61,6 +61,30 @@ pub const XHR_HTML: &str = "<!doctype html><html><body>\
      </script>\
      </body></html>";
 
+pub const DELAYED_XHR_HTML: &str = "<!doctype html><html><body>\
+     <div id=\"out\">loading</div>\
+     <script>\
+       fetch('/delayed-data.json').then(r=>r.json()).then(d=>{\
+         document.getElementById('out').innerText = d.message;\
+       });\
+     </script>\
+     </body></html>";
+
+pub const NEVER_XHR_HTML: &str = "<!doctype html><html><body>\
+     <div id=\"out\">long poll started</div>\
+     <script>fetch('/never.json').catch(()=>{});</script>\
+     </body></html>";
+
+pub const EMPTY_HTML: &str =
+    "<!doctype html><html><head><title>empty</title></head><body></body></html>";
+
+pub const CLOUDFLARE_TURNSTILE_HTML: &str = "<!doctype html><html><head>\
+     <title>Just a moment...</title></head><body>\
+     <h1>Checking your browser before accessing example.test.</h1>\
+     <div class=\"cf-turnstile\" data-sitekey=\"test\"></div>\
+     <script src=\"https://challenges.cloudflare.com/turnstile/v0/api.js\"></script>\
+     </body></html>";
+
 pub const INTERACTIVE_HTML: &str = "<!doctype html><html><body>\
      <a id=\"docs\" href=\"/plain.html\">Docs</a>\
      <form action=\"/submit\"><label for=\"q\">Query</label><input id=\"q\" name=\"q\" value=\"secret\">\
@@ -142,6 +166,9 @@ impl Fixture {
 ///   - `/identity.html` → JS exposes navigator.userAgent + document.cookie
 ///   - `/headers.json` → request header echo
 ///   - `/data.json` → `JSON_PAYLOAD` with `application/json`
+///   - `/slow.html` → delayed response for timeout trace tests
+///   - `/delayed-xhr.html` → JS page whose text appears after a delayed XHR
+///   - `/never-xhr.html` → JS page with a never-ending XHR
 ///   - `/interactive.html` → controls for observation tests
 ///   - `/observation-contexts.html` → shadow/iframe observation fixture
 ///   - `/frame-inner.html` → same-origin iframe body for observation tests
@@ -161,6 +188,10 @@ pub async fn spawn() -> Fixture {
         .route("/js.html", get(js_html))
         .route("/console.html", get(console_html))
         .route("/xhr.html", get(xhr_html))
+        .route("/delayed-xhr.html", get(delayed_xhr_html))
+        .route("/never-xhr.html", get(never_xhr_html))
+        .route("/empty.html", get(empty_html))
+        .route("/cloudflare-turnstile.html", get(cloudflare_turnstile_html))
         .route("/identity.html", get(identity_html))
         .route("/headers.json", get(headers_json))
         .route("/interactive.html", get(interactive_html))
@@ -173,6 +204,9 @@ pub async fn spawn() -> Fixture {
         .route("/storage.html", get(storage_html))
         .route("/storage-large.html", get(storage_large_html))
         .route("/data.json", get(data_json))
+        .route("/delayed-data.json", get(delayed_data_json))
+        .route("/slow.html", get(slow_html))
+        .route("/never.json", get(never_json))
         .route("/404", get(four_oh_four))
         .route("/redirect", get(redirect))
         .route("/download.bin", get(download_bin))
@@ -244,6 +278,42 @@ async fn xhr_html() -> Response {
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
         XHR_HTML,
+    )
+        .into_response()
+}
+
+async fn delayed_xhr_html() -> Response {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        DELAYED_XHR_HTML,
+    )
+        .into_response()
+}
+
+async fn never_xhr_html() -> Response {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        NEVER_XHR_HTML,
+    )
+        .into_response()
+}
+
+async fn empty_html() -> Response {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        EMPTY_HTML,
+    )
+        .into_response()
+}
+
+async fn cloudflare_turnstile_html() -> Response {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        CLOUDFLARE_TURNSTILE_HTML,
     )
         .into_response()
 }
@@ -363,6 +433,31 @@ async fn data_json() -> Response {
         JSON_PAYLOAD,
     )
         .into_response()
+}
+
+async fn delayed_data_json() -> Response {
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        "{\"message\":\"delayed ready\"}",
+    )
+        .into_response()
+}
+
+async fn slow_html() -> Response {
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        PLAIN_HTML,
+    )
+        .into_response()
+}
+
+async fn never_json() -> Response {
+    std::future::pending::<()>().await;
+    (StatusCode::OK, "").into_response()
 }
 
 async fn four_oh_four() -> Response {

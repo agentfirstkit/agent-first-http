@@ -138,7 +138,7 @@ async fn screencast_forwards_jpeg_frames() {
         println!("(skipping: no chromium)");
         return;
     };
-    let ws_url = format!("{endpoint}/ops/screencast");
+    let ws_url = format!("{endpoint}/ops/screencast/ws");
     let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url)
         .await
         .expect("ws connect");
@@ -183,7 +183,7 @@ async fn input_replay_preserves_inter_event_timing() {
     };
 
     // Open the input WS.
-    let ws_url = format!("{}/ops/input", endpoint);
+    let ws_url = format!("{}/ops/screencast/input", endpoint);
     let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url)
         .await
         .expect("ws connect");

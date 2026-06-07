@@ -128,11 +128,7 @@ impl CookieJar {
     /// [`Self::persist`] afterwards to write the jar back to disk.
     pub fn merge(&mut self, set_cookie: Cookie<'static>, request_url: &Url) {
         let entry = JarEntry::from_set_cookie(set_cookie, request_url);
-        if let Some(idx) = self.entries.iter().position(|e| {
-            e.name == entry.name
-                && e.domain.as_deref().unwrap_or("") == entry.domain.as_deref().unwrap_or("")
-                && e.path.as_deref().unwrap_or("/") == entry.path.as_deref().unwrap_or("/")
-        }) {
+        if let Some(idx) = self.entries.iter().position(|e| e.same_identity(&entry)) {
             // Replace in place.
             self.entries[idx] = entry;
         } else {
@@ -211,11 +207,7 @@ impl CookieJar {
         let on_disk = Self::load(&self.path)?;
         let mut merged = on_disk.entries;
         for entry in self.entries.drain(..) {
-            if let Some(idx) = merged.iter().position(|e| {
-                e.name == entry.name
-                    && e.domain.as_deref().unwrap_or("") == entry.domain.as_deref().unwrap_or("")
-                    && e.path.as_deref().unwrap_or("/") == entry.path.as_deref().unwrap_or("/")
-            }) {
+            if let Some(idx) = merged.iter().position(|e| e.same_identity(&entry)) {
                 merged[idx] = entry;
             } else {
                 merged.push(entry);
@@ -298,6 +290,16 @@ fn path_matches(cookie_path: Option<&str>, request_path: &str) -> bool {
 }
 
 impl JarEntry {
+    /// RFC 6265 cookie identity: name + domain + path. Two entries with the
+    /// same identity are the same cookie, so a newer one replaces the older
+    /// rather than accumulating a duplicate. An absent domain/path compares
+    /// as `""`/`"/"` so jar entries and freshly-merged ones line up.
+    fn same_identity(&self, other: &JarEntry) -> bool {
+        self.name == other.name
+            && self.domain.as_deref().unwrap_or("") == other.domain.as_deref().unwrap_or("")
+            && self.path.as_deref().unwrap_or("/") == other.path.as_deref().unwrap_or("/")
+    }
+
     fn is_expired(&self, now: i64) -> bool {
         match self.expires_unix {
             Some(t) => t <= now,

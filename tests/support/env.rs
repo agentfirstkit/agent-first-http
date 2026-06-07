@@ -108,7 +108,7 @@ pub fn discover_camoufox() -> Option<PathBuf> {
     discover_simple_bin("AFHTTP_TEST_CAMOUFOX_BIN", "camoufox")
 }
 
-/// Resolve the KasmVNC Xvnc binary for display-takeover tests.
+/// Resolve the KasmVNC Xvnc binary for display takeover tests.
 pub fn discover_kasmvnc() -> Option<PathBuf> {
     discover_simple_bin("AFHTTP_TEST_KASMVNC_BIN", "Xvnc")
 }

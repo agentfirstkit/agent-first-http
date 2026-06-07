@@ -41,6 +41,8 @@ pub enum Command {
     Cdp(crate::cli::cmd::cdp::Args),
     /// Print or open the ops panel URL.
     Ui(crate::cli::cmd::ui::Args),
+    /// Prepare a browser tab for human takeover.
+    Takeover(crate::cli::cmd::takeover::Args),
     /// Query /health.
     Health(crate::cli::cmd::health::Args),
     /// Query /capabilities.
@@ -64,7 +66,7 @@ pub fn parse() -> Result<Parsed, Error> {
         use clap::error::ErrorKind;
         // `--version` and per-subcommand `--help` arrive here as clap "errors";
         // render them to stdout and exit success rather than turning them into
-        // an invalid_argument envelope. (Top-level `--help`/`--help-markdown`
+        // an invalid_argument envelope. (Top-level `--help --output ...`
         // are handled earlier in `cli::run`.)
         if matches!(
             e.kind(),
@@ -103,7 +105,7 @@ mod tests {
     #[test]
     fn cli_contract_has_no_legacy_aliases() {
         let command = Cli::command();
-        assert_eq!(command.get_subcommands().count(), 11);
+        assert_eq!(command.get_subcommands().count(), 12);
         let mut snapshot = String::new();
         write_command_snapshot(&command, 0, &mut snapshot);
         for forbidden in [
@@ -111,6 +113,7 @@ mod tests {
             "--profile-name",
             concat!("profile", "_name"),
             concat!("?", "profile="),
+            "arg timeout --timeout\n",
             "legacy",
         ] {
             assert!(

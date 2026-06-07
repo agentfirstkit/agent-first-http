@@ -36,7 +36,7 @@ echo "    afhttp fetch https://example.com \\"
 echo "      --endpoint-url ws://<host>:${AFHTTP_PORT} --token-secret \"\$(cat ${TOKEN_FILE})\""
 echo "========================================="
 
-# Extra flags (e.g. --browser camoufox, --takeover kasmvnc) pass through as "$@".
+# Extra flags (e.g. --browser camoufox, --takeover display --display-provider kasmvnc) pass through as "$@".
 exec afhttp host \
     --listen "tcp:0.0.0.0:${AFHTTP_PORT}" \
     --token-secret "$AFHTTP_TOKEN" \

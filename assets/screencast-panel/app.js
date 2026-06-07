@@ -1,8 +1,8 @@
 // afhttp ops panel — live JPEG screencast + timing-preserved input replay.
 //
 // Two WebSocket flows against the host:
-//   /ops/screencast (inbound)   — binary JPEG frames -> <canvas>
-//   /ops/input      (outbound)  — pointer/keyboard events with performance.now() ts
+//   /ops/screencast/ws    (inbound)   — binary JPEG frames -> <canvas>
+//   /ops/screencast/input (outbound)  — pointer/keyboard events with performance.now() ts
 //
 // The canvas backing store tracks the actual screencast frame size, but
 // pointer coordinates are mapped to the target's CSS pixels using the
@@ -27,8 +27,8 @@ const token = tokenMatch ? decodeURIComponent(tokenMatch[1]) : null;
 const tokenQS = token ? `?token=${encodeURIComponent(token)}` : "";
 
 const proto = window.location.protocol === "https:" ? "wss" : "ws";
-const screencastUrl = `${proto}://${window.location.host}/ops/screencast${tokenQS}`;
-const inputUrl = `${proto}://${window.location.host}/ops/input${tokenQS}`;
+const screencastUrl = `${proto}://${window.location.host}/ops/screencast/ws${tokenQS}`;
+const inputUrl = `${proto}://${window.location.host}/ops/screencast/input${tokenQS}`;
 
 // ---- screencast --------------------------------------------------------
 

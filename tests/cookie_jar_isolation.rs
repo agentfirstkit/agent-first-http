@@ -2,7 +2,8 @@
 //!
 //! These tests stand up a real host listener (with the new `/profile`
 //! endpoint), spawn a Client against it, and verify:
-//! - The default cookie-jar path is `<profile-dir>/cookies.jar.json`.
+//! - External hosts do not get an implicit local cookie jar, even when
+//!   `/profile` happens to report a path that exists on the client machine.
 //! - An explicit `--cookie-jar` that does NOT match the host's profile
 //!   is rejected with `invalid_argument` before any network I/O.
 //! - Two hosts with different profiles share no cookie state.
@@ -50,7 +51,7 @@ async fn spawn_test_host(profile_dir: std::path::PathBuf) -> String {
 }
 
 #[tokio::test]
-async fn default_cookie_jar_lives_inside_profile_dir() {
+async fn external_host_implicit_cookie_jar_is_disabled_even_when_profile_path_is_local() {
     let fixture = support::fixture_server::spawn().await;
     let profile_tmp = tempfile::tempdir().expect("profile tmp");
     let endpoint = spawn_test_host(profile_tmp.path().to_path_buf()).await;
@@ -58,24 +59,33 @@ async fn default_cookie_jar_lives_inside_profile_dir() {
 
     let client = Client::connect(&endpoint).expect("client");
 
-    // First fetch with no explicit jar — should default to <profile>/cookies.jar.json.
-    let _ = client
+    let r = client
         .fetch(format!("{}/set-cookie", fixture.base_url()))
         .render(RenderMode::None)
         .want([Artifact::Body])
         .out_dir(out_tmp.path().to_path_buf())
         .send()
         .await
-        .expect("first fetch");
+        .expect("fetch should continue without local implicit jar");
 
     let expected_jar = profile_tmp.path().join("cookies.jar.json");
     assert!(
-        expected_jar.exists(),
-        "default jar must land inside the profile dir at {}",
+        !expected_jar.exists(),
+        "external endpoint must not create an implicit client-side jar at {}",
         expected_jar.display()
     );
+    assert!(r.trace.cookie_jar_file.is_none());
+    assert!(
+        r.trace
+            .cookie_jar_warning
+            .as_deref()
+            .is_some_and(|w| w.contains("external host")),
+        "warning should explain disabled implicit jar: {:?}",
+        r.trace.cookie_jar_warning
+    );
 
-    // Second fetch through the same client must replay the cookies.
+    // A second fetch through the same external client should not replay
+    // cookies through a guessed local jar.
     let r = client
         .fetch(format!("{}/echo-cookie", fixture.base_url()))
         .render(RenderMode::None)
@@ -89,8 +99,45 @@ async fn default_cookie_jar_lives_inside_profile_dir() {
     let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
     let cookie_header = body["cookie"].as_str().unwrap_or("");
     assert!(
-        cookie_header.contains("afhttp_sid"),
-        "default jar should replay session cookies; got {cookie_header:?}",
+        !cookie_header.contains("afhttp_sid"),
+        "external implicit jar should not replay session cookies; got {cookie_header:?}",
+    );
+}
+
+#[tokio::test]
+async fn implicit_cookie_jar_is_disabled_when_profile_path_is_not_local() {
+    let fixture = support::fixture_server::spawn().await;
+    let remote_profile = tempfile::tempdir()
+        .expect("remote profile parent")
+        .path()
+        .join("container-only-profile");
+    let endpoint = spawn_test_host(remote_profile.clone()).await;
+    let out_tmp = tempfile::tempdir().expect("out tmp");
+
+    let client = Client::connect(&endpoint).expect("client");
+    let result = client
+        .fetch(format!("{}/set-cookie", fixture.base_url()))
+        .render(RenderMode::None)
+        .want([Artifact::Body])
+        .out_dir(out_tmp.path().to_path_buf())
+        .send()
+        .await
+        .expect("fetch should continue without local implicit jar");
+
+    assert!(
+        !remote_profile.exists(),
+        "client must not create host/container profile paths locally: {}",
+        remote_profile.display()
+    );
+    assert!(result.trace.cookie_jar_file.is_none());
+    assert!(
+        result
+            .trace
+            .cookie_jar_warning
+            .as_deref()
+            .is_some_and(|w| w.contains("implicit profile cookie jar disabled")),
+        "warning should explain disabled implicit jar: {:?}",
+        result.trace.cookie_jar_warning
     );
 }
 
@@ -189,13 +236,16 @@ async fn cookies_do_not_bleed_across_profiles() {
     let endpoint_b = spawn_test_host(profile_b.path().to_path_buf()).await;
     let out_tmp = tempfile::tempdir().expect("out tmp");
 
-    // Drop a session into profile A.
+    // Drop a session into profile A through an explicit jar. External hosts do
+    // not get implicit local jars, but explicit matching jars remain allowed.
     let client_a = Client::connect(&endpoint_a).expect("client A");
+    let jar_a = profile_a.path().join("cookies.jar.json");
     let _ = client_a
         .fetch(format!("{}/set-cookie", fixture.base_url()))
         .render(RenderMode::None)
         .want([Artifact::Body])
         .out_dir(out_tmp.path().to_path_buf())
+        .cookie_jar(jar_a.clone())
         .send()
         .await
         .expect("A set-cookie");
@@ -220,6 +270,6 @@ async fn cookies_do_not_bleed_across_profiles() {
     );
 
     // Sanity: profile A's jar still has the cookie; profile B has no jar.
-    assert!(profile_a.path().join("cookies.jar.json").exists());
+    assert!(jar_a.exists());
     assert!(!profile_b.path().join("cookies.jar.json").exists());
 }

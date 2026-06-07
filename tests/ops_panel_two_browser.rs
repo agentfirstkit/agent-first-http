@@ -1,6 +1,7 @@
 //! Deep two-browser E2E for the ops panel.
 //!
-//! `ops_panel_live.rs` opens `/ops/screencast` and `/ops/input` directly
+//! `ops_panel_live.rs` opens `/ops/screencast/ws` and
+//! `/ops/screencast/input` directly
 //! and shoves bytes in. That validates the host's WebSocket → CDP relay,
 //! but leaves the panel's own HTML+JS — the code that actually runs in
 //! the operator's browser — out of the loop.
@@ -201,7 +202,7 @@ fn base64_encode(bytes: &[u8]) -> String {
 async fn operator_browser_drives_target_via_real_panel() {
     support::ensure_rustls_provider();
 
-    // ---- 1. target browser + afhttp host serving /ops -------------------
+    // ---- 1. target browser + afhttp host serving /ops/screencast --------
     let Some(target_handle) = spawn_chromium().await else {
         println!("(skipping: no chromium for target)");
         return;
@@ -269,11 +270,11 @@ async fn operator_browser_drives_target_via_real_panel() {
 
     // Open the panel page directly via the operator's CDP — same URL a
     // human would paste from `afhttp ui`.
-    let panel_url = format!("http://{host_addr}/ops");
+    let screencast_url = format!("http://{host_addr}/ops/screencast");
     let v = cdp_send(
         &op_conn,
         "Target.createTarget",
-        json!({"url": panel_url}),
+        json!({"url": screencast_url}),
         None,
     )
     .await;

@@ -5,8 +5,10 @@ use crate::shared::error::{Error, ErrorCode};
 /// When to consider a page ready.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Wait {
-    /// CDP `Page.loadEventFired`. Default.
+    /// Mechanical readiness: load, network quiet, then DOM/text stable.
     #[default]
+    Auto,
+    /// CDP `Page.loadEventFired`. Default.
     Load,
     /// CDP `Network.idle` (no requests for ~500 ms).
     Idle,
@@ -27,7 +29,9 @@ pub enum Wait {
 
 impl Wait {
     pub fn parse(s: &str) -> Result<Self, Error> {
-        if s == "load" {
+        if s == "auto" {
+            Ok(Self::Auto)
+        } else if s == "load" {
             Ok(Self::Load)
         } else if s == "idle" {
             Ok(Self::Idle)
@@ -62,9 +66,21 @@ impl Wait {
                 ErrorCode::InvalidArgument,
                 format!(
                     "--wait: unknown mode {s:?}; expected \
-                     load|idle|selector:<css>|selector-visible:<css>|ms:<n>"
+                     auto|load|idle|selector:<css>|selector-visible:<css>|ms:<n>"
                 ),
             ))
+        }
+    }
+
+    #[must_use]
+    pub fn mode_name(&self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Load => "load",
+            Self::Idle => "idle",
+            Self::Selector(_) => "selector",
+            Self::SelectorVisible(_) => "selector_visible",
+            Self::Ms(_) => "ms",
         }
     }
 }
@@ -75,6 +91,7 @@ mod tests {
 
     #[test]
     fn parses_simple_modes() {
+        assert_eq!(Wait::parse("auto").unwrap(), Wait::Auto);
         assert_eq!(Wait::parse("load").unwrap(), Wait::Load);
         assert_eq!(Wait::parse("idle").unwrap(), Wait::Idle);
         assert_eq!(

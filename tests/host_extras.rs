@@ -141,8 +141,9 @@ async fn ops_panel_serves_static_html() {
         return;
     };
     let base = endpoint.replacen("ws://", "http://", 1);
-    let r = reqwest::Client::new()
-        .get(format!("{base}/ops"))
+    let client = reqwest::Client::new();
+    let r = client
+        .get(format!("{base}/ops/screencast"))
         .send()
         .await
         .expect("send");
@@ -155,6 +156,20 @@ async fn ops_panel_serves_static_html() {
     assert!(ct.contains("text/html"), "content-type was {ct:?}");
     let body = r.text().await.expect("text");
     assert!(body.contains("afhttp"), "body missing brand: {body}");
+
+    let old_entry = client
+        .get(format!("{base}/ops"))
+        .send()
+        .await
+        .expect("old entry send");
+    assert_eq!(old_entry.status(), reqwest::StatusCode::NOT_FOUND);
+
+    let old_input = client
+        .get(format!("{base}/ops/input"))
+        .send()
+        .await
+        .expect("old input send");
+    assert_eq!(old_input.status(), reqwest::StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -164,8 +179,9 @@ async fn ops_panel_assets_have_right_mime_types() {
         return;
     };
     let base = endpoint.replacen("ws://", "http://", 1);
-    let js = reqwest::Client::new()
-        .get(format!("{base}/ops/assets/app.js"))
+    let client = reqwest::Client::new();
+    let js = client
+        .get(format!("{base}/ops/screencast/assets/app.js"))
         .send()
         .await
         .expect("js");
@@ -177,8 +193,15 @@ async fn ops_panel_assets_have_right_mime_types() {
         .unwrap_or("");
     assert!(ct.contains("javascript"), "js content-type was {ct:?}");
 
-    let css = reqwest::Client::new()
-        .get(format!("{base}/ops/assets/app.css"))
+    let old_js = client
+        .get(format!("{base}/ops/assets/app.js"))
+        .send()
+        .await
+        .expect("old js");
+    assert_eq!(old_js.status(), reqwest::StatusCode::NOT_FOUND);
+
+    let css = client
+        .get(format!("{base}/ops/screencast/assets/app.css"))
         .send()
         .await
         .expect("css");

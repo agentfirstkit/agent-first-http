@@ -14,7 +14,7 @@
 //!
 //! Recommended invocation: `tests/manual-screencast-takeover.sh`. That wrapper
 //! runs this example inside the test container with port 9222 forwarded
-//! to the Mac host so `http://127.0.0.1:9222/ops` resolves both inside
+//! to the Mac host so `http://127.0.0.1:9222/ops/screencast` resolves both inside
 //! the container (for chromium) and on the Mac (for the operator's
 //! browser).
 
@@ -129,7 +129,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let handle = browser::launch(&args).await?;
     eprintln!("chromium up: {} ({})", handle.family, handle.version);
 
-    // 2. Stand up the listener (axum router with /ops, /cdp, /health, …).
+    // 2. Stand up the listener (axum router with /ops/screencast, /cdp, /health, ...).
     let state = test_state(None, HealthPublic::Off).with_default_browser(Arc::new(handle));
     let app = router_for_tests(state);
     let listener = TcpListener::bind(LISTEN).await?;
@@ -170,7 +170,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("================================================================");
     println!();
     println!("  1. Open this URL in your browser:");
-    println!("       http://127.0.0.1:9222/ops");
+    println!("       http://127.0.0.1:9222/ops/screencast");
     println!();
     if mode_real_url {
         println!("  2. The screencast shows whatever the headless chromium is");

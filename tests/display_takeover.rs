@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_first_http::host::bootstrap::{
-    BrowserChoice, DisplayMode, HealthPublic, HostArgs, ProfileChoice, Takeover,
+    BrowserChoice, DisplayMode, DisplayProvider, HealthPublic, HostArgs, ProfileChoice, Takeover,
 };
 use agent_first_http::host::browser::BrowserHandle;
 use agent_first_http::host::listener::{router_for_tests, test_state, AppState};
@@ -79,6 +79,30 @@ async fn spawn_display_router(token: Option<&str>, upstream_port: u16) -> String
     });
     tokio::time::sleep(Duration::from_millis(20)).await;
     format!("http://{addr}")
+}
+
+async fn spawn_screencast_only_router(token: Option<&str>) -> String {
+    support::ensure_rustls_provider();
+    let state = test_state(token, HealthPublic::Off);
+    let app = router_for_tests(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind host");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    format!("http://{addr}")
+}
+
+#[tokio::test]
+async fn display_route_is_provider_neutral_and_unavailable_without_provider() {
+    let base = spawn_screencast_only_router(None).await;
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/ops/display"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
 }
 
 #[tokio::test]
@@ -199,13 +223,24 @@ fn capabilities_advertise_display_takeover_by_backend_family() {
     );
 }
 
+#[test]
+fn capabilities_include_provider_neutral_display_fields() {
+    let state = test_state(None, HealthPublic::Off).with_display_takeover_for_tests(5900);
+    let caps = agent_first_http::host::listener::capabilities::build(&state);
+    assert!(caps.ops_panel.display);
+    assert_eq!(caps.ops_panel.display_url.as_deref(), Some("/ops/display"));
+    assert_eq!(caps.ops_panel.display_provider.as_deref(), Some("kasmvnc"));
+}
+
 #[tokio::test]
 async fn lightpanda_rejects_kasmvnc_takeover_before_launch() {
     let args = HostArgs {
         listen: "tcp:127.0.0.1:0".into(),
         profile: ProfileChoice::Ephemeral,
         display: DisplayMode::Headful,
-        takeover: Takeover::KasmVnc,
+        takeover: Takeover::Display {
+            provider: DisplayProvider::KasmVnc,
+        },
         display_quality: 100,
         browser: BrowserChoice::Lightpanda,
         browser_bin: None,
@@ -231,7 +266,7 @@ async fn kasmvnc_process_launches_when_binary_available() {
         return;
     };
     std::env::set_var("AFHTTP_KASMVNC_BIN", bin);
-    let handle = agent_first_http::host::display::launch_kasmvnc()
+    let handle = agent_first_http::host::display::launch_kasmvnc_provider()
         .await
         .expect("launch kasmvnc");
     assert!(handle.display.starts_with(':'));

@@ -15,7 +15,7 @@
 
 mod support;
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use agent_first_http::host::bootstrap::{
@@ -27,8 +27,10 @@ use agent_first_http::sdk::Client;
 use agent_first_http::shared::artifacts::Artifact;
 use agent_first_http::shared::ids::TabId;
 use tokio::net::TcpListener;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-async fn spawn_host_with_browser() -> Option<(String, tempfile::TempDir)> {
+async fn spawn_host_with_browser() -> Option<(String, tempfile::TempDir, OwnedSemaphorePermit)> {
+    let permit = browser_test_permit().await;
     support::ensure_rustls_provider();
     let bin = support::env::discover_browser()?;
     let args = HostArgs {
@@ -58,12 +60,22 @@ async fn spawn_host_with_browser() -> Option<(String, tempfile::TempDir)> {
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
     let tmp = tempfile::tempdir().expect("tmpdir");
-    Some((format!("ws://{addr}"), tmp))
+    Some((format!("ws://{addr}"), tmp, permit))
+}
+
+async fn browser_test_permit() -> OwnedSemaphorePermit {
+    static SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    SEMAPHORE
+        .get_or_init(|| Arc::new(Semaphore::new(1)))
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("browser test semaphore")
 }
 
 #[tokio::test]
 async fn render_always_returns_rendered_html_and_artifacts() {
-    let Some((endpoint, tmp)) = spawn_host_with_browser().await else {
+    let Some((endpoint, tmp, _browser_guard)) = spawn_host_with_browser().await else {
         println!("(skipping: no chromium)");
         return;
     };
@@ -101,14 +113,17 @@ async fn render_always_returns_rendered_html_and_artifacts() {
     let rendered = result
         .rendered_html_file
         .as_ref()
-        .expect("rendered_html_file");
+        .unwrap_or_else(|| panic!("rendered_html_file; warnings={:?}", result.warnings));
     let html = std::fs::read_to_string(rendered).expect("read rendered");
     assert!(
         html.contains("ready"),
         "rendered HTML missing 'ready': {html}"
     );
 
-    let text = result.text_file.as_ref().expect("text_file");
+    let text = result
+        .text_file
+        .as_ref()
+        .unwrap_or_else(|| panic!("text_file; warnings={:?}", result.warnings));
     let text_str = std::fs::read_to_string(text).expect("read text");
     assert!(text_str.contains("ready"), "innerText: {text_str}");
 
@@ -145,7 +160,7 @@ async fn render_always_returns_rendered_html_and_artifacts() {
 
 #[tokio::test]
 async fn render_always_applies_request_overrides_and_evaluate_hook() {
-    let Some((endpoint, tmp)) = spawn_host_with_browser().await else {
+    let Some((endpoint, tmp, _browser_guard)) = spawn_host_with_browser().await else {
         println!("(skipping: no chromium)");
         return;
     };
@@ -179,7 +194,7 @@ async fn render_always_applies_request_overrides_and_evaluate_hook() {
     let rendered = result
         .rendered_html_file
         .as_ref()
-        .expect("rendered_html_file");
+        .unwrap_or_else(|| panic!("rendered_html_file; warnings={:?}", result.warnings));
     let html = std::fs::read_to_string(rendered).expect("read rendered");
     assert!(
         html.contains("afhttp-browser-agent/1"),
@@ -223,7 +238,7 @@ async fn render_always_applies_request_overrides_and_evaluate_hook() {
 
 #[tokio::test]
 async fn render_always_reports_real_http_status() {
-    let Some((endpoint, tmp)) = spawn_host_with_browser().await else {
+    let Some((endpoint, tmp, _browser_guard)) = spawn_host_with_browser().await else {
         println!("(skipping: no chromium)");
         return;
     };
@@ -249,7 +264,7 @@ async fn render_always_reports_real_http_status() {
 
 #[tokio::test]
 async fn browser_trace_reports_when_main_request_is_not_observed() {
-    let Some((endpoint, tmp)) = spawn_host_with_browser().await else {
+    let Some((endpoint, tmp, _browser_guard)) = spawn_host_with_browser().await else {
         println!("(skipping: no chromium)");
         return;
     };
@@ -274,7 +289,7 @@ async fn browser_trace_reports_when_main_request_is_not_observed() {
 
 #[tokio::test]
 async fn wait_selector_visible_waits_for_layout_flip() {
-    let Some((endpoint, tmp)) = spawn_host_with_browser().await else {
+    let Some((endpoint, tmp, _browser_guard)) = spawn_host_with_browser().await else {
         println!("(skipping: no chromium)");
         return;
     };
@@ -314,7 +329,7 @@ async fn wait_selector_visible_waits_for_layout_flip() {
 
 #[tokio::test]
 async fn wait_selector_visible_times_out_when_node_stays_hidden() {
-    let Some((endpoint, tmp)) = spawn_host_with_browser().await else {
+    let Some((endpoint, tmp, _browser_guard)) = spawn_host_with_browser().await else {
         println!("(skipping: no chromium)");
         return;
     };
@@ -328,7 +343,7 @@ async fn wait_selector_visible_times_out_when_node_stays_hidden() {
         .fetch(format!("{}/plain.html", fixture.base_url()))
         .render(RenderMode::Always)
         .wait(Wait::SelectorVisible(".never-exists".into()))
-        .timeout(Duration::from_millis(400))
+        .timeout(Duration::from_secs(2))
         .out_dir(tmp.path().to_path_buf())
         .send()
         .await
@@ -350,7 +365,7 @@ async fn observe_main_wait_ms_is_honored() {
     // confirming the wait does not impose its full timeout when the
     // event arrives early. We pick about:blank so the wait is the only
     // variable that could expand the fetch.
-    let Some((endpoint, tmp)) = spawn_host_with_browser().await else {
+    let Some((endpoint, tmp, _browser_guard)) = spawn_host_with_browser().await else {
         println!("(skipping: no chromium)");
         return;
     };
@@ -378,7 +393,7 @@ async fn observe_main_wait_ms_is_honored() {
 
 #[tokio::test]
 async fn browser_body_file_is_raw_main_response_not_rendered_dom() {
-    let Some((endpoint, tmp)) = spawn_host_with_browser().await else {
+    let Some((endpoint, tmp, _browser_guard)) = spawn_host_with_browser().await else {
         println!("(skipping: no chromium)");
         return;
     };
@@ -416,7 +431,7 @@ async fn browser_body_file_is_raw_main_response_not_rendered_dom() {
 
 #[tokio::test]
 async fn fetch_tab_reuses_existing_target_and_does_not_close_it() {
-    let Some((endpoint, tmp)) = spawn_host_with_browser().await else {
+    let Some((endpoint, tmp, _browser_guard)) = spawn_host_with_browser().await else {
         println!("(skipping: no chromium)");
         return;
     };
@@ -461,7 +476,7 @@ async fn fetch_tab_reuses_existing_target_and_does_not_close_it() {
 
 #[tokio::test]
 async fn observation_contains_agent_action_fields() {
-    let Some((endpoint, tmp)) = spawn_host_with_browser().await else {
+    let Some((endpoint, tmp, _browser_guard)) = spawn_host_with_browser().await else {
         println!("(skipping: no chromium)");
         return;
     };
@@ -539,7 +554,7 @@ async fn observation_contains_agent_action_fields() {
 
 #[tokio::test]
 async fn observation_pierces_shadow_and_same_origin_iframes_only() {
-    let Some((endpoint, tmp)) = spawn_host_with_browser().await else {
+    let Some((endpoint, tmp, _browser_guard)) = spawn_host_with_browser().await else {
         println!("(skipping: no chromium)");
         return;
     };
@@ -709,7 +724,7 @@ async fn observation_pierces_shadow_and_same_origin_iframes_only() {
 
 #[tokio::test]
 async fn render_always_selector_wait_resolves() {
-    let Some((endpoint, tmp)) = spawn_host_with_browser().await else {
+    let Some((endpoint, tmp, _browser_guard)) = spawn_host_with_browser().await else {
         println!("(skipping: no chromium)");
         return;
     };
@@ -731,7 +746,7 @@ async fn render_always_selector_wait_resolves() {
 
 #[tokio::test]
 async fn render_always_with_wait_idle_completes_against_js_fixture() {
-    let Some((endpoint, tmp)) = spawn_host_with_browser().await else {
+    let Some((endpoint, tmp, _browser_guard)) = spawn_host_with_browser().await else {
         println!("(skipping: no chromium)");
         return;
     };
@@ -771,8 +786,190 @@ async fn render_always_with_wait_idle_completes_against_js_fixture() {
 }
 
 #[tokio::test]
+async fn wait_auto_captures_delayed_xhr_text_and_trace_signals() {
+    let Some((endpoint, tmp, _browser_guard)) = spawn_host_with_browser().await else {
+        println!("(skipping: no chromium)");
+        return;
+    };
+    let fixture = support::fixture_server::spawn().await;
+    let client = Client::connect(&endpoint).expect("client");
+    let result = client
+        .fetch(format!("{}/delayed-xhr.html", fixture.base_url()))
+        .render(RenderMode::Always)
+        .wait(Wait::Auto)
+        .timeout(Duration::from_secs(6))
+        .want([Artifact::Text, Artifact::Network])
+        .out_dir(tmp.path().to_path_buf())
+        .send()
+        .await
+        .expect("fetch");
+
+    let text = std::fs::read_to_string(
+        result
+            .text_file
+            .as_ref()
+            .unwrap_or_else(|| panic!("text_file; warnings={:?}", result.warnings)),
+    )
+    .expect("read text");
+    assert!(
+        text.contains("delayed ready"),
+        "--wait auto should wait for delayed XHR text; text={text}"
+    );
+    assert_eq!(result.trace.wait_mode.as_deref(), Some("auto"));
+    assert_eq!(
+        result.trace.wait_satisfied_by.as_deref(),
+        Some("network_quiet_dom_text_stable")
+    );
+    assert_eq!(result.trace.network_quiet, Some(true));
+    assert_eq!(result.trace.dom_stable, Some(true));
+    assert_eq!(result.trace.text_stable, Some(true));
+
+    let network: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(result.network_file.as_ref().expect("network_file"))
+            .expect("read network"),
+    )
+    .expect("network json");
+    let entries = network["entries"].as_array().expect("entries");
+    let delayed = entries
+        .iter()
+        .find(|entry| {
+            entry["url"]
+                .as_str()
+                .is_some_and(|url| url.ends_with("/delayed-data.json"))
+        })
+        .expect("delayed xhr entry");
+    assert_eq!(delayed["state"].as_str(), Some("finished"));
+    assert!(
+        delayed["body_file"].as_str().is_some(),
+        "--wait auto should default to xhr network body capture"
+    );
+}
+
+#[tokio::test]
+async fn wait_load_can_capture_before_delayed_xhr_settles() {
+    let Some((endpoint, tmp, _browser_guard)) = spawn_host_with_browser().await else {
+        println!("(skipping: no chromium)");
+        return;
+    };
+    let fixture = support::fixture_server::spawn().await;
+    let client = Client::connect(&endpoint).expect("client");
+    let result = client
+        .fetch(format!("{}/delayed-xhr.html", fixture.base_url()))
+        .render(RenderMode::Always)
+        .wait(Wait::Load)
+        .timeout(Duration::from_secs(6))
+        .want([Artifact::Text])
+        .out_dir(tmp.path().to_path_buf())
+        .send()
+        .await
+        .expect("fetch");
+
+    let text =
+        std::fs::read_to_string(result.text_file.as_ref().expect("text_file")).expect("read text");
+    assert!(
+        text.contains("loading"),
+        "explicit --wait load should preserve old early-capture semantics; text={text}"
+    );
+    assert_eq!(result.trace.wait_mode.as_deref(), Some("load"));
+}
+
+#[tokio::test]
+async fn wait_auto_reports_pending_xhr_without_hanging() {
+    let Some((endpoint, tmp, _browser_guard)) = spawn_host_with_browser().await else {
+        println!("(skipping: no chromium)");
+        return;
+    };
+    let fixture = support::fixture_server::spawn().await;
+    let client = Client::connect(&endpoint).expect("client");
+    let start = std::time::Instant::now();
+    let result = client
+        .fetch(format!("{}/never-xhr.html", fixture.base_url()))
+        .render(RenderMode::Always)
+        .wait(Wait::Auto)
+        .timeout(Duration::from_secs(3))
+        .want([Artifact::Text, Artifact::Network])
+        .out_dir(tmp.path().to_path_buf())
+        .send()
+        .await
+        .expect("fetch should return a partial structured result");
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "--wait auto should not hang on never-ending XHR"
+    );
+    assert_eq!(result.trace.wait_mode.as_deref(), Some("auto"));
+    assert_eq!(result.trace.network_quiet, Some(false));
+    assert!(result
+        .warnings
+        .iter()
+        .any(|w| { w.code == agent_first_http::shared::error::ErrorCode::ReadinessTimeout }));
+    assert!(result
+        .warnings
+        .iter()
+        .any(|w| { w.code == agent_first_http::shared::error::ErrorCode::NetworkNotIdle }));
+    assert!(result
+        .warnings
+        .iter()
+        .any(|w| { w.code == agent_first_http::shared::error::ErrorCode::PendingXhrAtCapture }));
+
+    let network: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(result.network_file.as_ref().expect("network_file"))
+            .expect("read network"),
+    )
+    .expect("network json");
+    assert!(
+        network["summary"]["inflight_total_at_capture"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0,
+        "network summary should expose in-flight requests: {network}"
+    );
+    let pending = network["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .find(|entry| {
+            entry["url"]
+                .as_str()
+                .is_some_and(|url| url.ends_with("/never.json"))
+        })
+        .expect("pending xhr entry");
+    assert!(matches!(
+        pending["state"].as_str(),
+        Some("pending" | "responded")
+    ));
+}
+
+#[tokio::test]
+async fn empty_artifacts_emit_quality_warnings() {
+    let Some((endpoint, tmp, _browser_guard)) = spawn_host_with_browser().await else {
+        println!("(skipping: no chromium)");
+        return;
+    };
+    let fixture = support::fixture_server::spawn().await;
+    let client = Client::connect(&endpoint).expect("client");
+    let result = client
+        .fetch(format!("{}/empty.html", fixture.base_url()))
+        .render(RenderMode::Always)
+        .wait(Wait::Auto)
+        .timeout(Duration::from_secs(5))
+        .want([Artifact::Text, Artifact::Observation])
+        .out_dir(tmp.path().to_path_buf())
+        .send()
+        .await
+        .expect("fetch");
+    assert!(result.warnings.iter().any(|w| {
+        w.artifact == Artifact::Text
+            && w.code == agent_first_http::shared::error::ErrorCode::ArtifactEmpty
+    }));
+    assert!(result.warnings.iter().any(|w| {
+        w.artifact == Artifact::Observation
+            && w.code == agent_first_http::shared::error::ErrorCode::ObservationEmpty
+    }));
+}
+
+#[tokio::test]
 async fn render_always_unmatched_selector_returns_wait_selector_unmatched() {
-    let Some((endpoint, tmp)) = spawn_host_with_browser().await else {
+    let Some((endpoint, tmp, _browser_guard)) = spawn_host_with_browser().await else {
         println!("(skipping: no chromium)");
         return;
     };
@@ -786,7 +983,7 @@ async fn render_always_unmatched_selector_returns_wait_selector_unmatched() {
         .fetch(url)
         .render(RenderMode::Always)
         .wait(Wait::Selector("#this-never-exists".into()))
-        .timeout(Duration::from_millis(300))
+        .timeout(Duration::from_secs(2))
         .out_dir(tmp.path().to_path_buf())
         .send()
         .await
@@ -804,7 +1001,7 @@ async fn render_always_unmatched_selector_returns_wait_selector_unmatched() {
 
 #[tokio::test]
 async fn render_auto_escalates_empty_html_shell_to_browser() {
-    let Some((endpoint, tmp)) = spawn_host_with_browser().await else {
+    let Some((endpoint, tmp, _browser_guard)) = spawn_host_with_browser().await else {
         println!("(skipping: no chromium)");
         return;
     };
@@ -860,7 +1057,7 @@ async fn render_auto_escalates_empty_html_shell_to_browser() {
 
 #[tokio::test]
 async fn browser_navigation_download_is_captured_in_profile() {
-    let Some((endpoint, tmp)) = spawn_host_with_browser().await else {
+    let Some((endpoint, tmp, _browser_guard)) = spawn_host_with_browser().await else {
         println!("(skipping: no chromium)");
         return;
     };

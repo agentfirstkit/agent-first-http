@@ -4,6 +4,7 @@ command afhttp
     arg profile --profile
     arg display --display
     arg takeover --takeover
+    arg display_provider --display-provider
     arg display_quality --display-quality-percent
     arg browser --browser
     arg browser_bin --browser-bin
@@ -34,6 +35,9 @@ command afhttp
     arg form --form
     arg network_bodies --network-bodies
     arg network_body_max_bytes --network-body-max-bytes
+    arg readiness_idle_ms --readiness-idle-ms
+    arg readiness_stable_ms --readiness-stable-ms
+    arg readiness_min_text_bytes --readiness-min-text-bytes
     arg network_redact --network-redact
     arg out --out
     arg cookie_jar --cookie-jar
@@ -45,7 +49,7 @@ command afhttp
     arg proxy --proxy-url
     arg ca_cert --ca-cert
     arg tls_insecure --tls-insecure
-    arg timeout --timeout
+    arg timeout_ms --timeout-ms
     arg capture_ws --capture-ws
     arg capture_sse --capture-sse
   command upload
@@ -64,6 +68,12 @@ command afhttp
   command ui
     arg endpoint --endpoint-url
     arg token --token-secret
+  command takeover
+    command prepare
+      arg url
+      arg endpoint --endpoint-url
+      arg token --token-secret
+      arg hard_site --hard-site
   command health
     arg endpoint --endpoint-url
     arg token --token-secret

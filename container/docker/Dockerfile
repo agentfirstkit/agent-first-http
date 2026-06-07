@@ -124,7 +124,7 @@ RUN chmod +x /entrypoint.sh
 # Non-root: AFHTTP_NO_SANDBOX makes chromium run with its sandbox off (the
 # container is the boundary), so it does not need root. Profiles live under
 # $XDG_DATA_HOME (a volume). KasmVNC env is harmless when Xvnc isn't built in —
-# the host only reads it for `--takeover kasmvnc`.
+# the host only reads it for `--takeover display --display-provider kasmvnc`.
 RUN useradd --create-home --uid 10001 afhttp \
     && mkdir -p /data \
     && chown -R afhttp:afhttp /data

@@ -48,6 +48,7 @@ async fn read_proc_environ(
     Ok(env)
 }
 
+#[cfg(target_os = "linux")]
 const ALLOWED_ENV: &[&str] = &[
     "PATH",
     "HOME",

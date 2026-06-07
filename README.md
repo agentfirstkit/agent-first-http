@@ -43,7 +43,7 @@ afhttp is not "headless Chromium." How hard a site fights back decides which eng
 
 ## Human takeover: a person drives the same browser when a step needs it
 
-For a manual login, captcha, or 2FA, a person drives the *same* browser the agent is using — through an ops panel that needs no VNC/X server by default, or an optional KasmVNC display for hard sites — then hands it back with session state intact.
+For a manual login, captcha, or 2FA, a person drives the *same* browser the agent is using — through an ops panel that needs no VNC/X server by default, or optional real-display takeover for hard sites currently backed by KasmVNC — then hands it back with session state intact.
 
 ## Running it: inline for a one-shot, a host for sessions
 

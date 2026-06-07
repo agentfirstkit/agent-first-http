@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Manual KasmVNC display-takeover smoke test (human in the loop).
+# Manual real-display takeover smoke test (KasmVNC provider, human in the loop).
 #
 # Runs `examples/manual_display_takeover.rs` inside the test container
 # with port 9222 forwarded to the host. The example takes the REAL

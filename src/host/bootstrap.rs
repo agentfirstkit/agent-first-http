@@ -16,9 +16,9 @@ pub struct HostArgs {
     pub profile: ProfileChoice,
     pub display: DisplayMode,
     pub takeover: Takeover,
-    /// Display-takeover image quality as a percentage (0-100), mapped to
-    /// KasmVNC's 0-9 quality tiers. Higher is crisper but uses more bandwidth.
-    /// Only meaningful when `takeover` is `KasmVnc`.
+    /// Display-provider image quality as a percentage (0-100). Higher is
+    /// crisper but uses more bandwidth. Current KasmVNC provider maps this to
+    /// its 0-9 quality tiers.
     pub display_quality: u8,
     pub browser: BrowserChoice,
     pub browser_bin: Option<PathBuf>,
@@ -65,7 +65,32 @@ pub enum DisplayMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Takeover {
     Off,
+    Screencast,
+    Display { provider: DisplayProvider },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayProvider {
     KasmVnc,
+}
+
+impl DisplayProvider {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::KasmVnc => "kasmvnc",
+        }
+    }
+}
+
+impl std::str::FromStr for DisplayProvider {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "kasmvnc" => Self::KasmVnc,
+            other => return Err(format!("unknown {other:?}; expected kasmvnc")),
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

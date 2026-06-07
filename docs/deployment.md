@@ -67,8 +67,11 @@ path — not compose — is how you run a host.
 **From a source checkout** (development, or to run an unreleased version that has
 no published release asset), pass `--from-source`: instead of downloading the
 prebuilt binary, it builds the full `container/docker/Dockerfile` from the current
-directory (or `--context <dir>`). This works under any runtime — the Dockerfile is
-runtime-agnostic — giving a 2×2 of {prebuilt, from-source} × {docker/podman, apple}:
+directory, or from `--context <dir>`. If you run the command from an agent scratch
+directory, afhttp also falls back to the source checkout that built the current
+binary when that checkout is still available. This works under any runtime — the
+Dockerfile is runtime-agnostic — giving a 2×2 of {prebuilt, from-source} ×
+{docker/podman, apple}:
 
 ```bash
 afhttp container install                              # prebuilt, auto runtime
@@ -137,7 +140,7 @@ build time and arch-guarded (several upstreams ship x86_64-only Linux builds):
 | `WITH_LIGHTPANDA=1` | `lightpanda` | x86_64 + arm64 |
 | `WITH_FINGERPRINT_CHROMIUM=1` | `fingerprint_chromium` | x86_64 |
 | `WITH_CAMOUFOX=1` | `camoufox` (+ foxbridge) | x86_64 + arm64 |
-| `WITH_KASMVNC=1` | real-display takeover (`--takeover kasmvnc`) | x86_64 + arm64 |
+| `WITH_KASMVNC=1` | KasmVNC display provider for `--takeover display` | x86_64 + arm64 |
 
 ```bash
 docker build -t afhttp-host:stealth \
@@ -166,7 +169,7 @@ docker run --rm -p 9222:9222 --shm-size=1g \
 The default ops panel (CDP screencast) needs no X or VNC and works in the slim
 image — `afhttp ui --endpoint-url … --token-secret …` prints its URL. Real-display takeover
 for hard captcha/IME sites needs `--build-arg WITH_KASMVNC=1`, then start the host
-with `--takeover kasmvnc --display headful`. See
+with `--takeover display --display-provider kasmvnc --display headful`. See
 [architecture.md §9](architecture.md).
 
 ## Lifecycle

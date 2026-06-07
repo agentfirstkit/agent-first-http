@@ -30,7 +30,7 @@ The hard part for an agent is not fetching bytes. It is that many useful URLs do
 - **Browser-backed fetch** when it does not, producing rendered HTML, an agent-readable observation snapshot, screenshot, and network/console logs as artifacts.
 - **Deep network capture** when the visible page is only chrome and the useful data arrives through XHR/fetch/GraphQL calls.
 - **Raw CDP escape hatch** when the agent needs to drive the browser directly (DOM inspection, form submission, custom waits) without going through any "click/type" abstraction layer.
-- **Ops panel** when a human needs to step in (manual login, captcha, 2FA) on the same browser the agent is using — the default panel needs no remote-desktop stack, and optional KasmVNC display takeover is available for hard sites.
+- **Ops panel** when a human needs to step in (manual login, captcha, 2FA) on the same browser the agent is using — the default panel needs no remote-desktop stack, and optional real-display takeover is available for hard sites, currently backed by KasmVNC.
 - **Host health/capabilities and local profile tools** so agents can discover backend support and operators can list, inspect, retrieve captured downloads, prune, or delete persistent profiles.
 
 The agent never has to parse human-readable error messages. Every output is structured JSON. Every failure carries a stable `error_code`. See [architecture.md](architecture.md) for the full contract.
@@ -64,7 +64,18 @@ afhttp fetch https://example.com
   "body_file": "/work/afhttp-out/<id>/body.html",
   "rendered_html_file": "/work/afhttp-out/<id>/rendered.html",
   "network_file": "/work/afhttp-out/<id>/network.json",
-  "trace": {"render_decision": "browser", "render_used": true, "duration_ms": 820}
+  "trace": {
+    "render_decision": "browser",
+    "render_mode": "auto",
+    "render_used": true,
+    "current_stage": "complete",
+    "duration_ms": 820,
+    "timeout_ms": 30000,
+    "stages": [
+      {"name": "navigate", "status": "ok", "duration_ms": 340},
+      {"name": "capture_body", "status": "ok", "duration_ms": 12}
+    ]
+  }
 }
 ```
 
@@ -83,7 +94,7 @@ afhttp host --listen tcp:0.0.0.0:9222 --profile work --display headless \
 
 # From the agent's machine:
 afhttp fetch --endpoint-url ws://host.mesh.internal:9222 --token-secret "$AFHTTP_TOKEN" \
-             --render auto --wait load \
+             --render auto --wait auto \
              --want rendered_html,observation,screenshot,network,console \
              --network-bodies xhr \
              https://target.example.com/dashboard
@@ -125,11 +136,11 @@ When the agent hits a login wall or captcha:
 
 ```bash
 afhttp ui --endpoint-url ws://host.mesh.internal:9222
-# {"code":"ui","panel_url":"http://host.mesh.internal:9222/ops","display_url":"http://host.mesh.internal:9222/ops/display"}
+# {"code":"ui","screencast_url":"http://host.mesh.internal:9222/ops/screencast","display_url":"http://host.mesh.internal:9222/ops/display","recommended_url":"http://host.mesh.internal:9222/ops/screencast","recommended_url_kind":"screencast_url","display_provider":null}
 # open that URL in your local browser
 ```
 
-The default ops panel shows the remote browser's live screen via CDP screencast and replays local pointer/keyboard events over CDP. For captchas, IME/CJK input, camoufox, or sites where CDP-synthesized input is flaky, start the host with `--takeover kasmvnc --display headful` and open the `display_url`; this proxies an in-container KasmVNC web client so the human drives the same browser through a real X display. The agent can stay attached the whole time. See [architecture.md §9](architecture.md) for the risk-control honest assessment.
+The default ops panel shows the remote browser's live screen via CDP screencast and replays local pointer/keyboard events over CDP. For captchas, IME/CJK input, camoufox, or sites where CDP-synthesized input is flaky, start the host with `--takeover display --display-provider kasmvnc --display headful` and open the `display_url`; this proxies the display provider's web client so the human drives the same browser through a real X display. The agent can stay attached the whole time. See [architecture.md §9](architecture.md) for the risk-control honest assessment.
 
 ### Manage persistent profiles
 
@@ -157,7 +168,7 @@ let client = Client::connect("ws://host.mesh.internal:9222")?;
 
 let result = client.fetch("https://target.example.com")
     .render(RenderMode::Auto)
-    .wait(Wait::Load)
+    .wait(Wait::Auto)
     .timeout(Duration::from_secs(30))
     .want([Artifact::RenderedHtml, Artifact::Observation, Artifact::Screenshot])
     .send()
@@ -179,11 +190,11 @@ The protocol layer is CDP-generic. `afhttp host` knows how to launch:
 
 | Backend | Notes |
 | --- | --- |
-| Chromium / Chrome / Edge / Brave | Full support: all artifacts, observation, network body capture, ops panel, optional KasmVNC display takeover, multi-attach. |
+| Chromium / Chrome / Edge / Brave | Full support: all artifacts, observation, network body capture, ops panel, optional real-display takeover currently backed by KasmVNC, multi-attach. |
 | chrome-headless-shell | Same as Chromium — Google's slimmer headless distribution, identical CDP surface. Useful when the full browser is unavailable. |
-| fingerprint-chromium | Same capability matrix as Chromium, including optional display takeover, with engine-level fingerprint spoofing (UA, WebGL, canvas, CDP-detection evasion). The host derives a stable seed from the profile path so identity stays per-profile. |
+| fingerprint-chromium | Same capability matrix as Chromium, including optional real-display takeover, with engine-level fingerprint spoofing (UA, WebGL, canvas, CDP-detection evasion). The host derives a stable seed from the profile path so identity stays per-profile. |
 | Lightpanda | HTML / text / network metadata / console / limited observation only — no screenshot, no screencast, no display takeover (no rendering). |
-| Camoufox (via foxbridge) | Firefox stealth fork driven through the [foxbridge](https://foxbridge.vulpineos.com/) CDP→Juggler proxy. Same CDP subset as Lightpanda — no chromium screenshot/screencast — but optional display takeover works because the human drives the real X display. |
+| Camoufox (via foxbridge) | Firefox stealth fork driven through the [foxbridge](https://foxbridge.vulpineos.com/) CDP→Juggler proxy. Same CDP subset as Lightpanda — no chromium screenshot/screencast — but optional real-display takeover works because the human drives the real X display. |
 | Any other CDP-compatible browser | Launch it yourself; drivers connect via `--endpoint-url`. |
 
 Unsupported per-artifact operations return per-artifact warnings (`backend_unsupported`), not whole-fetch failures.

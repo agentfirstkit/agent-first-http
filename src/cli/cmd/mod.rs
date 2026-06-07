@@ -10,6 +10,7 @@ pub mod host;
 pub mod profile;
 pub mod skill;
 pub mod tabs;
+pub mod takeover;
 pub mod ui;
 pub mod upload;
 
@@ -57,7 +58,7 @@ mod tests {
                             "network": {"supported": true, "body_capture": ["xhr"]},
                             "screenshot": {"supported": false}
                         },
-                        "wait_modes": ["load"],
+                        "wait_modes": ["auto", "load"],
                         "display_takeover": false,
                         "ops_panel": {"supported": false, "screencast": false},
                         "profile": {"persistent": true, "ephemeral": true},

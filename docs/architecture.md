@@ -72,7 +72,7 @@ The CLI has 9 commands and no stdin protocol. The command set is: `host`, `fetch
 | `afhttp fetch` | agent-driver | Acquire a URL through HTTP-only or browser-backed fetch and write requested artifacts. |
 | `afhttp upload` | agent-driver | Attach a local file to an existing `<input type=file>` through `DOM.setFileInputFiles`. |
 | `afhttp cdp` | agent-driver | Send one raw CDP method to a target tab. |
-| `afhttp ui` | agent-driver/human | Print the ops-panel and display-takeover URLs for a host. |
+| `afhttp ui` | agent-driver/human | Print the ops-panel and display takeover URLs for a host. |
 | `afhttp health` | agent-driver | Query `/health` readiness. |
 | `afhttp capabilities` | agent-driver | Query `/capabilities` planning metadata. |
 | `afhttp profile` | local admin | List, inspect, lock-check, list captured downloads, delete, prune, or inspect redacted cookies for local profiles. |
@@ -81,7 +81,7 @@ The CLI has 9 commands and no stdin protocol. The command set is: `host`, `fetch
 ### Common conventions
 
 These hold across every command (the per-flag reference is generated into
-[cli.md](cli.md) from `afhttp --help-markdown`):
+[cli.md](cli.md) from `afhttp --help --recursive --output markdown`):
 
 - Flags are long-form only; flag names map to JSON fields with hyphens for
   underscores (`--browser-bin` ↔ `browser_bin`). Booleans that default to false
@@ -102,7 +102,8 @@ afhttp host
   --listen <tcp:HOST:PORT|unix:/path>
   --profile <name|->
   --display headless|headful
-  --takeover none|screencast|kasmvnc
+  --takeover none|screencast|display
+  --display-provider kasmvnc
   --display-quality-percent <0-100>
   --browser auto|chromium|chrome|chrome_shell|fingerprint_chromium|edge|brave|lightpanda|camoufox
   --browser-bin <path>
@@ -115,7 +116,7 @@ afhttp host
   --recent-requests-cap <N>
 ```
 
-Lifecycle: when `--takeover kasmvnc` is set, starts KasmVNC `Xvnc` first, waits for the X display and localhost web client, launches the browser headful on that display, then opens the listener and serves CDP plus host HTTP routes (`/ops`, `/ops/display`, `/health`, `/capabilities`). Without takeover, starts the browser directly. On exit, terminates browser/display subprocesses, removes the profile dir if ephemeral, releases the listener.
+Lifecycle: when `--takeover display --display-provider kasmvnc` is set, starts the KasmVNC display provider first, waits for the X display and localhost web client, launches the browser headful on that display, then opens the listener and serves CDP plus host HTTP routes (`/ops/screencast`, `/ops/display`, `/health`, `/capabilities`). Without display takeover, starts the browser directly. On exit, terminates browser/display subprocesses, removes the profile dir if ephemeral, releases the listener.
 
 ### `afhttp fetch`
 
@@ -127,7 +128,7 @@ afhttp fetch <url>
   --token-secret <string>
   --render none|auto|always
   --tab new|<id>
-  --wait load|idle|selector:<css>|selector-visible:<css>|ms:<n>
+  --wait auto|load|idle|selector:<css>|selector-visible:<css>|ms:<n>
   --method GET|POST|PUT|PATCH|DELETE|...
   --data <string|@file>
   --data-file <path>
@@ -139,6 +140,9 @@ afhttp fetch <url>
   --want body,rendered_html,text,screenshot,network,console,observation,storage
   --network-bodies off|xhr|all
   --network-body-max-bytes <n>
+  --readiness-idle-ms <n>
+  --readiness-stable-ms <n>
+  --readiness-min-text-bytes <n>
   --network-redact on|off
   --capture-ws
   --capture-sse
@@ -150,10 +154,10 @@ afhttp fetch <url>
   --proxy-url <url>
   --ca-cert <path>
   --tls-insecure
-  --timeout <duration>
+  --timeout-ms <ms>
 ```
 
-Output: one JSON object on stdout. Includes `status`, `final_url`, `tab_id`, top-level `*_file` artifact paths, `trace` (render decision, escalation reason, phase timings, cookie-jar path/warnings, sensitive-capture flags), and `warnings` (for non-fatal artifact failures). `--network-redact off`, `--capture-ws`, and `--capture-sse` can expose tokens or PII in artifacts and are reflected in `trace.sensitive_capture`.
+Output: one JSON object on stdout. Successful fetches include `status`, `final_url`, `tab_id`, top-level `*_file` artifact paths, `trace` (render decision, escalation reason, wait/readiness signals, phase timings, cookie-jar path/warnings, sensitive-capture flags), and `warnings` (for non-fatal artifact failures). Fetch execution failures use the standard error envelope plus the same `trace` shape. `--network-redact off`, `--capture-ws`, and `--capture-sse` can expose tokens or PII in artifacts and are reflected in `trace.sensitive_capture`.
 
 Custom request options are applied before acquisition, not silently ignored. On the HTTP fast path, headers, user-agent, and applicable cookies are attached to the per-request `reqwest` request. Secure cookies are skipped for `http://` URLs rather than failing the fetch, and host-only cookies match only the exact origin host. On the browser path, ordinary headers use `Network.setExtraHTTPHeaders`, user-agent uses `Network.setUserAgentOverride`, and cookies are installed through CDP before `Page.navigate`.
 
@@ -161,7 +165,7 @@ Custom request options are applied before acquisition, not silently ignored. On 
 
 ### Other endpoint commands
 
-`afhttp cdp`, `afhttp upload`, and `afhttp tabs` are raw CDP/target-management helpers. They require `--endpoint-url` and do not introduce Playwright-style semantic action wrappers. `afhttp ui`, `afhttp health`, and `afhttp capabilities` are thin HTTP helpers over `/ops`, `/health`, and `/capabilities`; tokens in generated URLs are percent-encoded.
+`afhttp cdp`, `afhttp upload`, and `afhttp tabs` are raw CDP/target-management helpers. They require `--endpoint-url` and do not introduce Playwright-style semantic action wrappers. `afhttp ui`, `afhttp health`, and `afhttp capabilities` are thin HTTP helpers over `/ops/screencast` + `/ops/display`, `/health`, and `/capabilities`; tokens in generated URLs are percent-encoded.
 
 ### Local commands
 
@@ -208,11 +212,18 @@ When `--token-secret` is configured, authenticated requests use `Authorization: 
     "console": {"supported": true},
     "observation": {"supported": true, "source": "accessibility+dom"}
   },
-  "wait_modes": ["load", "idle", "selector", "ms"],
+  "wait_modes": ["auto", "load", "idle", "selector", "ms"],
   "display_takeover": true,
-  "ops_panel": {"supported": true, "screencast": true},
+  "ops_panel": {
+    "supported": true,
+    "screencast": true,
+    "display": true,
+    "screencast_url": "/ops/screencast",
+    "display_url": "/ops/display",
+    "display_provider": "kasmvnc"
+  },
   "profile": {"persistent": true, "ephemeral": true},
-  "limits": {"network_body_max_bytes_default": 1048576}
+  "limits": {"network_body_max_bytes_default": 10485760}
 }
 ```
 
@@ -331,7 +342,7 @@ Observation node collection walks the main document, open shadow roots, and same
 
 Each entry includes, when available:
 
-- stable `request_id`, `frame_id`, `loader_id`, parent/redirect linkage, resource type, initiator stack, URL, method, priority, timing, cache/service-worker flags, and failure text
+- stable `request_id`, `state` (`pending`, `responded`, `finished`, or `failed`), `frame_id`, `loader_id`, parent/redirect linkage, resource type, initiator stack, URL, method, priority, timing, cache/service-worker flags, and failure text
 - request headers and response headers with sensitive fields redacted by default (`cookie`, `authorization`, `proxy-authorization`, `set-cookie`, and `*-token`/`*-secret`-like headers)
 - request post data metadata (`present`, `size_bytes`, optional `post_data_file` when captured)
 - response status, mime type, protocol, remote address, encoded/decoded sizes, and body capture reference when enabled
@@ -345,11 +356,16 @@ Response body capture is opt-in because network logs often contain credentials, 
 | `--network-bodies xhr` | Saves text/JSON/XHR/fetch response bodies up to `--network-body-max-bytes` each. |
 | `--network-bodies all` | Attempts to save every response body up to `--network-body-max-bytes` each, including documents/scripts/images when CDP exposes them. |
 
-Captured bodies are written under `network-bodies/<request_id>.<ext>` and referenced from `network.json` via `body_file`. Binary bodies may be base64 files if the original bytes cannot be represented as UTF-8. Per-entry body capture failures become `warnings` with `artifact: "network"` and do not fail the fetch.
+Captured bodies are written under `network-bodies/<request_id>.<ext>` and referenced from `network.json` via `body_file`. With `--wait auto`, browser fetches capture XHR/fetch/EventSource bodies by default. Binary bodies may be base64 files if the original bytes cannot be represented as UTF-8. Per-entry body capture failures become `warnings` with `artifact: "network"` and do not fail the fetch.
+
+`network.summary` also reports readiness diagnostics: `responses_total`,
+`finished_total`, `incomplete_total`, `inflight_total_at_capture`, and
+`pending_by_resource_type`. These are mechanical counts; they do not classify
+which payload is important.
 
 ## 9. Ops Panel
 
-The default ops panel is a small static HTML+JS application embedded in the `afhttp` binary and served by `afhttp host` at `/ops`. It exists to let a human drive the browser without VNC, X server, or any system-level remote-desktop stack on the host machine. For hard sites, `--takeover kasmvnc` enables a separate real-display path at `/ops/display`: afhttp spawns an external KasmVNC `Xvnc` process inside the container, runs the browser headful on that X display, and reverse-proxies the KasmVNC web client through the authenticated listener.
+The default ops panel is a small static HTML+JS application embedded in the `afhttp` binary and served by `afhttp host` at `/ops/screencast`. It exists to let a human drive the browser without VNC, X server, or any system-level remote-desktop stack on the host machine. For hard sites, `--takeover display --display-provider kasmvnc` enables the real-display path at `/ops/display`: afhttp starts the KasmVNC display provider inside the container, runs the browser headful on that X display, and reverse-proxies the provider's web client through the authenticated listener.
 
 **Architecture.** The panel page loaded in the operator's local browser opens two WebSocket flows against the host:
 
@@ -362,7 +378,7 @@ The default ops panel is a small static HTML+JS application embedded in the `afh
 - *Partial*: network jitter adds a small additional skew on top of human timing (statistically detectable but indistinguishable from a human on a poor connection); `getCoalescedEvents()` may not return identical micro-event sequences.
 - *Not solved*: headless browser fingerprint (`navigator.webdriver`, GPU strings, Canvas/Audio entropy, font fingerprints). These are orthogonal to input fidelity and are mitigated by `--display=headful` plus standard stealth patches, not by the ops panel.
 
-For sites where the residual CDP ops-panel fingerprint is still detected, use `afhttp host --takeover kasmvnc --display headful` inside the container. This improves display/input fidelity and covers camoufox, IME/CJK input, and flaky key sites, but it does not bypass captcha reputation systems by itself: pair it with the right proxy, stealth backend, and a warmed persistent profile. KasmVNC stays an external GPLv2 process located on `PATH`; afhttp does not link or bundle it.
+For sites where the residual CDP ops-panel fingerprint is still detected, use `afhttp host --takeover display --display-provider kasmvnc --display headful` inside the container. This improves display/input fidelity and covers camoufox, IME/CJK input, and flaky key sites, but it does not bypass captcha reputation systems by itself: pair it with the right proxy, stealth backend, and a warmed persistent profile. KasmVNC stays an external GPLv2 process located on `PATH`; afhttp does not link or bundle it.
 
 **Multi-attach.** The default ops panel is a CDP client; display takeover is a VNC/X client; the agent (via `afhttp fetch` or `afhttp cdp`) remains a CDP client. CDP supports multiple flattened sessions, so both can be connected to the same browser at the same time. Whichever client sends commands is the one acting. There is no handoff protocol; coordination between agent and human is the agent's concern.
 
@@ -372,9 +388,9 @@ For sites where the residual CDP ops-panel fingerprint is still detected, use `a
 
 | Backend | Launch profile in `host` | Capabilities |
 | --- | --- | --- |
-| Chromium / Chrome / Edge / Brave | `chromium` (and aliases) | Full: body, rendered_html, text, screenshot, network, console, observation, network body capture, ops panel, display takeover, health/capabilities, multi-attach. |
+| Chromium / Chrome / Edge / Brave | `chromium` (and aliases) | Full: body, rendered_html, text, screenshot, network, console, observation, network body capture, ops panel, real-display takeover, health/capabilities, multi-attach. |
 | chrome-headless-shell | `chromium` (binary `chrome-headless-shell`) | Same capability matrix as Chromium — chrome-headless-shell is Google's slimmer headless distribution of the same engine, identical CDP surface. Use when the full Chrome/Chromium browser is unavailable or too heavy. |
-| fingerprint-chromium | `fingerprint-chromium` | Same capability matrix as Chromium, including display takeover. Engine surface (UA, navigator props, WebGL vendor, canvas/font enumeration, CDP-detection evasion) is spoofed per [adryfish/fingerprint-chromium](https://github.com/adryfish/fingerprint-chromium). The host derives a stable 32-bit `--fingerprint=<seed>` from the resolved profile path so identity stays consistent within a profile and diverges between profiles. Per-surface overrides (`--fingerprint-brand`, `--fingerprint-platform`, etc.) reach the engine via `--browser-arg`. |
+| fingerprint-chromium | `fingerprint-chromium` | Same capability matrix as Chromium, including real-display takeover. Engine surface (UA, navigator props, WebGL vendor, canvas/font enumeration, CDP-detection evasion) is spoofed per [adryfish/fingerprint-chromium](https://github.com/adryfish/fingerprint-chromium). The host derives a stable 32-bit `--fingerprint=<seed>` from the resolved profile path so identity stays consistent within a profile and diverges between profiles. Per-surface overrides (`--fingerprint-brand`, `--fingerprint-platform`, etc.) reach the engine via `--browser-arg`. |
 | Lightpanda | `lightpanda` | body, rendered_html (modulo JS engine limits), text, network metadata, console, limited observation. No screenshot, no screencast, no usable ops panel, no display takeover (no rendering), network body capture depends on backend support. |
 | Camoufox (via foxbridge) | `camoufox` | Firefox stealth fork driven by the [foxbridge](https://foxbridge.vulpineos.com/) CDP→Juggler proxy. Same artifact subset as Lightpanda for CDP-only features: no chromium-only screenshot/screencast and no default ops-panel screencast. Display takeover is supported because the human drives the real X display instead of CDP screencast. Body, rendered_html, text, network metadata, console, observation work. Persistent profiles refused with `backend_unsupported` until Firefox profile lifecycle is wired explicitly. The host spawns foxbridge with `--binary <camoufox>` on a pre-reserved port; the SDK sees a chromium-style WebSocket. |
 | Any other CDP-compatible browser | none — user launches it themselves | Whatever the backend implements. `afhttp` clients connect via `--endpoint-url`. |
@@ -391,7 +407,7 @@ Both backends add stealth, but they address different threat models and are comp
 | **Stealth mechanism** | Patches applied at the Chromium binary level: UA, navigator props, WebGL/Canvas entropy, CDP-detection evasion | Firefox stealth fork with Gecko-native fingerprint randomization; engine-level font/audio/WebGL divergence from stock Chromium |
 | **Full artifact support** | Yes — screenshot, screencast, ops panel | No — subset only (no screenshot/screencast) |
 | **Target profile** | Sites that block stock headless Chromium or `navigator.webdriver` detection | Sites that actively fingerprint Blink engine characteristics (WebGL vendor strings, V8 timing side-channels) and block Chromium-family browsers regardless of stealth patches |
-| **Ops panel** | Supported, plus optional KasmVNC display takeover | Default CDP panel not supported; optional KasmVNC display takeover supported |
+| **Ops panel** | Supported, plus optional real-display takeover currently backed by KasmVNC | Default CDP panel not supported; optional real-display takeover currently backed by KasmVNC |
 
 Sites that specifically block all Chromium-family browsers (rare but real) require camoufox. Sites that just block unpatched headless work fine with fingerprint-chromium and get the full capability matrix. Both stay so operators can choose the right tool for the threat.
 
@@ -402,7 +418,7 @@ All errors carry `error_code` (stable enum), `error` (human-readable detail), an
 Three categories:
 
 - **Transport / navigation** — `navigation_timeout`, `host_unreachable`, `dns_resolution_failed`, `target_unreachable`, `tls_error`, `tab_crashed`, `browser_launch_failed`. Most are retryable; `tls_error` is not.
-- **Per-artifact warnings** — `backend_unsupported`, `artifact_capture_failed`, `network_body_truncated`. These populate `warnings[]` on an otherwise-successful response; the fetch itself does not fail.
+- **Per-artifact/readiness warnings** — `backend_unsupported`, `artifact_capture_failed`, `artifact_capture_timeout`, `network_body_truncated`, `network_not_idle`, `pending_xhr_at_capture`, `artifact_empty`, `artifact_tiny`, `observation_empty`, `readiness_timeout`. These populate `warnings[]` on an otherwise-successful response; the fetch itself does not fail.
 - **Configuration / profile** — `invalid_argument`, `invalid_endpoint`, `render_unavailable`, `profile_*`, `io_error`. Not retryable without fixing the configuration.
 
 The full enum with example `error` strings and per-code agent guidance lives in [reference.md §Error Codes](reference.md#error-codes).
@@ -429,7 +445,7 @@ let client = Client::connect("ws://chromium-host:9222")?;
 
 let result = client.fetch("https://example.com")
     .render(RenderMode::Always)
-    .wait(Wait::Load)
+    .wait(Wait::Auto)
     .user_agent("agent-script/1")
     .cookie_full(
         FetchCookie::build(("session", "abc"))
