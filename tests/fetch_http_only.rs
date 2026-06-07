@@ -430,10 +430,17 @@ async fn detailed_fetch_error_preserves_timeout_trace() {
     let tmpdir = tempfile::tempdir().expect("tempdir");
     let client = Client::connect("ws://localhost:9999").expect("client");
 
+    // Disable the cookie jar so setup does not make a `GET /profile` call to the
+    // dead endpoint above: that connection-refused is near-instant on Unix but
+    // slow on Windows, where it would otherwise eat a tight timeout budget
+    // before `navigate` is ever reached. With the jar off, setup is instant and
+    // the deadline trips deterministically in `navigate` waiting on slow.html
+    // (which sleeps 500ms server-side) on every platform.
     let err = client
         .fetch(format!("{}/slow.html", fixture.base_url()))
         .render(RenderMode::None)
-        .timeout(Duration::from_millis(50))
+        .no_cookie_jar()
+        .timeout(Duration::from_millis(200))
         .want([Artifact::Body])
         .out_dir(tmpdir.path().to_path_buf())
         .send_detailed()
@@ -442,7 +449,7 @@ async fn detailed_fetch_error_preserves_timeout_trace() {
         .expect("expected timeout");
 
     assert_eq!(err.error_code, ErrorCode::NavigationTimeout);
-    assert_eq!(err.trace.timeout_ms, 50);
+    assert_eq!(err.trace.timeout_ms, 200);
     assert_eq!(err.trace.current_stage, "navigate");
     assert!(
         err.trace
