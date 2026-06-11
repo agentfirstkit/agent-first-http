@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 use crate::host::listener::AppState;
 use crate::sdk::capabilities::{
-    ArtifactSupport, BackendFamily, CapabilitiesResponse, FeatureSupport, OpsPanelSupport,
-    ProfileSupport,
+    ArtifactSupport, BackendFamily, CapabilitiesResponse, FeatureSupport, ProfileSupport,
+    TakeoverSupport,
 };
 
 pub fn build(state: &AppState) -> CapabilitiesResponse {
@@ -17,16 +17,15 @@ pub fn build(state: &AppState) -> CapabilitiesResponse {
     };
     // Both lightpanda and the camoufox-via-foxbridge bridge speak a CDP
     // subset that lacks the chromium screenshot / screencast surface and
-    // does not back the ops panel's live screen-grab flow. Group them so
+    // does not back the takeover panel's live screen-grab flow. Group them so
     // capability gating stays mechanical.
     let is_subset_backend = family == "lightpanda" || family == "camoufox";
-    let display_takeover = backend_ready && family != "lightpanda";
-    let screencast_supported = backend_ready && state.ops_enabled && !is_subset_backend;
-    let display_enabled = state.display_takeover.is_some();
-    let display_provider = state
-        .display_takeover
+    let backend_capable = backend_ready && family != "lightpanda";
+    let panel_enabled = state.takeover.is_some();
+    let provider = state
+        .takeover
         .as_ref()
-        .map(|display| display.provider.as_str().to_string());
+        .map(|t| t.provider.as_str().to_string());
 
     let mut artifacts: BTreeMap<String, ArtifactSupport> = BTreeMap::new();
     artifacts.insert(
@@ -43,6 +42,16 @@ pub fn build(state: &AppState) -> CapabilitiesResponse {
             ArtifactSupport {
                 supported: backend_ready,
                 source: None,
+                body_capture: Vec::new(),
+            },
+        );
+    }
+    for token in ["content", "content_json"] {
+        artifacts.insert(
+            token.into(),
+            ArtifactSupport {
+                supported: backend_ready,
+                source: Some("composed_dom".into()),
                 body_capture: Vec::new(),
             },
         );
@@ -118,18 +127,10 @@ pub fn build(state: &AppState) -> CapabilitiesResponse {
         },
     );
     features.insert(
-        "display_takeover".into(),
+        "takeover".into(),
         FeatureSupport {
-            supported: display_takeover,
-            detail: Some("--takeover display --display-provider kasmvnc".into()),
-            risk: None,
-        },
-    );
-    features.insert(
-        "ops_panel".into(),
-        FeatureSupport {
-            supported: screencast_supported || display_enabled,
-            detail: Some("/ops/screencast".into()),
+            supported: panel_enabled,
+            detail: Some("/takeover/panel".into()),
             risk: None,
         },
     );
@@ -153,7 +154,7 @@ pub fn build(state: &AppState) -> CapabilitiesResponse {
         "network_redact_off".into(),
         FeatureSupport {
             supported: true,
-            detail: Some("--network-redact off".into()),
+            detail: Some("--no-network-redact".into()),
             risk: Some("writes raw credential headers and other PII into network artifacts".into()),
         },
     );
@@ -170,14 +171,11 @@ pub fn build(state: &AppState) -> CapabilitiesResponse {
             "selector_visible".into(),
             "ms".into(),
         ],
-        display_takeover,
-        ops_panel: OpsPanelSupport {
-            supported: screencast_supported || display_enabled,
-            screencast: screencast_supported,
-            display: display_enabled,
-            screencast_url: screencast_supported.then(|| "/ops/screencast".to_string()),
-            display_url: display_enabled.then(|| "/ops/display".to_string()),
-            display_provider,
+        takeover: TakeoverSupport {
+            backend_capable,
+            supported: panel_enabled,
+            panel_url: panel_enabled.then(|| "/takeover/panel".to_string()),
+            provider,
         },
         profile: ProfileSupport {
             persistent: true,

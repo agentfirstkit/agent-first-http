@@ -8,11 +8,12 @@ use crate::shared::error::Error;
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
-    /// CDP endpoint of the running host.
-    #[arg(long = "endpoint-url")]
+    /// CDP endpoint of the running host (e.g. `ws://127.0.0.1:9222`). Falls back to `AFHTTP_ENDPOINT_URL`.
+    #[arg(long = "endpoint-url", env = "AFHTTP_ENDPOINT_URL")]
     pub endpoint: String,
     /// Bearer token, if the host was started with `--token-secret`.
-    #[arg(long = "token-secret")]
+    /// Falls back to `AFHTTP_TOKEN_SECRET`.
+    #[arg(long = "token-secret", env = "AFHTTP_TOKEN_SECRET")]
     pub token: Option<String>,
 }
 

@@ -1,7 +1,7 @@
 //! Header-name redaction list applied to `network.json` by default (and to
 //! any tool-originated log line). Per `design.md §"Secrets are redacted"`,
 //! credential-bearing headers are replaced with `"[redacted]"` unless the
-//! caller passes `--network-redact off`.
+//! caller passes `--no-network-redact`.
 //!
 //! Server response **bodies** pass through unmodified — redaction is for
 //! tool-captured metadata only.

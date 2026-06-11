@@ -23,7 +23,7 @@ pub struct HostArgs {
     pub browser: BrowserChoice,
     pub browser_bin: Option<PathBuf>,
     pub token: Option<String>,
-    pub ops_enabled: bool,
+    pub takeover_enabled: bool,
     pub health_enabled: bool,
     pub health_public: HealthPublic,
     /// Explicit environment variables to propagate into the backend
@@ -65,16 +65,15 @@ pub enum DisplayMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Takeover {
     Off,
-    Screencast,
-    Display { provider: DisplayProvider },
+    On { provider: TakeoverProviderKind },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DisplayProvider {
+pub enum TakeoverProviderKind {
     KasmVnc,
 }
 
-impl DisplayProvider {
+impl TakeoverProviderKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::KasmVnc => "kasmvnc",
@@ -82,7 +81,7 @@ impl DisplayProvider {
     }
 }
 
-impl std::str::FromStr for DisplayProvider {
+impl std::str::FromStr for TakeoverProviderKind {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -126,6 +125,23 @@ impl std::str::FromStr for BrowserChoice {
             "camoufox" => Self::Camoufox,
             other => return Err(format!("unknown {other:?}")),
         })
+    }
+}
+
+impl BrowserChoice {
+    /// Stable backend-scope key used for persistent profile directories.
+    #[must_use]
+    pub fn profile_backend_key(&self) -> &'static str {
+        match self {
+            Self::Auto | Self::Chromium => "chromium",
+            Self::Chrome => "chrome",
+            Self::ChromeShell => "chrome-headless-shell",
+            Self::FingerprintChromium => "fingerprint-chromium",
+            Self::Edge => "edge",
+            Self::Brave => "brave",
+            Self::Lightpanda => "lightpanda",
+            Self::Camoufox => "camoufox",
+        }
     }
 }
 

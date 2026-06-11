@@ -61,7 +61,7 @@ The invariant has three layers:
 
 2. **Each browsing environment is independent.** One `afhttp host` instance runs one browser process tree against one profile directory. Two hosts on the same machine — even with the same backend binary — share no cookies, no cache, no localStorage, no service workers, no in-flight tabs. Crashing or killing one host cannot leak state to another.
 
-3. **Each profile is a sandbox.** All persistent state for a profile lives under that profile's directory (`$XDG_DATA_HOME/afhttp/profiles/<name>/` on Linux/macOS, the platform equivalent on Windows). The cookie jar, browser user-data-dir, lockfile, and metadata are all in there. Cross-profile reads and writes are explicit programming errors — never accidental. Profile A's authenticated session cannot leak into profile B even if they target the same domain. Ephemeral profiles live in a tempdir and are wiped on host exit; they can never persist beyond a single host process.
+3. **Each profile is a sandbox.** All persistent state for a profile lives under that backend-scoped profile directory (`$XDG_DATA_HOME/afhttp/profiles/<backend>/<name>/` on Linux/macOS, the platform equivalent on Windows). The cookie jar, browser user-data-dir, lockfile, and metadata are all in there. Cross-profile reads and writes are explicit programming errors — never accidental. Profile A's authenticated session cannot leak into profile B even if they target the same domain, and the same logical name under different backends is a different profile. Ephemeral profiles live in a tempdir and are wiped on host exit; they can never persist beyond a single host process.
 
 What the invariant *does not* claim: the engine itself (Chromium, Firefox) still reads system fonts, the OS timezone, and the OS locale, because those are baked into the rendering pipeline. All browser backends launch through an explicit `env_clear` + allowlist path; only the minimal runtime variables and `--engine-env` opt-ins reach the engine. Backends like `fingerprint-chromium` and `camoufox` exist specifically to spoof browser fingerprint surfaces; the regular `chromium` backend honestly leaks engine-level surfaces such as fonts and graphics capabilities, and the documentation says so. Outbound network traffic uses the host's network stack and DNS — proxies are a deliberate opt-in, never inherited from `HTTP_PROXY`/`HTTPS_PROXY` without an explicit flag.
 
@@ -84,7 +84,7 @@ Every error carries `error_code` (machine-readable, stable enum), `error` (human
 
 Configuration echo, log lines, and trace output go through `agent_first_data::output_json_with()` with the `_secret` suffix redaction policy. Fields named `*_secret` (e.g. `key_pem_secret`) are replaced with `"[redacted]"` in stdout. Server response data (response bodies, headers) passes through unmodified — redaction does not apply to the `body` artifact.
 
-Network logs are different: they are a tool-originated capture of both browser requests and server responses, and can contain cookies, bearer tokens, and `Set-Cookie`. `network.json` redacts credential-bearing headers by default. Agents that need byte-for-byte traffic capture must opt out explicitly with `--network-redact off`, which can expose tokens and PII. `--capture-ws` and `--capture-sse` have the same risk for frame/event payloads.
+Network logs are different: they are a tool-originated capture of both browser requests and server responses, and can contain cookies, bearer tokens, and `Set-Cookie`. `network.json` redacts credential-bearing headers by default. Agents that need byte-for-byte traffic capture must opt out explicitly with `--no-network-redact`, which can expose tokens and PII. `--capture-ws` and `--capture-sse` have the same risk for frame/event payloads.
 
 ### Agent-First Data field naming
 
@@ -109,7 +109,7 @@ CLI flags use long form only (`--render`, `--endpoint-url`, `--timeout`). No sin
 
 CLI flag names correspond to JSON field names with hyphens replacing underscores (e.g. `--browser-bin` ↔ JSON `browser_bin`).
 
-Boolean flags that default to false are bare (`--no-cookie-jar`, `--tls-insecure`). Booleans that default to true take an explicit value (`--health on|off`).
+Boolean flags are bare presence toggles, never `on|off` values. A behavior that is on by default is turned off with a `--no-x` flag (`--no-cookie-jar`, `--no-network-redact`, `--no-health`); a behavior that is off by default is turned on with a bare `--x` flag (`--tls-insecure`, `--capture-ws`).
 
 ### Output is always single-line JSON
 

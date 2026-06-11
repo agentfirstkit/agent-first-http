@@ -41,7 +41,7 @@ async fn spawn_host_with_chrome_shell() -> Option<(String, tempfile::TempDir)> {
         browser: BrowserChoice::ChromeShell,
         browser_bin: Some(bin),
         token: None,
-        ops_enabled: true,
+        takeover_enabled: true,
         health_enabled: true,
         health_public: HealthPublic::Off,
         engine_envs: Vec::new(),

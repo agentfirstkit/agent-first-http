@@ -4,8 +4,8 @@
 # wherever the agent is — it does NOT need this image. The host runs a real
 # browser with Chromium's own sandbox disabled (the image sets AFHTTP_NO_SANDBOX,
 # so the container itself is the isolation boundary; afhttp keeps the sandbox ON
-# when run natively), holds a persistent profile, and exposes a CDP endpoint; that
-# is what belongs in a container. See docs/deployment.md.
+# when run natively), holds browser profile state, and exposes a CDP endpoint;
+# that is what belongs in a container. See docs/deployment.md.
 #
 # The afhttp binary comes from ONE of two source stages, picked by the
 # AFHTTP_BIN_FROM build-arg:
@@ -17,7 +17,7 @@
 # BuildKit only builds the selected stage, so the download path pulls no Rust
 # toolchain and needs no source tree, while the from-source path makes no network
 # call for a release. Optional backends are opt-in (chromium is always present):
-#   docker build --build-arg WITH_CAMOUFOX=1 --build-arg WITH_KASMVNC=1 ...
+#   docker build --build-arg WITH_BRAVE=1 --build-arg WITH_KASMVNC=1 ...
 #
 # This is NOT the test image — tests/Dockerfile.test (rust toolchain + all backends
 # + coverage tooling, source mounted as a volume) is for build/test/clippy/coverage.
@@ -109,12 +109,14 @@ ARG WITH_CHROME_HEADLESS_SHELL=0
 ARG WITH_LIGHTPANDA=0
 ARG WITH_FINGERPRINT_CHROMIUM=0
 ARG WITH_CAMOUFOX=0
+ARG WITH_BRAVE=0
 ARG WITH_KASMVNC=0
 
 RUN if [ "$WITH_CHROME_HEADLESS_SHELL" = "1" ]; then install-backends.sh chrome-headless-shell; fi
 RUN if [ "$WITH_LIGHTPANDA" = "1" ]; then install-backends.sh lightpanda; fi
 RUN if [ "$WITH_FINGERPRINT_CHROMIUM" = "1" ]; then install-backends.sh fingerprint-chromium; fi
 RUN if [ "$WITH_CAMOUFOX" = "1" ]; then install-backends.sh camoufox; fi
+RUN if [ "$WITH_BRAVE" = "1" ]; then install-backends.sh brave; fi
 RUN if [ "$WITH_KASMVNC" = "1" ]; then install-backends.sh kasmvnc; fi
 
 COPY --from=afhttp_bin /usr/local/bin/afhttp /usr/local/bin/afhttp
@@ -124,7 +126,7 @@ RUN chmod +x /entrypoint.sh
 # Non-root: AFHTTP_NO_SANDBOX makes chromium run with its sandbox off (the
 # container is the boundary), so it does not need root. Profiles live under
 # $XDG_DATA_HOME (a volume). KasmVNC env is harmless when Xvnc isn't built in —
-# the host only reads it for `--takeover display --display-provider kasmvnc`.
+# the host only reads it for `--takeover-provider kasmvnc`.
 RUN useradd --create-home --uid 10001 afhttp \
     && mkdir -p /data \
     && chown -R afhttp:afhttp /data

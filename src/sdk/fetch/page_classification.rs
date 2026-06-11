@@ -76,7 +76,7 @@ fn classify_text(raw: &str) -> Option<PageClassification> {
 fn challenge_detail(label: &str) -> String {
     format!(
         "detected {label}; artifacts likely show a challenge page, not verified target content. \
-         Use human takeover for review/input, e.g. `afhttp ui --endpoint-url <host>`; \
+         Use human takeover for review/input, e.g. `afhttp fetch <url> --takeover`; \
          this is not a captcha bypass."
     )
 }

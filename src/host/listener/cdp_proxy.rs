@@ -25,6 +25,10 @@ use crate::host::listener::AppState;
 #[derive(Deserialize, Default)]
 pub struct CdpQuery {
     pub token: Option<String>,
+    /// Optional profile selector. When set and different from the host's active
+    /// profile, the host relaunches its browser under this profile before
+    /// proxying (see [`AppState::ensure_profile`]).
+    pub profile: Option<String>,
 }
 
 pub async fn handler(
@@ -33,6 +37,20 @@ pub async fn handler(
     State(state): State<AppState>,
 ) -> axum::response::Response {
     let _ = q.token;
+    if let Some(name) = q.profile.as_deref() {
+        if let Err(e) = state.ensure_profile(name).await {
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                axum::Json(serde_json::json!({
+                    "code": "error",
+                    "error_code": e.error_code,
+                    "error": format!("profile switch to {name:?} failed: {}", e.detail),
+                    "retryable": false,
+                })),
+            )
+                .into_response();
+        }
+    }
     let entry = state.get_profile();
     let backend = match entry {
         Some(e) => Arc::new(e.ws_url().to_string()),

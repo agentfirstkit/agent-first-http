@@ -1,7 +1,7 @@
 //! Integration test: `--browser camoufox` spawns the foxbridge CDP→Juggler
 //! proxy against the camoufox binary, exposes a CDP WebSocket on a
 //! pre-reserved ephemeral port, and the host reports the subset-backend
-//! capability matrix (no screenshot, no ops-panel screencast).
+//! capability matrix (no screenshot, no takeover-panel screencast).
 //!
 //! Gated on BOTH `AFHTTP_TEST_FOXBRIDGE_BIN` and `AFHTTP_TEST_CAMOUFOX_BIN`.
 //! Dockerfile.test best-effort installs foxbridge (via `go install`) and
@@ -54,7 +54,7 @@ async fn spawn_host_with_camoufox() -> Option<(String, tempfile::TempDir)> {
         // by resolve_named_bin inside launch_camoufox.
         browser_bin: Some(foxbridge),
         token: None,
-        ops_enabled: true,
+        takeover_enabled: true,
         health_enabled: true,
         health_public: HealthPublic::Off,
         engine_envs: Vec::new(),
@@ -119,7 +119,7 @@ async fn camoufox_refuses_persistent_profile() {
         browser: BrowserChoice::Camoufox,
         browser_bin: Some(foxbridge),
         token: None,
-        ops_enabled: true,
+        takeover_enabled: true,
         health_enabled: true,
         health_public: HealthPublic::Off,
         engine_envs: Vec::new(),

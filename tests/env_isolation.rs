@@ -59,6 +59,10 @@ const ALLOWED_ENV: &[&str] = &[
     "TMPDIR",
     "DISPLAY",
     "AFHTTP_ALLOWED_MARKER",
+    // afhttp-injected crash-reporter suppressors (see host::browser).
+    "MOZ_CRASHREPORTER_DISABLE",
+    "MOZ_CRASHREPORTER_NO_REPORT",
+    "NO_EM_RESTART",
 ];
 
 #[cfg(target_os = "linux")]
@@ -91,7 +95,7 @@ async fn chromium_subprocess_env_is_allowlisted() {
             browser: BrowserChoice::Chromium,
             browser_bin: Some(bin),
             token: None,
-            ops_enabled: true,
+            takeover_enabled: true,
             health_enabled: true,
             health_public: HealthPublic::Off,
             engine_envs: vec![("AFHTTP_ALLOWED_MARKER".into(), "present".into())],
@@ -166,7 +170,7 @@ async fn lightpanda_subprocess_does_not_inherit_ambient_http_proxy() {
             browser: BrowserChoice::Lightpanda,
             browser_bin: Some(bin),
             token: None,
-            ops_enabled: true,
+            takeover_enabled: true,
             health_enabled: true,
             health_public: HealthPublic::Off,
             engine_envs: Vec::new(),
@@ -245,7 +249,7 @@ async fn engine_env_explicit_passthrough_reaches_subprocess() {
         browser: BrowserChoice::Lightpanda,
         browser_bin: Some(bin),
         token: None,
-        ops_enabled: true,
+        takeover_enabled: true,
         health_enabled: true,
         health_public: HealthPublic::Off,
         browser_args: Vec::new(),

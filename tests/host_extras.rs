@@ -1,4 +1,4 @@
-//! Integration tests for the cdp escape hatch + multi-attach, the ops
+//! Integration tests for the cdp escape hatch + multi-attach, the takeover
 //! panel routes, and inline_ephemeral.
 
 #![cfg(feature = "host")]
@@ -38,7 +38,7 @@ async fn spawn() -> Option<String> {
         browser: BrowserChoice::Chromium,
         browser_bin: Some(bin),
         token: None,
-        ops_enabled: true,
+        takeover_enabled: true,
         health_enabled: true,
         health_public: HealthPublic::Off,
         engine_envs: Vec::new(),
@@ -132,85 +132,6 @@ async fn multi_attach_two_clients_see_same_target() {
         found,
         "client B did not see target {target_id}; targets={arr:?}"
     );
-}
-
-#[tokio::test]
-async fn ops_panel_serves_static_html() {
-    let Some(endpoint) = spawn().await else {
-        println!("(skipping: no chromium)");
-        return;
-    };
-    let base = endpoint.replacen("ws://", "http://", 1);
-    let client = reqwest::Client::new();
-    let r = client
-        .get(format!("{base}/ops/screencast"))
-        .send()
-        .await
-        .expect("send");
-    assert_eq!(r.status(), reqwest::StatusCode::OK);
-    let ct = r
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    assert!(ct.contains("text/html"), "content-type was {ct:?}");
-    let body = r.text().await.expect("text");
-    assert!(body.contains("afhttp"), "body missing brand: {body}");
-
-    let old_entry = client
-        .get(format!("{base}/ops"))
-        .send()
-        .await
-        .expect("old entry send");
-    assert_eq!(old_entry.status(), reqwest::StatusCode::NOT_FOUND);
-
-    let old_input = client
-        .get(format!("{base}/ops/input"))
-        .send()
-        .await
-        .expect("old input send");
-    assert_eq!(old_input.status(), reqwest::StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn ops_panel_assets_have_right_mime_types() {
-    let Some(endpoint) = spawn().await else {
-        println!("(skipping: no chromium)");
-        return;
-    };
-    let base = endpoint.replacen("ws://", "http://", 1);
-    let client = reqwest::Client::new();
-    let js = client
-        .get(format!("{base}/ops/screencast/assets/app.js"))
-        .send()
-        .await
-        .expect("js");
-    assert_eq!(js.status(), reqwest::StatusCode::OK);
-    let ct = js
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    assert!(ct.contains("javascript"), "js content-type was {ct:?}");
-
-    let old_js = client
-        .get(format!("{base}/ops/assets/app.js"))
-        .send()
-        .await
-        .expect("old js");
-    assert_eq!(old_js.status(), reqwest::StatusCode::NOT_FOUND);
-
-    let css = client
-        .get(format!("{base}/ops/screencast/assets/app.css"))
-        .send()
-        .await
-        .expect("css");
-    let ct = css
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    assert!(ct.contains("text/css"), "css content-type was {ct:?}");
 }
 
 #[tokio::test]

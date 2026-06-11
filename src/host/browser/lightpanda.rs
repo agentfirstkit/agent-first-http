@@ -5,8 +5,8 @@ use tokio::process::Command;
 
 use super::{
     apply_subprocess_env, ensure_download_dir, new_stderr_ring, pick_ephemeral_port,
-    profile_launch::resolve_profile_dir, resolve_browser_bin, wait_for_tcp_ready, BackendKeepalive,
-    BrowserHandle,
+    profile_launch::resolve_profile_dir, resolve_browser_bin, stderr_tail_summary,
+    wait_for_tcp_ready, BackendKeepalive, BrowserHandle,
 };
 use crate::host::bootstrap::{HostArgs, ProfileChoice};
 use crate::shared::error::{Error, ErrorCode};
@@ -27,7 +27,8 @@ pub(super) async fn launch(args: &HostArgs) -> Result<BrowserHandle, Error> {
             "lightpanda does not support persistent profiles; use `--profile -` for ephemeral",
         ));
     }
-    let (profile_dir, ephemeral, profile_lock) = resolve_profile_dir(profile)?;
+    let (profile_dir, ephemeral, profile_lock) =
+        resolve_profile_dir(profile, args.browser.profile_backend_key())?;
     let download_dir = ensure_download_dir(&profile_dir).await?;
     let bin = resolve_browser_bin(args)?;
 
@@ -70,9 +71,20 @@ pub(super) async fn launch(args: &HostArgs) -> Result<BrowserHandle, Error> {
         // Best-effort cleanup before reporting; `child` is dropped on return
         // which sends SIGKILL via kill_on_drop, but we hurry it along.
         drop(child);
+        let stderr = stderr_tail_summary(&stderr_ring).await;
+        let suffix = if stderr.is_empty() {
+            String::new()
+        } else {
+            format!("; browser_stderr_tail={stderr}")
+        };
         return Err(Error::new(
             ErrorCode::BrowserLaunchFailed,
-            format!("lightpanda did not accept connections on port {port}: {e}"),
+            format!(
+                "lightpanda backend={} profile={} display={:?} port={port} did not accept connections: {e}{suffix}",
+                args.browser.profile_backend_key(),
+                profile_dir.display(),
+                args.display
+            ),
         ));
     }
 

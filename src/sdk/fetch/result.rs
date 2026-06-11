@@ -13,11 +13,13 @@ use crate::shared::ids::{RequestId, TabId};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FetchResult {
     pub request_id: RequestId,
-    pub url: String,
+    pub request_url: String,
     pub final_url: String,
     pub status: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub page_kind: Option<PageKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_action: Option<NextAction>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tab_id: Option<TabId>,
     pub trace: Trace,
@@ -29,6 +31,10 @@ pub struct FetchResult {
     pub rendered_html_file: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_file: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_file: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_json_file: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub screenshot_file: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -162,6 +168,44 @@ pub enum PageKind {
     SecurityChallengeDetected,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NextAction {
+    pub kind: NextActionKind,
+    pub recommended_command: String,
+    pub target_content_verified: bool,
+    /// Real-display takeover URL a human opens to clear the wall. Populated by
+    /// `afhttp fetch --takeover` once it has prepared a persistent tab on a
+    /// takeover-ready host; `None` for a bare fetch that only detected the wall.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub takeover_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub takeover_url_expires_at_rfc3339: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub takeover_url_ttl_s: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub takeover_url_scope: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NextActionKind {
+    HumanTakeover,
+}
+
+impl NextAction {
+    fn human_takeover(url: &str) -> Self {
+        Self {
+            kind: NextActionKind::HumanTakeover,
+            recommended_command: format!("afhttp fetch {} --takeover", shell_quote(url)),
+            target_content_verified: false,
+            takeover_url: None,
+            takeover_url_expires_at_rfc3339: None,
+            takeover_url_ttl_s: None,
+            takeover_url_scope: None,
+        }
+    }
+}
+
 /// Fetch-only failure envelope data. This keeps the global `Error` contract
 /// unchanged while allowing `afhttp fetch` to include the in-progress trace.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -241,15 +285,18 @@ impl FetchResult {
         Self {
             request_id,
             final_url: url.clone(),
-            url,
+            request_url: url,
             status: 0,
             page_kind: None,
+            next_action: None,
             tab_id: None,
             trace,
             warnings: Vec::new(),
             body_file: None,
             rendered_html_file: None,
             text_file: None,
+            content_file: None,
+            content_json_file: None,
             screenshot_file: None,
             network_file: None,
             console_file: None,
@@ -270,11 +317,68 @@ impl FetchResult {
             Artifact::Body => self.body_file = Some(path),
             Artifact::RenderedHtml => self.rendered_html_file = Some(path),
             Artifact::Text => self.text_file = Some(path),
+            Artifact::Content => self.content_file = Some(path),
+            Artifact::ContentJson => self.content_json_file = Some(path),
             Artifact::Screenshot => self.screenshot_file = Some(path),
             Artifact::Network => self.network_file = Some(path),
             Artifact::Console => self.console_file = Some(path),
             Artifact::Observation => self.observation_file = Some(path),
             Artifact::Storage => self.storage_file = Some(path),
+        }
+    }
+
+    pub(crate) fn set_page_kind(&mut self, kind: PageKind) {
+        self.page_kind = Some(kind);
+        if matches!(
+            kind,
+            PageKind::BotWallDetected | PageKind::SecurityChallengeDetected
+        ) {
+            self.next_action = Some(NextAction::human_takeover(&self.request_url));
+        }
+    }
+
+    /// Enrich a detected wall's `next_action` for `afhttp fetch --takeover`:
+    /// attach the human takeover URL and recommend re-fetching the same
+    /// persistent tab once the human clears the wall. No-op when no wall was
+    /// detected (no `next_action`).
+    pub fn attach_takeover(&mut self, takeover_url: String) {
+        self.attach_takeover_with_context(takeover_url, None, None, None, None, None);
+    }
+
+    /// Like [`Self::attach_takeover`], but also makes the recommended command
+    /// self-contained for non-default hosts and explicitly shared profiles.
+    pub fn attach_takeover_with_context(
+        &mut self,
+        takeover_url: String,
+        expires_at_rfc3339: Option<String>,
+        ttl_s: Option<u64>,
+        scope: Option<String>,
+        endpoint: Option<&str>,
+        profile: Option<&str>,
+    ) {
+        let url = self.request_url.clone();
+        let tab = self.tab_id.as_ref().map(|t| t.as_str().to_string());
+        if let Some(next) = self.next_action.as_mut() {
+            next.takeover_url = Some(takeover_url);
+            next.takeover_url_expires_at_rfc3339 = expires_at_rfc3339;
+            next.takeover_url_ttl_s = ttl_s;
+            next.takeover_url_scope = scope;
+            if let Some(tab) = tab {
+                let mut command = format!(
+                    "afhttp fetch {} --takeover --tab {}",
+                    shell_quote(&url),
+                    shell_quote(&tab),
+                );
+                if let Some(endpoint) = endpoint {
+                    command.push_str(" --endpoint-url ");
+                    command.push_str(&shell_quote(endpoint));
+                }
+                if let Some(profile) = profile {
+                    command.push_str(" --profile ");
+                    command.push_str(&shell_quote(profile));
+                }
+                next.recommended_command = command;
+            }
         }
     }
 
@@ -284,6 +388,8 @@ impl FetchResult {
             Artifact::Body => self.body_file.as_ref(),
             Artifact::RenderedHtml => self.rendered_html_file.as_ref(),
             Artifact::Text => self.text_file.as_ref(),
+            Artifact::Content => self.content_file.as_ref(),
+            Artifact::ContentJson => self.content_json_file.as_ref(),
             Artifact::Screenshot => self.screenshot_file.as_ref(),
             Artifact::Network => self.network_file.as_ref(),
             Artifact::Console => self.console_file.as_ref(),
@@ -291,6 +397,17 @@ impl FetchResult {
             Artifact::Storage => self.storage_file.as_ref(),
         }
     }
+}
+
+fn shell_quote(value: &str) -> String {
+    if !value.is_empty()
+        && value.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'/' | b':' | b',' | b'=')
+        })
+    {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 #[cfg(test)]
@@ -358,5 +475,53 @@ mod tests {
         let canonical = serde_json::to_string(&json).unwrap();
         let expected = include_str!("../../../tests/golden/fetch-success.json").trim();
         assert_eq!(canonical, expected);
+    }
+
+    #[test]
+    fn bot_wall_page_kind_adds_human_takeover_next_action() {
+        let mut result = FetchResult::new(
+            RequestId("req-1".into()),
+            "https://example.com/a b".into(),
+            Trace::default(),
+        );
+        result.set_page_kind(PageKind::BotWallDetected);
+        let next = result.next_action.expect("next_action");
+        assert_eq!(next.kind, NextActionKind::HumanTakeover);
+        assert!(!next.target_content_verified);
+        assert_eq!(
+            next.recommended_command,
+            "afhttp fetch 'https://example.com/a b' --takeover"
+        );
+    }
+
+    #[test]
+    fn takeover_next_action_can_include_connection_and_profile_context() {
+        let mut result = FetchResult::new(
+            RequestId("req-1".into()),
+            "https://example.com/login".into(),
+            Trace::default(),
+        );
+        result.tab_id = Some(TabId::new("page 7"));
+        result.set_page_kind(PageKind::BotWallDetected);
+        result.attach_takeover_with_context(
+            "http://127.0.0.1:9222/takeover/panel?handoff=h".into(),
+            Some("2026-06-11T00:00:00Z".into()),
+            Some(900),
+            Some("takeover".into()),
+            Some("ws://127.0.0.1:9222"),
+            Some("work profile"),
+        );
+
+        let next = result.next_action.expect("next_action");
+        assert_eq!(
+            next.recommended_command,
+            "afhttp fetch https://example.com/login --takeover --tab 'page 7' --endpoint-url ws://127.0.0.1:9222 --profile 'work profile'"
+        );
+        assert_eq!(
+            next.takeover_url.as_deref(),
+            Some("http://127.0.0.1:9222/takeover/panel?handoff=h")
+        );
+        assert_eq!(next.takeover_url_ttl_s, Some(900));
+        assert_eq!(next.takeover_url_scope.as_deref(), Some("takeover"));
     }
 }

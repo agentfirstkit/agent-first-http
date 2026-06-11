@@ -196,7 +196,8 @@ async fn ensure_download_dir(profile_dir: &std::path::Path) -> Result<PathBuf, E
 /// - `XDG_DATA_HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` — we override
 ///   with `--user-data-dir`; honoring these too could escape the profile.
 /// - `BROWSER` — affects xdg-open inside the engine.
-/// - `CHROME_*`, `MOZ_*`, `LIGHTPANDA_*` — engine-specific tunables.
+/// - `CHROME_*`, `MOZ_*`, `LIGHTPANDA_*` — engine-specific tunables, except
+///   for the curated crash-reporter silence defaults below.
 fn apply_subprocess_env(cmd: &mut Command, engine_envs: &[(String, String)]) {
     cmd.env_clear();
     const ALLOWLIST: &[&str] = &[
@@ -238,6 +239,11 @@ fn apply_subprocess_env(cmd: &mut Command, engine_envs: &[(String, String)]) {
             cmd.env(key, value);
         }
     }
+    // Keep browser-owned crash reporter UI out of the takeover display. These
+    // are defaults only: explicit --engine-env entries below still override.
+    cmd.env("MOZ_CRASHREPORTER_DISABLE", "1");
+    cmd.env("MOZ_CRASHREPORTER_NO_REPORT", "1");
+    cmd.env("NO_EM_RESTART", "1");
     for (k, v) in engine_envs {
         cmd.env(k, v);
     }
@@ -261,6 +267,24 @@ fn new_stderr_ring(stderr: Option<tokio::process::ChildStderr>) -> Arc<Mutex<Vec
         });
     }
     ring
+}
+
+async fn stderr_tail_summary(ring: &Arc<Mutex<VecDeque<String>>>) -> String {
+    let guard = ring.lock().await;
+    let mut summary = guard
+        .iter()
+        .rev()
+        .take(20)
+        .map(|line| crate::shared::redact::redact_userinfo_passwords(line))
+        .collect::<Vec<_>>();
+    summary.reverse();
+    let mut joined = summary.join(" | ");
+    const MAX: usize = 2000;
+    if joined.len() > MAX {
+        let start = joined.len() - MAX;
+        joined = format!("...{}", &joined[start..]);
+    }
+    joined
 }
 
 /// Look up a specifically named binary on the standard install paths.

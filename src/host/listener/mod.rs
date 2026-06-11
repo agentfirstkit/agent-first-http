@@ -1,33 +1,41 @@
 //! Axum listener: serves the CDP-over-WS proxy, `/health`, `/capabilities`,
-//! `/profile`, and (when enabled) the `/ops/*` takeover routes, all behind the
+//! `/profile`, and (when enabled) the `/takeover/*` routes, all behind the
 //! bearer-token middleware.
 
 pub mod capabilities;
 pub mod cdp_proxy;
 pub mod diagnostics;
 pub mod health;
-pub mod ops_routes;
 pub mod profile;
 pub mod recent_requests;
+pub mod takeover_routes;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant, SystemTime};
 
 use axum::extract::State;
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
 use axum::Extension;
 use axum::Router;
+use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::host::bootstrap::{BrowserChoice, HealthPublic, HostArgs, ProfileChoice, Takeover};
 use crate::host::browser::BrowserHandle;
-use crate::host::display::DisplayProxyState;
+use crate::host::takeover::TakeoverProxyState;
 use crate::sdk::fetch::DEFAULT_NETWORK_BODY_MAX_BYTES;
 use crate::shared::error::{Error, ErrorCode};
+
+const TAKEOVER_HANDOFF_DEFAULT_TTL_S: u64 = 900;
+const TAKEOVER_HANDOFF_MIN_TTL_S: u64 = 60;
+const TAKEOVER_HANDOFF_MAX_TTL_S: u64 = 3600;
+const TAKEOVER_HANDOFF_SCOPE: &str = "takeover";
+const TAKEOVER_HANDOFF_COOKIE: &str = "afhttp_handoff";
 
 /// A single running profile with its browser handle.
 #[derive(Clone)]
@@ -46,27 +54,130 @@ impl ProfileEntry {
     }
 }
 
+/// Everything needed to relaunch the host browser under a different profile at
+/// runtime: the original host args plus the resolved display string (set when a
+/// real-display takeover provider is active, so the relaunched browser
+/// re-attaches to the same KasmVNC display).
+struct LaunchContext {
+    args: HostArgs,
+    display: Option<String>,
+}
+
 /// Shared application state held by the listener. Cheap to clone (Arc).
 #[derive(Clone)]
 pub struct AppState {
     pub started_at: Instant,
     pub token: Option<String>,
-    pub ops_enabled: bool,
+    pub takeover_enabled: bool,
     pub health_enabled: bool,
     pub health_public: HealthPublic,
-    /// The single browser/profile identity bound to this host.
-    pub profile: Option<ProfileEntry>,
+    /// The currently-active browser/profile identity. One host serves one
+    /// active profile at a time, but it can be switched at runtime via
+    /// [`AppState::ensure_profile`] (the browser is relaunched under the new
+    /// profile). Behind a lock so all request handlers see swaps.
+    profile: Arc<RwLock<Option<ProfileEntry>>>,
+    /// Serializes profile switches so two concurrent switch requests can't race
+    /// on relaunch + lock handoff.
+    switch_lock: Arc<AsyncMutex<()>>,
+    /// Context for relaunching the browser on a switch. `None` for hosts that
+    /// cannot switch (e.g. test states built without a real launch).
+    launch_ctx: Option<Arc<LaunchContext>>,
     /// Recent-requests ring. `None` = feature disabled.
     pub recent_requests: Option<recent_requests::RecentRequests>,
     /// Real-display takeover proxy target and provider process keepalive.
-    pub display_takeover: Option<DisplayProxyState>,
+    pub takeover: Option<TakeoverProxyState>,
+    /// Short-lived URL capabilities for browser handoff into `/takeover/*`.
+    handoffs: Arc<RwLock<HashMap<String, HandoffEntry>>>,
 }
 
 impl AppState {
-    /// Return the single browser/profile identity bound to this host.
-    pub fn get_profile(&self) -> Option<&ProfileEntry> {
-        self.profile.as_ref()
+    /// Snapshot the currently-active browser/profile identity. Returns an owned
+    /// clone (cheap — the heavy browser handle is an `Arc`) so callers don't
+    /// hold the profile lock; an in-flight request that holds this snapshot
+    /// keeps its browser alive even if the host switches profiles underneath.
+    pub fn get_profile(&self) -> Option<ProfileEntry> {
+        self.profile
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
+
+    /// Ensure the active profile is `name`, relaunching the browser under it if
+    /// the host is currently bound to a different profile. Serialized so
+    /// concurrent switches can't race. The previous profile's browser (and its
+    /// on-disk profile lock) is torn down once the last in-flight request
+    /// holding it finishes; an in-progress human takeover on the old profile is
+    /// ended by the switch.
+    pub async fn ensure_profile(&self, name: &str) -> Result<(), Error> {
+        if self.get_profile().is_some_and(|p| p.name == name) {
+            return Ok(());
+        }
+        crate::sdk::profile::paths::validate_name(name)?;
+        let Some(ctx) = self.launch_ctx.clone() else {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "this host does not support runtime profile switching",
+            ));
+        };
+        let _switch = self.switch_lock.lock().await;
+        // Re-check under the switch lock: another switch may have landed first.
+        if self.get_profile().is_some_and(|p| p.name == name) {
+            return Ok(());
+        }
+        let choice = ProfileChoice::Persistent(name.to_string());
+        let handle = launch_browser(&ctx.args, ctx.display.as_deref(), &choice).await?;
+        let entry = ProfileEntry {
+            kind: "persistent".to_string(),
+            name: name.to_string(),
+            handle,
+        };
+        // Swap in the new entry; drop the old one outside the write lock so its
+        // browser/lock teardown (which waits on remaining Arc holders) doesn't
+        // block readers.
+        let old = self
+            .profile
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .replace(entry);
+        drop(old);
+        Ok(())
+    }
+}
+
+/// Build browser args for `profile` — injecting the takeover display when one
+/// is active — and launch the browser subprocess. Shared by the initial launch
+/// and runtime profile switches.
+async fn launch_browser(
+    args: &HostArgs,
+    display: Option<&str>,
+    profile: &ProfileChoice,
+) -> Result<Arc<BrowserHandle>, Error> {
+    let mut browser_args = args.clone();
+    browser_args.profile = profile.clone();
+    if let Some(display) = display {
+        browser_args.display = crate::host::bootstrap::DisplayMode::Headful;
+        browser_args
+            .engine_envs
+            .push(("DISPLAY".to_string(), display.to_string()));
+        // The display provider may have no window manager, so pin the headful
+        // window to fill the framebuffer. Chromium-family only; camoufox and
+        // lightpanda don't take these flags. chromiumoxide's `.arg()` prepends
+        // `--`, so pass these without leading dashes.
+        if !matches!(
+            args.browser,
+            BrowserChoice::Camoufox | BrowserChoice::Lightpanda
+        ) {
+            browser_args
+                .browser_args
+                .push("window-position=0,0".to_string());
+            browser_args.browser_args.push(format!(
+                "window-size={},{}",
+                crate::host::takeover::DISPLAY_WIDTH,
+                crate::host::takeover::DISPLAY_HEIGHT
+            ));
+        }
+    }
+    Ok(Arc::new(crate::host::browser::launch(&browser_args).await?))
 }
 
 #[derive(Clone, Copy)]
@@ -74,76 +185,63 @@ struct AuthInfo {
     authenticated: bool,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum TokenSource {
-    Bearer,
-    Query,
-    Cookie,
+#[derive(Clone)]
+struct HandoffEntry {
+    expires_at: Instant,
+    expires_at_system: SystemTime,
+    scope: &'static str,
+}
+
+#[derive(Clone)]
+struct HandoffAuth {
+    token: String,
+    remaining_s: u64,
+    secure_cookie: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct HandoffRequest {
+    #[serde(default)]
+    ttl_s: Option<u64>,
+    #[serde(default)]
+    tab_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct HandoffResponse {
+    takeover_url: String,
+    takeover_url_expires_at_rfc3339: String,
+    takeover_url_ttl_s: u64,
+    takeover_url_scope: &'static str,
 }
 
 impl AppState {
     /// Launch the host browser and return a complete, ready-to-serve state.
     pub async fn launch(args: &HostArgs) -> Result<Self, Error> {
-        let display_takeover = if let Takeover::Display { provider } = args.takeover {
+        let takeover = if let Takeover::On { provider } = args.takeover {
             if matches!(args.browser, BrowserChoice::Lightpanda) {
                 return Err(Error::new(
                     ErrorCode::BackendUnsupported,
                     "display takeover requires a rendered browser; lightpanda has no display",
                 ));
             }
-            Some(
-                crate::host::display::launch_display_provider(provider, args.display_quality)
-                    .await?,
-            )
+            Some(crate::host::takeover::launch_provider(provider, args.display_quality).await?)
         } else {
             None
         };
 
-        let name = match &args.profile {
-            ProfileChoice::Ephemeral => "default".to_string(),
-            ProfileChoice::Persistent(n) => n.clone(),
+        let (kind, name) = match &args.profile {
+            ProfileChoice::Ephemeral => ("ephemeral".to_string(), "default".to_string()),
+            ProfileChoice::Persistent(n) => ("persistent".to_string(), n.clone()),
         };
-        let kind = match &args.profile {
-            ProfileChoice::Ephemeral => "ephemeral".to_string(),
-            ProfileChoice::Persistent(_) => "persistent".to_string(),
-        };
-        let mut browser_args = args.clone();
-        if let Some(display) = display_takeover.as_ref().map(|d| d.display.clone()) {
-            browser_args.display = crate::host::bootstrap::DisplayMode::Headful;
-            browser_args
-                .engine_envs
-                .push(("DISPLAY".to_string(), display));
-            // The current display provider may have no window manager, so the headful
-            // browser opens at its default size and floats in a corner of
-            // the framebuffer. Pin the window to fill the display geometry
-            // so the page uses the full width. Chromium-family only;
-            // camoufox/lightpanda don't take these flags.
-            if !matches!(
-                args.browser,
-                BrowserChoice::Camoufox | BrowserChoice::Lightpanda
-            ) {
-                // chromiumoxide's `.arg()` prepends `--`, so pass these
-                // without leading dashes (a `--`-prefixed value becomes the
-                // unrecognized `----window-size` and is silently ignored).
-                browser_args
-                    .browser_args
-                    .push("window-position=0,0".to_string());
-                browser_args.browser_args.push(format!(
-                    "window-size={},{}",
-                    crate::host::display::DISPLAY_WIDTH,
-                    crate::host::display::DISPLAY_HEIGHT
-                ));
-            }
-        }
-        let handle = Arc::new(crate::host::browser::launch(&browser_args).await?);
-        let profile = Some(ProfileEntry { kind, name, handle });
+        let display = takeover.as_ref().map(|d| d.display.clone());
+        let handle = launch_browser(args, display.as_deref(), &args.profile).await?;
+        let entry = ProfileEntry { kind, name, handle };
 
         // Start recent-request subscriber if cap > 0.
         let recent = if args.recent_requests_cap > 0 {
             let ring = recent_requests::RecentRequests::new(args.recent_requests_cap);
-            if let Some(entry) = profile.as_ref() {
-                recent_requests::spawn_subscriber(entry.ws_url().to_string(), ring.clone());
-            }
+            recent_requests::spawn_subscriber(entry.ws_url().to_string(), ring.clone());
             Some(ring)
         } else {
             None
@@ -152,12 +250,18 @@ impl AppState {
         Ok(Self {
             started_at: Instant::now(),
             token: args.token.clone(),
-            ops_enabled: args.ops_enabled,
+            takeover_enabled: args.takeover_enabled,
             health_enabled: args.health_enabled,
             health_public: args.health_public,
-            profile,
+            profile: Arc::new(RwLock::new(Some(entry))),
+            switch_lock: Arc::new(AsyncMutex::new(())),
+            launch_ctx: Some(Arc::new(LaunchContext {
+                args: args.clone(),
+                display,
+            })),
             recent_requests: recent,
-            display_takeover,
+            takeover,
+            handoffs: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -271,7 +375,7 @@ fn emit_host_ready(listen: &str) {
     });
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
-    let _ = writeln!(handle, "{payload}");
+    let _ = writeln!(handle, "{}", agent_first_data::output_json(&payload));
 }
 
 /// `--listen` target. `Tcp` works everywhere; `Unix` is `cfg(unix)` only.
@@ -279,6 +383,151 @@ pub enum ListenAddr {
     Tcp(SocketAddr),
     #[cfg(unix)]
     Unix(std::path::PathBuf),
+}
+
+impl AppState {
+    fn issue_takeover_handoff(
+        &self,
+        ttl_s: u64,
+        _tab_id: Option<String>,
+    ) -> (String, HandoffEntry) {
+        self.prune_expired_handoffs();
+        let token = uuid::Uuid::new_v4().to_string();
+        let ttl = Duration::from_secs(ttl_s);
+        let entry = HandoffEntry {
+            expires_at: Instant::now() + ttl,
+            expires_at_system: SystemTime::now() + ttl,
+            scope: TAKEOVER_HANDOFF_SCOPE,
+        };
+        self.handoffs
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(token.clone(), entry.clone());
+        (token, entry)
+    }
+
+    fn takeover_handoff_auth(&self, req: &axum::extract::Request) -> Option<HandoffAuth> {
+        let token = query_handoff(req).or_else(|| cookie_handoff(req))?;
+        let now = Instant::now();
+        let entry = {
+            let guard = self.handoffs.read().unwrap_or_else(|e| e.into_inner());
+            guard.get(&token).cloned()
+        }?;
+        if entry.expires_at <= now || entry.scope != TAKEOVER_HANDOFF_SCOPE {
+            self.handoffs
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&token);
+            return None;
+        }
+        let remaining_s = entry
+            .expires_at
+            .saturating_duration_since(now)
+            .as_secs()
+            .max(1);
+        Some(HandoffAuth {
+            token,
+            remaining_s,
+            secure_cookie: request_is_https(req.headers(), req.uri()),
+        })
+    }
+
+    fn prune_expired_handoffs(&self) {
+        let now = Instant::now();
+        self.handoffs
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|_, entry| entry.expires_at > now);
+    }
+}
+
+async fn takeover_handoff_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: Uri,
+    axum::Json(body): axum::Json<HandoffRequest>,
+) -> Response {
+    if !state.takeover_enabled || state.takeover.is_none() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "code": "error",
+                "error_code": "backend_unsupported",
+                "error": "display takeover is not enabled",
+                "retryable": false,
+            })),
+        )
+            .into_response();
+    }
+
+    let ttl_s = body.ttl_s.unwrap_or(TAKEOVER_HANDOFF_DEFAULT_TTL_S);
+    if !(TAKEOVER_HANDOFF_MIN_TTL_S..=TAKEOVER_HANDOFF_MAX_TTL_S).contains(&ttl_s) {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "code": "error",
+            "error_code": "invalid_argument",
+            "error": format!(
+                "takeover handoff ttl_s must be {TAKEOVER_HANDOFF_MIN_TTL_S}-{TAKEOVER_HANDOFF_MAX_TTL_S}, got {ttl_s}"
+            ),
+            "retryable": false,
+        })))
+        .into_response();
+    }
+
+    let (token, entry) = state.issue_takeover_handoff(ttl_s, body.tab_id);
+    let mut takeover_url = match takeover_panel_url_from_request(&headers, &uri) {
+        Ok(url) => url,
+        Err(err) => {
+            let body = serde_json::json!({
+                "code": "error",
+                "error_code": err.error_code.as_str(),
+                "error": err.detail,
+                "retryable": err.retryable,
+            });
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response();
+        }
+    };
+    takeover_url
+        .query_pairs_mut()
+        .append_pair("handoff", &token);
+    Json(HandoffResponse {
+        takeover_url: takeover_url.to_string(),
+        takeover_url_expires_at_rfc3339: humantime::format_rfc3339_seconds(entry.expires_at_system)
+            .to_string(),
+        takeover_url_ttl_s: ttl_s,
+        takeover_url_scope: entry.scope,
+    })
+    .into_response()
+}
+
+fn takeover_panel_url_from_request(headers: &HeaderMap, uri: &Uri) -> Result<url::Url, Error> {
+    let scheme = request_scheme(headers, uri);
+    let host = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| Error::new(ErrorCode::InvalidEndpoint, "takeover handoff: missing Host"))?;
+    url::Url::parse(&format!("{scheme}://{host}/takeover/panel")).map_err(|e| {
+        Error::new(
+            ErrorCode::InvalidEndpoint,
+            format!("takeover handoff URL from host {host:?}: {e}"),
+        )
+    })
+}
+
+fn request_is_https(headers: &HeaderMap, uri: &Uri) -> bool {
+    request_scheme(headers, uri) == "https"
+}
+
+fn request_scheme<'a>(headers: &'a HeaderMap, uri: &'a Uri) -> &'a str {
+    if let Some(scheme) = uri.scheme_str() {
+        return scheme;
+    }
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(str::trim)
+        .filter(|v| *v == "https")
+        .unwrap_or("http")
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -294,44 +543,28 @@ pub fn build_router(state: AppState) -> Router {
             "/diagnostics",
             axum::routing::get(self::diagnostics::handler),
         )
-        .route("/cdp", axum::routing::get(self::cdp_proxy::handler));
-    if state.ops_enabled {
+        .route("/cdp", axum::routing::get(self::cdp_proxy::handler))
+        .route(
+            "/takeover/handoff",
+            axum::routing::post(takeover_handoff_handler),
+        );
+    if state.takeover_enabled {
         router = router
             .route(
-                "/ops/screencast",
-                axum::routing::get(self::ops_routes::screencast_entry),
+                "/takeover/panel",
+                axum::routing::any(self::takeover_routes::display_proxy),
             )
-            .route(
-                "/ops/screencast/assets/app.js",
-                axum::routing::get(self::ops_routes::js),
-            )
-            .route(
-                "/ops/screencast/assets/app.css",
-                axum::routing::get(self::ops_routes::css),
-            )
-            .route(
-                "/ops/screencast/ws",
-                axum::routing::get(self::ops_routes::screencast_route),
-            )
-            .route(
-                "/ops/screencast/input",
-                axum::routing::get(self::ops_routes::input_route),
-            )
-            .route(
-                "/ops/display",
-                axum::routing::any(self::ops_routes::display_proxy),
-            )
-            // The bare `/ops/display/` (the redirect target) must have its own
+            // The bare `/takeover/panel/` (the redirect target) must have its own
             // route: axum's `{*path}` wildcard does not match an empty segment,
             // so without this the display landing page 404s and only deep
             // asset/ws paths resolve.
             .route(
-                "/ops/display/",
-                axum::routing::any(self::ops_routes::display_proxy),
+                "/takeover/panel/",
+                axum::routing::any(self::takeover_routes::display_proxy),
             )
             .route(
-                "/ops/display/{*path}",
-                axum::routing::any(self::ops_routes::display_proxy),
+                "/takeover/panel/{*path}",
+                axum::routing::any(self::takeover_routes::display_proxy),
             );
     }
     router
@@ -397,7 +630,8 @@ async fn shutdown_signal() {
 /// Bearer-token middleware. `--health-public=minimal` allows GET /health
 /// through without a token (returning the reduced payload); everything else
 /// requires `Authorization: Bearer <token>` or `?token_secret=<token>` when a
-/// token was configured.
+/// token was configured. Takeover display URLs use short-lived `handoff=...`
+/// capabilities instead of embedding the long-lived host token.
 async fn token_middleware(
     State(state): State<AppState>,
     mut request: axum::extract::Request,
@@ -412,9 +646,9 @@ async fn token_middleware(
     let path = request.uri().path().to_string();
     let public_health = path == "/health" && matches!(state.health_public, HealthPublic::Minimal);
     if public_health {
-        let supplied = supplied_token(&request, false);
+        let supplied = supplied_long_token(&request, true);
         match supplied {
-            Some((t, _source)) if constant_time_eq(t.as_bytes(), expected.as_bytes()) => {
+            Some(t) if constant_time_eq(t.as_bytes(), expected.as_bytes()) => {
                 request.extensions_mut().insert(AuthInfo {
                     authenticated: true,
                 });
@@ -429,34 +663,50 @@ async fn token_middleware(
             }
         }
     }
-    let supplied = supplied_token(&request, path.starts_with("/ops"));
-    match supplied {
-        Some((t, source)) if constant_time_eq(t.as_bytes(), expected.as_bytes()) => {
+
+    if is_takeover_display_path(&path) {
+        if let Some(t) = bearer_token(&request) {
+            if constant_time_eq(t.as_bytes(), expected.as_bytes()) {
+                request.extensions_mut().insert(AuthInfo {
+                    authenticated: true,
+                });
+                return next.run(request).await;
+            }
+        }
+        if let Some(handoff) = state.takeover_handoff_auth(&request) {
             request.extensions_mut().insert(AuthInfo {
                 authenticated: true,
             });
             let mut response = next.run(request).await;
-            if source == TokenSource::Query && path.starts_with("/ops") {
-                set_ops_token_cookie(&mut response, expected);
-            }
-            response
+            set_takeover_handoff_cookie(
+                &mut response,
+                &handoff.token,
+                handoff.remaining_s,
+                handoff.secure_cookie,
+            );
+            return response;
+        }
+        return unauthorized();
+    }
+
+    let supplied = supplied_long_token(&request, true);
+    match supplied {
+        Some(t) if constant_time_eq(t.as_bytes(), expected.as_bytes()) => {
+            request.extensions_mut().insert(AuthInfo {
+                authenticated: true,
+            });
+            next.run(request).await
         }
         _ => unauthorized(),
     }
 }
 
-fn supplied_token(
-    req: &axum::extract::Request,
-    accept_ops_cookie: bool,
-) -> Option<(String, TokenSource)> {
-    let token = bearer_token(req)
-        .map(|t| (t, TokenSource::Bearer))
-        .or_else(|| query_token(req).map(|t| (t, TokenSource::Query)));
-    if accept_ops_cookie {
-        token.or_else(|| cookie_token(req).map(|t| (t, TokenSource::Cookie)))
-    } else {
-        token
-    }
+fn is_takeover_display_path(path: &str) -> bool {
+    path.starts_with("/takeover/") && path != "/takeover/handoff"
+}
+
+fn supplied_long_token(req: &axum::extract::Request, accept_query: bool) -> Option<String> {
+    bearer_token(req).or_else(|| accept_query.then(|| query_token(req)).flatten())
 }
 
 fn bearer_token(req: &axum::extract::Request) -> Option<String> {
@@ -475,23 +725,35 @@ fn query_token(req: &axum::extract::Request) -> Option<String> {
         .map(|(_, value)| value.into_owned())
 }
 
-fn cookie_token(req: &axum::extract::Request) -> Option<String> {
+fn query_handoff(req: &axum::extract::Request) -> Option<String> {
+    let q = req.uri().query()?;
+    url::form_urlencoded::parse(q.as_bytes())
+        .find(|(key, _)| key == "handoff")
+        .map(|(_, value)| value.into_owned())
+}
+
+fn cookie_handoff(req: &axum::extract::Request) -> Option<String> {
     let h = req.headers().get(header::COOKIE)?;
     let s = h.to_str().ok()?;
     for cookie in cookie::Cookie::split_parse(s).flatten() {
-        if cookie.name() == "afhttp_token" {
+        if cookie.name() == TAKEOVER_HANDOFF_COOKIE {
             return Some(cookie.value().to_string());
         }
     }
     None
 }
 
-fn set_ops_token_cookie(response: &mut Response, token: &str) {
-    let cookie = cookie::Cookie::build(("afhttp_token", token.to_string()))
-        .path("/ops")
+fn set_takeover_handoff_cookie(response: &mut Response, token: &str, max_age_s: u64, secure: bool) {
+    let max_age_s = max_age_s.min(i64::MAX as u64) as i64;
+    let mut builder = cookie::Cookie::build((TAKEOVER_HANDOFF_COOKIE, token.to_string()))
+        .path("/takeover")
+        .max_age(cookie::time::Duration::seconds(max_age_s))
         .http_only(true)
-        .same_site(cookie::SameSite::Lax)
-        .build();
+        .same_site(cookie::SameSite::Lax);
+    if secure {
+        builder = builder.secure(true);
+    }
+    let cookie = builder.build();
     if let Ok(value) = header::HeaderValue::from_str(&cookie.to_string()) {
         response.headers_mut().append(header::SET_COOKIE, value);
     }
@@ -558,12 +820,15 @@ pub fn test_state(token: Option<&str>, health_public: HealthPublic) -> AppState 
     AppState {
         started_at: Instant::now(),
         token: token.map(str::to_string),
-        ops_enabled: true,
+        takeover_enabled: true,
         health_enabled: true,
         health_public,
-        profile: None,
+        profile: Arc::new(RwLock::new(None)),
+        switch_lock: Arc::new(AsyncMutex::new(())),
+        launch_ctx: None,
         recent_requests: None,
-        display_takeover: None,
+        takeover: None,
+        handoffs: Arc::new(RwLock::new(HashMap::new())),
     }
 }
 
@@ -571,20 +836,20 @@ impl AppState {
     /// Test helper: populate the default profile slot with the given
     /// `BrowserHandle`. Replaces any existing default-profile entry.
     #[cfg(any(test, feature = "host"))]
-    pub fn with_default_browser(mut self, handle: Arc<BrowserHandle>) -> Self {
+    pub fn with_default_browser(self, handle: Arc<BrowserHandle>) -> Self {
         let entry = ProfileEntry {
             kind: "ephemeral".to_string(),
             name: "default".to_string(),
             handle,
         };
-        self.profile = Some(entry);
+        *self.profile.write().unwrap_or_else(|e| e.into_inner()) = Some(entry);
         self
     }
 
     /// Test helper: attach a fake display provider upstream listener.
     #[cfg(any(test, feature = "host"))]
-    pub fn with_display_takeover_for_tests(mut self, web_port: u16) -> Self {
-        self.display_takeover = Some(DisplayProxyState::for_tests(web_port));
+    pub fn with_takeover_for_tests(mut self, web_port: u16) -> Self {
+        self.takeover = Some(TakeoverProxyState::for_tests(web_port));
         self
     }
 
@@ -594,7 +859,7 @@ impl AppState {
     /// and don't need a real browser subprocess.
     #[cfg(any(test, feature = "host"))]
     pub fn with_persistent_profile(
-        mut self,
+        self,
         name: impl Into<String>,
         profile_path: std::path::PathBuf,
     ) -> Self {
@@ -605,7 +870,7 @@ impl AppState {
             name: n.clone(),
             handle,
         };
-        self.profile = Some(entry);
+        *self.profile.write().unwrap_or_else(|e| e.into_inner()) = Some(entry);
         self
     }
 }

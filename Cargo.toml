@@ -1,8 +1,8 @@
 [package]
 name = "agent-first-http"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
-description = "Give an AI agent any URL and get back a usable page — fetched directly, or rendered in a real browser when the page needs one — with a human able to take over the same browser for a login, captcha, or 2FA."
+description = "Give an AI agent its own isolated browser to actually open a URL — running JavaScript when the page needs it and returning the page as files the agent can read — so it works from the real page instead of a search guess, an empty app shell, or a login wall, all without touching the browser you use every day."
 license = "MIT"
 repository = "https://github.com/agentfirstkit/agent-first-http"
 readme = "README.md"
@@ -15,10 +15,6 @@ exclude = [".github/", "container/docker/compose.yaml", "container/docker/Docker
 name = "afhttp"
 path = "src/main.rs"
 required-features = ["cli"]
-
-[[example]]
-name = "manual_screencast_takeover"
-required-features = ["host"]
 
 [[example]]
 name = "manual_display_takeover"
@@ -35,7 +31,7 @@ host = [
     "dep:hyper",
     "dep:hyper-util",
 ]
-cli = ["sdk", "host", "dep:clap", "agent-first-data/cli-help", "agent-first-data/cli-help-markdown", "agent-first-data/skill-admin"]
+cli = ["sdk", "host", "dep:clap", "dep:psl", "agent-first-data/cli-help", "agent-first-data/cli-help-markdown", "agent-first-data/skill-admin"]
 
 [dependencies]
 # SDK floor — always compiled.
@@ -70,11 +66,12 @@ hyper-util = { version = "0.1", optional = true, features = ["server-auto", "tok
 # and skill-admin features are enabled only by the `cli` feature. Resolves from
 # crates.io; local monorepo development overrides it to the sibling crate via
 # `.cargo/config.toml` (`paths = ["../agent-first-data/rust"]`), which is not
-# copied into image builds — so they get the published 0.12.1 from the registry.
-agent-first-data = { version = "0.12.1", default-features = false }
+# copied into image builds — so they get the matching published version from the registry.
+agent-first-data = { version = "0.13.1", default-features = false }
 # CLI feature deps.
-clap = { version = "4", optional = true, features = ["derive"] }
+clap = { version = "4", optional = true, features = ["derive", "env"] }
 cookie = "0.18"
+psl = { version = "2", optional = true }
 
 [dev-dependencies]
 serde_json = "1"

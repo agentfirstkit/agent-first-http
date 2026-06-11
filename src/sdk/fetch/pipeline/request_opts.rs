@@ -48,7 +48,7 @@ pub(crate) struct PreparedCookie {
     pub(crate) http_only: Option<bool>,
     pub(crate) same_site: Option<SameSite>,
     pub(crate) partitioned: Option<bool>,
-    pub(crate) expires_unix: Option<i64>,
+    pub(crate) expires_epoch_s: Option<i64>,
 }
 
 impl PreparedRequestOptions {
@@ -120,7 +120,7 @@ impl PreparedRequestOptions {
         if builder.request.body.is_some() && !builder.request.form.is_empty() {
             return Err(Error::new(
                 ErrorCode::InvalidArgument,
-                "--data/--data-file and --form are mutually exclusive",
+                "--data and --form are mutually exclusive",
             ));
         }
         let body_payload = if let Some(bytes) = builder.request.body.clone() {
@@ -266,7 +266,7 @@ pub(crate) fn prepare_cookie(
         http_only: cookie.http_only(),
         same_site: cookie.same_site(),
         partitioned: cookie.partitioned(),
-        expires_unix: cookie_expires_unix(cookie),
+        expires_epoch_s: cookie_expires_epoch_s(cookie),
     })
 }
 
@@ -313,7 +313,7 @@ fn parse_cookie_header(value: &str) -> Result<Vec<PreparedCookie>, Error> {
     Ok(cookies)
 }
 
-fn cookie_expires_unix(cookie: &cookie::Cookie<'static>) -> Option<i64> {
+fn cookie_expires_epoch_s(cookie: &cookie::Cookie<'static>) -> Option<i64> {
     if let Some(max_age) = cookie.max_age() {
         return cookie::time::OffsetDateTime::now_utc()
             .checked_add(max_age)
@@ -327,7 +327,7 @@ fn cookie_expires_unix(cookie: &cookie::Cookie<'static>) -> Option<i64> {
 
 pub(crate) fn cookie_is_expired(cookie: &PreparedCookie) -> bool {
     cookie
-        .expires_unix
+        .expires_epoch_s
         .is_some_and(|expires| expires <= cookie::time::OffsetDateTime::now_utc().unix_timestamp())
 }
 
@@ -400,7 +400,7 @@ mod tests {
             http_only: None,
             same_site: None,
             partitioned: None,
-            expires_unix: None,
+            expires_epoch_s: None,
         }
     }
 
@@ -463,12 +463,12 @@ mod tests {
     }
 
     #[test]
-    fn cookie_expires_unix_handles_max_age_datetime_and_session() {
+    fn cookie_expires_epoch_s_handles_max_age_datetime_and_session() {
         // max-age resolves relative to now.
         let c = cookie::Cookie::build(("m", "v"))
             .max_age(cookie::time::Duration::seconds(3600))
             .build();
-        let exp = cookie_expires_unix(&c).unwrap();
+        let exp = cookie_expires_epoch_s(&c).unwrap();
         let now = cookie::time::OffsetDateTime::now_utc().unix_timestamp();
         assert!((exp - now - 3600).abs() <= 5, "exp={exp} now={now}");
 
@@ -477,23 +477,23 @@ mod tests {
         let c = cookie::Cookie::build(("d", "v"))
             .expires(Expiration::DateTime(dt))
             .build();
-        assert_eq!(cookie_expires_unix(&c), Some(1_000_000_000));
+        assert_eq!(cookie_expires_epoch_s(&c), Some(1_000_000_000));
 
         // session expiry has no unix stamp.
         let c = cookie::Cookie::build(("s", "v"))
             .expires(Expiration::Session)
             .build();
-        assert_eq!(cookie_expires_unix(&c), None);
+        assert_eq!(cookie_expires_epoch_s(&c), None);
     }
 
     #[test]
     fn cookie_is_expired_compares_against_now() {
         let mut past = prepared("x");
-        past.expires_unix = Some(1); // 1970
+        past.expires_epoch_s = Some(1); // 1970
         assert!(cookie_is_expired(&past));
 
         let mut future = prepared("x");
-        future.expires_unix = Some(i64::MAX / 2);
+        future.expires_epoch_s = Some(i64::MAX / 2);
         assert!(!cookie_is_expired(&future));
 
         // Session cookies (no stamp) never expire by time.

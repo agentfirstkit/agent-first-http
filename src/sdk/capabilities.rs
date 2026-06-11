@@ -13,10 +13,7 @@ pub struct CapabilitiesResponse {
     pub backend: BackendFamily,
     pub artifacts: BTreeMap<String, ArtifactSupport>,
     pub wait_modes: Vec<String>,
-    /// Whether this backend can expose a real-display takeover when the host
-    /// is started with `--takeover display --display-provider kasmvnc`.
-    pub display_takeover: bool,
-    pub ops_panel: OpsPanelSupport,
+    pub takeover: TakeoverSupport,
     pub profile: ProfileSupport,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub features: BTreeMap<String, FeatureSupport>,
@@ -38,18 +35,21 @@ pub struct ArtifactSupport {
     pub body_capture: Vec<String>,
 }
 
+/// Human-takeover panel support. `provider` names the concrete screen-share
+/// method (`kasmvnc`, …) — open-ended like `BackendFamily.family`, so adding a
+/// provider does not change this shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OpsPanelSupport {
+pub struct TakeoverSupport {
+    /// Whether this backend can expose a takeover panel at all when the host is
+    /// started with `--takeover-provider <provider>` (false for lightpanda).
+    #[serde(default)]
+    pub backend_capable: bool,
+    /// Whether this host actually has a takeover panel enabled right now.
     pub supported: bool,
-    pub screencast: bool,
     #[serde(default)]
-    pub display: bool,
+    pub panel_url: Option<String>,
     #[serde(default)]
-    pub screencast_url: Option<String>,
-    #[serde(default)]
-    pub display_url: Option<String>,
-    #[serde(default)]
-    pub display_provider: Option<String>,
+    pub provider: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

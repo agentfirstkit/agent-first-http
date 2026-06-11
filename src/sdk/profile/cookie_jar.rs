@@ -36,7 +36,7 @@ struct JarEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    expires_unix: Option<i64>,
+    expires_epoch_s: Option<i64>,
     #[serde(default, skip_serializing_if = "is_false")]
     secure: bool,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -59,7 +59,7 @@ pub struct RedactedCookie {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub expires_unix: Option<i64>,
+    pub expires_epoch_s: Option<i64>,
     #[serde(skip_serializing_if = "is_false")]
     pub secure: bool,
     #[serde(skip_serializing_if = "is_false")]
@@ -158,7 +158,7 @@ impl CookieJar {
                 name: e.name.clone(),
                 domain: e.domain.clone(),
                 path: e.path.clone(),
-                expires_unix: e.expires_unix,
+                expires_epoch_s: e.expires_epoch_s,
                 secure: e.secure,
                 http_only: e.http_only,
                 same_site: e.same_site.clone(),
@@ -301,7 +301,7 @@ impl JarEntry {
     }
 
     fn is_expired(&self, now: i64) -> bool {
-        match self.expires_unix {
+        match self.expires_epoch_s {
             Some(t) => t <= now,
             None => false, // Session-only cookies survive in the jar.
         }
@@ -317,7 +317,7 @@ impl JarEntry {
             .path()
             .map(str::to_string)
             .or_else(|| Some(default_path(request_url)));
-        let expires_unix = c.expires().and_then(|e| match e {
+        let expires_epoch_s = c.expires().and_then(|e| match e {
             Expiration::DateTime(dt) => Some(dt.unix_timestamp()),
             Expiration::Session => None,
         });
@@ -332,7 +332,7 @@ impl JarEntry {
             domain,
             host_only,
             path,
-            expires_unix,
+            expires_epoch_s,
             secure: c.secure().unwrap_or(false),
             http_only: c.http_only().unwrap_or(false),
             same_site,
@@ -485,7 +485,7 @@ mod tests {
             domain: Some("example.com".into()),
             host_only: false,
             path: Some("/".into()),
-            expires_unix: Some(1),
+            expires_epoch_s: Some(1),
             secure: false,
             http_only: false,
             same_site: None,

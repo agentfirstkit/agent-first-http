@@ -1,20 +1,4 @@
 command afhttp
-  command host
-    arg listen --listen
-    arg profile --profile
-    arg display --display
-    arg takeover --takeover
-    arg display_provider --display-provider
-    arg display_quality --display-quality-percent
-    arg browser --browser
-    arg browser_bin --browser-bin
-    arg token --token-secret
-    arg health --health
-    arg health_public --health-public
-    arg engine_envs --engine-env
-    arg browser_args --browser-arg
-    arg proxy --proxy-url
-    arg recent_requests_cap --recent-requests-cap
   command fetch
     arg url
     arg endpoint --endpoint-url
@@ -23,6 +7,8 @@ command afhttp
     arg browser_bin --browser-bin
     arg render --render
     arg tab --tab
+    arg takeover --takeover
+    arg profile --profile
     arg wait --wait
     arg headers --header
     arg cookies --cookie
@@ -31,14 +17,13 @@ command afhttp
     arg want --want
     arg method --method
     arg data --data
-    arg data_file --data-file
     arg form --form
     arg network_bodies --network-bodies
     arg network_body_max_bytes --network-body-max-bytes
     arg readiness_idle_ms --readiness-idle-ms
     arg readiness_stable_ms --readiness-stable-ms
     arg readiness_min_text_bytes --readiness-min-text-bytes
-    arg network_redact --network-redact
+    arg no_network_redact --no-network-redact
     arg out --out
     arg cookie_jar --cookie-jar
     arg no_cookie_jar --no-cookie-jar
@@ -52,6 +37,21 @@ command afhttp
     arg timeout_ms --timeout-ms
     arg capture_ws --capture-ws
     arg capture_sse --capture-sse
+  command host
+    arg listen --listen
+    arg profile --profile
+    arg display --display
+    arg takeover_provider --takeover-provider
+    arg takeover_quality_percent --takeover-quality-percent
+    arg browser --browser
+    arg browser_bin --browser-bin
+    arg token --token-secret
+    arg no_health --no-health
+    arg health_public --health-public
+    arg engine_envs --engine-env
+    arg browser_args --browser-arg
+    arg proxy --proxy-url
+    arg recent_requests_cap --recent-requests-cap
   command upload
     arg endpoint --endpoint-url
     arg token --token-secret
@@ -64,16 +64,10 @@ command afhttp
     arg token --token-secret
     arg tab --tab
     arg params --params
-    arg wait --wait
-  command ui
+    arg wait --wait-event
+  command panel
     arg endpoint --endpoint-url
     arg token --token-secret
-  command takeover
-    command prepare
-      arg url
-      arg endpoint --endpoint-url
-      arg token --token-secret
-      arg hard_site --hard-site
   command health
     arg endpoint --endpoint-url
     arg token --token-secret
@@ -85,15 +79,19 @@ command afhttp
       arg profile_root --profile-root
     command info
       arg name
+      arg backend --backend
       arg profile_root --profile-root
     command lock-status
       arg name
+      arg backend --backend
       arg profile_root --profile-root
     command downloads
       arg name
+      arg backend --backend
       arg profile_root --profile-root
     command delete
       arg name
+      arg backend --backend
       arg confirm --confirm
       arg profile_root --profile-root
     command prune
@@ -102,13 +100,14 @@ command afhttp
       arg profile_root --profile-root
     command cookies
       arg name
+      arg backend --backend
       arg profile_root --profile-root
   command tabs
     command list
       arg endpoint --endpoint-url
       arg token --token-secret
     command close
-      arg id
+      arg tab --tab
       arg endpoint --endpoint-url
       arg token --token-secret
   command skill
@@ -133,11 +132,13 @@ command afhttp
       arg port --port
       arg profile --profile
       arg shm_size --shm-size
+      arg takeover_provider --takeover-provider
       arg with --with
       arg rebuild --rebuild
       arg from_source --from-source
       arg context --context
       arg host_args
+      arg reveal_token_secret --reveal-token-secret
     command uninstall
       arg runtime --runtime
       arg name --name
@@ -146,7 +147,9 @@ command afhttp
       arg runtime --runtime
       arg name --name
       arg port --port
+      arg reveal_token_secret --reveal-token-secret
     command logs
       arg runtime --runtime
       arg name --name
       arg follow --follow
+      arg raw --raw

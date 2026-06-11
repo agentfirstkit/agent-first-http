@@ -11,10 +11,11 @@
 # unavailable, and its tests self-skip).
 #
 #   install-backends.sh chrome-headless-shell | lightpanda | fingerprint-chromium
-#                       | camoufox | kasmvnc
+#                       | camoufox | brave | kasmvnc
 set -euo pipefail
 
-# Pinned versions — bump these (and re-verify both images build) together.
+# Pinned versions for direct-download backends — bump these (and re-verify both
+# images build) together. Apt-backed Brave tracks Brave's stable repository.
 CHROME_FOR_TESTING_VERSION="149.0.7827.22"
 FINGERPRINT_CHROMIUM_VERSION="144.0.7559.132"
 CAMOUFOX_RELEASE="v150.0.2-beta.25"
@@ -109,6 +110,25 @@ install_camoufox() {
     rm -rf /usr/local/go "$GOPATH"
 }
 
+install_brave() {
+    # Brave publishes Debian packages for both amd64 and arm64. It stays in the
+    # Chromium/CDP family, so persistent profiles and iframe targets keep the
+    # same semantics as the stock chromium backend while adding Brave Shields.
+    local deb_arch
+    case "$arch" in
+        x86_64) deb_arch="amd64" ;;
+        aarch64|arm64) deb_arch="arm64" ;;
+        *) echo "skipping Brave on unsupported arch $arch"; return 0 ;;
+    esac
+    curl -4 --retry 5 --retry-all-errors -fsSLo /usr/share/keyrings/brave-browser-archive-keyring.gpg \
+        https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg
+    echo "deb [signed-by=/usr/share/keyrings/brave-browser-archive-keyring.gpg arch=${deb_arch}] https://brave-browser-apt-release.s3.brave.com/ stable main" \
+        > /etc/apt/sources.list.d/brave-browser-release.list
+    apt-get update
+    apt-get install -y --no-install-recommends brave-browser
+    rm -rf /var/lib/apt/lists/*
+}
+
 install_kasmvnc() {
     # External GPL process; afhttp only locates Xvnc on PATH and never links it.
     # matchbox is the minimal WM the headful display path needs.
@@ -131,6 +151,7 @@ case "${1:-}" in
     lightpanda)            install_lightpanda ;;
     fingerprint-chromium)  install_fingerprint_chromium ;;
     camoufox)              install_camoufox ;;
+    brave)                 install_brave ;;
     kasmvnc)               install_kasmvnc ;;
-    *) echo "usage: $0 {chrome-headless-shell|lightpanda|fingerprint-chromium|camoufox|kasmvnc}" >&2; exit 2 ;;
+    *) echo "usage: $0 {chrome-headless-shell|lightpanda|fingerprint-chromium|camoufox|brave|kasmvnc}" >&2; exit 2 ;;
 esac

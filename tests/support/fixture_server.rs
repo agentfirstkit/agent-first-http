@@ -113,6 +113,45 @@ pub const OBSERVATION_CONTEXTS_HTML: &str = "<!doctype html><html><body>\
      </script>\
      </body></html>";
 
+pub const CONTENT_ARTIFACT_HTML: &str = "<!doctype html><html><head><title>Content Fixture</title></head><body>\
+     <main>\
+       <h1>Plans</h1>\
+       <p>This fixture contains enough visible static copy to prove that the \
+       browser path is selected because the caller requested composed content, \
+       not because the HTTP shell detector considered the page empty. It also \
+       keeps the normal article text long enough for the fast path to see real \
+       content before the shadow-root price is rendered by the browser.</p>\
+       <section class=\"pricing-section\">\
+         <article class=\"product-card\">\
+           <h2>Starter VPS</h2>\
+           <price-widget></price-widget>\
+           <a href=\"/starter.html\">Explore this plan</a>\
+           <a>Missing href</a>\
+           <a href=\"\">Empty href</a>\
+           <a href=\"#\">Hash only</a>\
+           <a href=\"javascript:void(0)\">JS pseudo link</a>\
+           <a href=\"#pricing-details\">Pricing details anchor</a>\
+           <a href=\"https://external.example/partner\">Partner</a>\
+         </article>\
+         <article class=\"product-card\">\
+           <h2>Storage VPS</h2>\
+           <p>300 GB SSD</p>\
+           <a href=\"/pricing/\">Pricing</a>\
+         </article>\
+       </section>\
+       <table><tr><th>Plan</th><th>RAM</th></tr><tr><td>Starter VPS</td><td>4 GB</td></tr></table>\
+       <iframe src=\"/frame-inner.html\"></iframe>\
+     </main>\
+     <script>\
+       customElements.define('price-widget', class extends HTMLElement {\
+         connectedCallback() {\
+           const root = this.attachShadow({mode: 'open'});\
+           root.innerHTML = '<span>starting from</span> <strong>€ 4 . 49</strong> <span>max/mo.</span>';\
+         }\
+       });\
+     </script>\
+     </body></html>";
+
 pub const FRAME_INNER_HTML: &str = "<!doctype html><html><body>\
      <button id=\"frame-action\">Frame Action</button>\
      <input id=\"frame-field\" value=\"inside\">\
@@ -171,6 +210,7 @@ impl Fixture {
 ///   - `/never-xhr.html` → JS page with a never-ending XHR
 ///   - `/interactive.html` → controls for observation tests
 ///   - `/observation-contexts.html` → shadow/iframe observation fixture
+///   - `/content-artifact.html` → composed-content fixture
 ///   - `/frame-inner.html` → same-origin iframe body for observation tests
 ///   - `/observation-truncated.html` → large observation cap fixture
 ///   - `/404` → 404 with body "missing"
@@ -196,6 +236,7 @@ pub async fn spawn() -> Fixture {
         .route("/headers.json", get(headers_json))
         .route("/interactive.html", get(interactive_html))
         .route("/observation-contexts.html", get(observation_contexts_html))
+        .route("/content-artifact.html", get(content_artifact_html))
         .route("/frame-inner.html", get(frame_inner_html))
         .route(
             "/observation-truncated.html",
@@ -386,6 +427,15 @@ async fn observation_contexts_html() -> Response {
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
         OBSERVATION_CONTEXTS_HTML,
+    )
+        .into_response()
+}
+
+async fn content_artifact_html() -> Response {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        CONTENT_ARTIFACT_HTML,
     )
         .into_response()
 }

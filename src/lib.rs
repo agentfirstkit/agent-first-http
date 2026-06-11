@@ -14,7 +14,7 @@
 //! The library exposes the same surface as the CLI, in-process. It speaks
 //! CDP/HTTP to an `afhttp host`; it does **not** embed a browser engine.
 //! Everything that physically requires Chromium (launch, profile locking,
-//! ops panel) lives behind the `host` feature.
+//! takeover panel) lives behind the `host` feature.
 //!
 //! Pure SDK consumers depend with `default-features = false, features =
 //! ["sdk"]` and connect to an externally started `afhttp host`. The

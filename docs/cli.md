@@ -13,11 +13,11 @@ Give afhttp a URL and it returns the page plus the artifacts an agent needs to
 decide what to do next: rendered HTML, a DOM observation, a screenshot, and
 network and console logs. It covers the whole acquisition range behind one
 structured contract — a plain HTTP fetch when that works, a browser-backed
-fetch when it does not, deep network capture, a raw CDP escape hatch, and an
-ops panel for human takeover (login, captcha, 2FA).
+fetch when it does not, deep network capture, a raw CDP escape hatch, and a
+takeover panel for human takeover (login, captcha, 2FA).
 
 Two roles. `afhttp host` is the long-lived browser-host: it holds Chromium and
-one on-disk profile, and exposes a CDP endpoint plus the ops panel. The other
+one on-disk profile, and exposes a CDP endpoint plus the takeover panel. The other
 commands are short-lived drivers that connect to a host, do work, and write
 artifacts locally. Run the host where the browser needs to be and the driver
 wherever the agent runs.
@@ -32,11 +32,11 @@ Give afhttp a URL and it returns the page plus the artifacts an agent needs to
 decide what to do next: rendered HTML, a DOM observation, a screenshot, and
 network and console logs. It covers the whole acquisition range behind one
 structured contract — a plain HTTP fetch when that works, a browser-backed
-fetch when it does not, deep network capture, a raw CDP escape hatch, and an
-ops panel for human takeover (login, captcha, 2FA).
+fetch when it does not, deep network capture, a raw CDP escape hatch, and a
+takeover panel for human takeover (login, captcha, 2FA).
 
 Two roles. `afhttp host` is the long-lived browser-host: it holds Chromium and
-one on-disk profile, and exposes a CDP endpoint plus the ops panel. The other
+one on-disk profile, and exposes a CDP endpoint plus the takeover panel. The other
 commands are short-lived drivers that connect to a host, do work, and write
 artifacts locally. Run the host where the browser needs to be and the driver
 wherever the agent runs.
@@ -47,12 +47,11 @@ error_code. The tool never decides what a page means — the agent does.
 Usage: afhttp <COMMAND>
 
 Commands:
-  host          Run the browser host
   fetch         Fetch a URL
+  host          Run the browser host
   upload        Upload a local file to a browser tab via DOM.setFileInputFiles
   cdp           Send a raw CDP method
-  ui            Print or open the ops panel URL
-  takeover      Prepare a browser tab for human takeover
+  panel         Print a short-lived takeover URL
   health        Query /health
   capabilities  Query /capabilities
   profile       Local profile lifecycle commands
@@ -69,81 +68,6 @@ Options:
           Print version
 ```
 
-## afhttp host - Run the browser host
-
-```text
-Run the browser host
-
-Usage: host [OPTIONS] --listen <LISTEN>
-
-Options:
-  -h, --help
-          Print help
-
-Listener:
-      --listen <LISTEN>
-          Listener address: `tcp:host:port` or `unix:/path/to.sock`
-
-      --token-secret <TOKEN>
-          Bearer token required for clients on TCP listeners
-
-      --health <HEALTH>
-          Serve /health and /capabilities
-
-          [default: on]
-
-      --health-public <HEALTH_PUBLIC>
-          Make /health public with minimal payload
-
-          [default: off]
-
-      --recent-requests-cap <RECENT_REQUESTS_CAP>
-          Enable /recent-requests with a bounded ring of N entries. 0 = off
-
-          [default: 0]
-
-Profile:
-      --profile <PROFILE>
-          Profile name under $XDG_DATA_HOME/afhttp/profiles, or `-` for an ephemeral profile. One host binds exactly one profile
-
-          [default: -]
-
-Display & takeover:
-      --display <DISPLAY>
-          headless or headful. Omit when --takeover display should imply headful
-
-      --takeover <TAKEOVER>
-          Human takeover mode (like --render, pick one): none serves no takeover panel; screencast serves the CDP screencast panel at /ops/screencast (works headless, no VNC/X needed); display serves a real-display takeover at /ops/display through a display provider (currently KasmVNC) for hard sites (captcha, IME, flaky CDP input — implies headful)
-
-          [default: screencast]
-
-      --display-provider <DISPLAY_PROVIDER>
-          Display provider for `--takeover display`. Currently only `kasmvnc` is supported and it is the default when display takeover is selected
-
-      --display-quality-percent <DISPLAY_QUALITY>
-          Display-provider image quality hint, 0-100 (default 100 = crispest). Current KasmVNC provider maps this to 0-9 quality tiers; lower trades clarity for bandwidth. Adjustable live in the display panel too
-
-          [default: 100]
-
-Browser:
-      --browser <BROWSER>
-          auto | chromium | chrome | chrome_shell | fingerprint_chromium | edge | brave | lightpanda | camoufox
-
-          [default: auto]
-
-      --browser-bin <BROWSER_BIN>
-          Override browser binary path
-
-      --engine-env <K=V>
-          Propagate an environment variable into the browser subprocess. Repeatable. The host scrubs all other ambient env (`HTTP_PROXY`, `XDG_*`, `BROWSER`, locale, etc.) so a browsing environment can never silently honor configuration the agent did not request. Use the form `K=V`
-
-      --browser-arg <FLAG>
-          Append a raw flag to the backend subprocess command line. Repeatable. Use for backend-specific surfaces the host doesn't model first-class — for example `--browser-arg --fingerprint-brand=Chrome` to override fingerprint-chromium's brand string. Chromium honors last-wins for duplicate flags, so an explicit entry overrides any default the host applied
-
-      --proxy-url <PROXY>
-          Explicit upstream proxy URL. The host never inherits `HTTP_PROXY`/`HTTPS_PROXY` from the environment — this is the only way to route browser traffic. Example: `http://user:pass@proxy.local:8080` or `socks5://10.0.0.5:1080`
-```
-
 ## afhttp fetch - Fetch a URL
 
 ```text
@@ -157,31 +81,37 @@ Arguments:
 
 Options:
   -h, --help
-          Print help
+          Print help (see a summary with '-h')
 
 Connection:
       --endpoint-url <ENDPOINT>
-          CDP endpoint of a running host. Omit to spawn an inline ephemeral host for this one fetch
+          CDP endpoint of a running host. Omit to spawn an inline ephemeral host for ordinary browser fetches; with --takeover, omission discovers the standard local `afhttp-host`. Falls back to `AFHTTP_ENDPOINT_URL`
+
+          [env: AFHTTP_ENDPOINT_URL=]
 
       --token-secret <TOKEN>
-          Bearer token, if the host was started with `--token-secret`
+          Bearer token, if the host was started with `--token-secret`. Falls back to `AFHTTP_TOKEN_SECRET`
 
+          [env: AFHTTP_TOKEN_SECRET=]
+
+Inline host:
       --browser <BROWSER>
-          Browser backend for the inline host: auto, chromium, chrome, chrome_shell, fingerprint-chromium, edge, brave, lightpanda, camoufox. Ignored when --endpoint-url is set (the host owns its browser)
+          Browser backend for the inline host. Ignored when --endpoint-url is set (the host owns its browser)
 
           [default: auto]
+          [possible values: auto, chromium, chrome, chrome-headless-shell, fingerprint-chromium, edge, brave, lightpanda, camoufox]
 
       --browser-bin <PATH>
           Browser binary path for the inline host, for when auto-discovery can't find one. Ignored when --endpoint-url is set
 
-      --tab <new|<id>>
-          Tab target to use. "new" allocates a temporary target and closes it after fetch; an id reuses that target and leaves it open
-
-          [default: new]
-
 Rendering:
       --render <RENDER>
           Render strategy: none (HTTP fast path, no browser), auto (HTTP first, escalate to the browser on failure), or always (browser only)
+
+          Possible values:
+          - none:   HTTP fast path, no browser
+          - auto:   HTTP first, escalate to the browser on failure
+          - always: Browser only
 
           [default: auto]
 
@@ -190,12 +120,67 @@ Rendering:
 
           [default: auto]
 
-      --evaluate-after-wait <js>
+      --evaluate-after-wait <JS>
           JavaScript to evaluate after the wait condition resolves (repeatable). Runs in page context before artifacts are captured
 
       --want <WANT>
-          Artifacts to capture, comma-separated. Omit for all of: body, rendered_html, text, screenshot, network, console, observation (storage is opt-in only)
+          Artifacts to capture, comma-separated. Default: body, rendered_html, text, content, content_json, screenshot, network, console, observation. `content` is the agent-oriented composed page view (content.md); `content_json` its structured form with link/action candidates. `storage` is opt-in (sensitive: localStorage/IndexedDB)
 
+Session:
+      --tab <new|<id>>
+          Tab target: "new" allocates a temporary target and closes it after fetch; a CDP target id reuses that target and leaves it open (the same id `afhttp cdp`/`upload`/`tabs` accept)
+
+          [default: new]
+
+      --takeover
+          Escalate to human takeover when a wall (captcha/login/2FA) is hit: keep a persistent tab open and return its short-lived takeover URL in `next_action`, plus a re-fetch command for the same tab once the human clears the wall. Uses `--endpoint-url` / `AFHTTP_ENDPOINT_URL` when set; otherwise discovers the standard local `afhttp-host` container (build one with `afhttp container install`)
+
+      --profile <PROFILE>
+          Host profile to use for this fetch. Switches the host's active profile if it differs (per-domain isolation), relaunching its browser. With `--takeover` and no `--profile`, the profile defaults to the URL's registrable domain (eTLD+1). Requires a host via `--endpoint-url`, or the standard local takeover host discovered by `--takeover`
+
+Request:
+      --header <NAME:VALUE>
+          Add a request header (repeatable). Format: `Name:value` (a space after the colon is allowed)
+
+      --cookie <NAME=VALUE>
+          Add a request cookie (repeatable). Format: `name=value`
+
+      --user-agent <USER_AGENT>
+          Override the User-Agent header for this fetch
+
+      --method <METHOD>
+          HTTP method. Common values: POST, PUT, PATCH, DELETE
+
+          [default: GET]
+
+      --data <STRING|@FILE>
+          Request body as a string. Prefix with `@` to read from a file path (e.g. `--data @payload.json`). Mutually exclusive with `--form`
+
+      --form <NAME=VALUE>
+          Add a form field (repeatable). Sends body as `application/x-www-form-urlencoded`. Mutually exclusive with `--data`. Format: `name=value`
+
+Network capture:
+      --network-bodies <NETWORK_BODIES>
+          Capture response bodies for network requests: off, xhr (XHR/fetch only), or all
+
+          [default: off]
+          [possible values: off, xhr, all]
+
+      --network-body-max-bytes <NETWORK_BODY_MAX_BYTES>
+          Per-body cap for each captured network sub-request body, in bytes (see `--max-response-bytes` for the main HTTP-path response body)
+
+          [default: 10485760]
+
+      --no-network-redact
+          Disable redaction of sensitive values in network.json (redacted by default). Writes raw Authorization/Cookie headers and token-bearing query params to the artifact — only for trusted local debugging
+
+      --capture-ws
+          Capture WebSocket frame payloads to network-bodies/<id>.frames.jsonl. Frames may carry bearer tokens, session IDs, and message content — treat the artifact as sensitive
+
+      --capture-sse
+          Capture SSE event payloads to network-bodies/<id>.frames.jsonl. Events may carry PII; treat the artifact as sensitive
+
+Readiness tuning:
       --readiness-idle-ms <READINESS_IDLE_MS>
           Network quiet window used by --wait auto, in milliseconds
 
@@ -216,57 +201,9 @@ Rendering:
 
           [default: 500]
 
-Request:
-      --header <K:V>
-          Add a request header (repeatable). Format: `Name: value`
-
-      --cookie <name=value>
-          Add a request cookie (repeatable). Format: `name=value`
-
-      --user-agent <USER_AGENT>
-          Override the User-Agent header for this fetch
-
-      --method <METHOD>
-          HTTP method. Common values: POST, PUT, PATCH, DELETE
-
-          [default: GET]
-
-      --data <DATA>
-          Request body as a string. Prefix with `@` to read from a file path (e.g. `--data @payload.json`). Mutually exclusive with `--form`
-
-      --data-file <DATA_FILE>
-          Request body from a file path. Mutually exclusive with `--form`
-
-      --form <key=value>
-          Add a form field (repeatable). Sends body as `application/x-www-form-urlencoded`. Mutually exclusive with `--data`. Format: `key=value`
-
-Network capture:
-      --network-bodies <NETWORK_BODIES>
-          Capture response bodies for network requests: off, xhr (XHR/fetch only), or all
-
-          [default: off]
-          [possible values: off, xhr, all]
-
-      --network-body-max-bytes <NETWORK_BODY_MAX_BYTES>
-          Per-body cap for captured network bodies, in bytes
-
-          [default: 10485760]
-
-      --network-redact <NETWORK_REDACT>
-          Redact sensitive values in network.json: on or off. On by default; off writes raw Authorization/Cookie headers and token-bearing query params to the artifact — only disable for trusted local debugging
-
-          [default: on]
-          [possible values: on, off]
-
-      --capture-ws
-          Capture WebSocket frame payloads to network-bodies/<id>.frames.jsonl. Frames may carry bearer tokens, session IDs, and message content — treat the artifact as sensitive
-
-      --capture-sse
-          Capture SSE event payloads to network-bodies/<id>.frames.jsonl. Events may carry PII; treat the artifact as sensitive
-
 Output:
       --out <OUT>
-          Directory to write artifacts into. Defaults to an `afhttp-out` subdirectory of the working directory
+          Directory to write artifacts into. Defaults to `afhttp-out` under the system temporary directory. Files persist there for inspection
 
 Cookies:
       --cookie-jar <COOKIE_JAR>
@@ -277,7 +214,7 @@ Cookies:
 
 HTTP transport:
       --max-response-bytes <MAX_RESPONSE_BYTES>
-          Upper bound on the HTTP-path response body, in bytes. Default 1 GiB (`1073741824`). `0` disables the cap entirely. When the cap is hit, the fetch returns successfully with a `network_body_truncated` warning and the prefix bytes that were collected
+          Upper bound on the main HTTP-path response body, in bytes (see `--network-body-max-bytes` for captured network sub-request bodies). Default 1 GiB (`1073741824`). `0` disables the cap entirely. When the cap is hit, the fetch returns successfully with a `network_body_truncated` warning and the prefix bytes that were collected
 
           [default: 1073741824]
 
@@ -291,7 +228,7 @@ HTTP transport:
           Disable TLS certificate verification for this fetch's HTTP path. Dangerous; leaves the connection open to MITM. Use only against known-self-signed environments
 
       --timeout-ms <TIMEOUT_MS>
-          Overall fetch timeout, in milliseconds
+          Overall fetch timeout, in milliseconds. Applies to both the HTTP fast path and the browser path
 
           [default: 30000]
 
@@ -307,6 +244,82 @@ Retry:
           [default: 250]
 ```
 
+## afhttp host - Run the browser host
+
+```text
+Run the browser host
+
+Usage: host [OPTIONS] --listen <LISTEN>
+
+Options:
+  -h, --help
+          Print help
+
+Listener:
+      --listen <LISTEN>
+          Listener address: `tcp:host:port` or `unix:/path/to.sock`
+
+      --token-secret <TOKEN>
+          Bearer token required for clients on TCP listeners
+
+Profile:
+      --profile <PROFILE>
+          Initial logical profile name, or `-` for an ephemeral profile. Persistent profiles are stored under $XDG_DATA_HOME/afhttp/profiles/<backend>/<name>. A host serves one active profile at a time but can switch at runtime when a client passes `?profile=` on the `/cdp` connection (the browser is relaunched)
+
+          [default: -]
+
+Display & takeover:
+      --display <DISPLAY>
+          Display mode. Omit when `--takeover-provider` should imply headful
+
+          [possible values: headless, headful]
+
+      --takeover-provider <TAKEOVER_PROVIDER>
+          Real-display takeover provider: `off` serves no takeover surface; a provider name (currently `kasmvnc`) serves a real-display takeover at /takeover/panel for hard sites (captcha, IME, flaky CDP input — implies headful)
+
+          [default: off]
+          [possible values: off, kasmvnc]
+
+      --takeover-quality-percent <TAKEOVER_QUALITY_PERCENT>
+          Takeover-provider image quality hint, 0-100 percent (default 100 = crispest). The KasmVNC provider maps this to 0-9 quality tiers; lower trades clarity for bandwidth. Adjustable live in the display panel too
+
+          [default: 100]
+
+Browser:
+      --browser <BROWSER>
+          Browser backend
+
+          [default: auto]
+          [possible values: auto, chromium, chrome, chrome-headless-shell, fingerprint-chromium, edge, brave, lightpanda, camoufox]
+
+      --browser-bin <BROWSER_BIN>
+          Override browser binary path
+
+      --engine-env <NAME=VALUE>
+          Propagate an environment variable into the browser subprocess. Repeatable. The host scrubs all other ambient env (`HTTP_PROXY`, `XDG_*`, `BROWSER`, locale, etc.) so a browsing environment can never silently honor configuration the agent did not request. Use the form `NAME=VALUE`
+
+      --browser-arg <FLAG>
+          Append a raw flag to the backend subprocess command line. Repeatable. Use for backend-specific surfaces the host doesn't model first-class — for example `--browser-arg --fingerprint-brand=Chrome` to override fingerprint-chromium's brand string. Chromium honors last-wins for duplicate flags, so an explicit entry overrides any default the host applied
+
+      --proxy-url <PROXY>
+          Explicit upstream proxy URL. The host never inherits `HTTP_PROXY`/`HTTPS_PROXY` from the environment — this is the only way to route browser traffic. Example: `http://user:pass@proxy.local:8080` or `socks5://10.0.0.5:1080`
+
+Diagnostics:
+      --no-health
+          Disable serving /health and /capabilities (served by default)
+
+      --health-public <HEALTH_PUBLIC>
+          Make /health public with minimal payload
+
+          [default: off]
+          [possible values: off, minimal]
+
+      --recent-requests-cap <RECENT_REQUESTS_CAP>
+          Enable /recent-requests with a bounded ring of N entries. 0 = off
+
+          [default: 0]
+```
+
 ## afhttp upload - Upload a local file to a browser tab via DOM.setFileInputFiles
 
 ```text
@@ -316,13 +329,17 @@ Usage: upload [OPTIONS] --endpoint-url <ENDPOINT> --tab <TAB> --selector <SELECT
 
 Options:
       --endpoint-url <ENDPOINT>
-          CDP endpoint of the running host
+          CDP endpoint of the running host (e.g. `ws://127.0.0.1:9222`). Falls back to `AFHTTP_ENDPOINT_URL`
+
+          [env: AFHTTP_ENDPOINT_URL=]
 
       --token-secret <TOKEN>
-          Bearer token, if the host was started with `--token-secret`
+          Bearer token, if the host was started with `--token-secret`. Falls back to `AFHTTP_TOKEN_SECRET`
+
+          [env: AFHTTP_TOKEN_SECRET=]
 
       --tab <TAB>
-          Tab ID to operate in
+          CDP target id (tab) to operate in
 
       --selector <SELECTOR>
           CSS selector for the `<input type=file>` element
@@ -347,80 +364,45 @@ Arguments:
 
 Options:
       --endpoint-url <ENDPOINT>
-          CDP endpoint of the running host
+          CDP endpoint of the running host (e.g. `ws://127.0.0.1:9222`). Falls back to `AFHTTP_ENDPOINT_URL`
+
+          [env: AFHTTP_ENDPOINT_URL=]
 
       --token-secret <TOKEN>
-          Bearer token, if the host was started with `--token-secret`
+          Bearer token, if the host was started with `--token-secret`. Falls back to `AFHTTP_TOKEN_SECRET`
+
+          [env: AFHTTP_TOKEN_SECRET=]
 
       --tab <TAB>
-          CDP target id to drive
+          CDP target id (tab) to drive
 
-      --params <PARAMS>
+      --params <JSON|@->
           JSON literal, or `@-` to read from stdin
 
-      --wait <WAIT>
+      --wait-event <WAIT>
           "<event>:<timeout>" — wait for a CDP event before exiting
 
   -h, --help
           Print help
 ```
 
-## afhttp ui - Print or open the ops panel URL
+## afhttp panel - Print a short-lived takeover URL
 
 ```text
-Print or open the ops panel URL
+Print a short-lived takeover URL
 
-Usage: ui [OPTIONS] --endpoint-url <ENDPOINT>
+Usage: panel [OPTIONS] --endpoint-url <ENDPOINT>
 
 Options:
       --endpoint-url <ENDPOINT>
-          CDP endpoint of the running host
+          CDP endpoint of the running host (e.g. ws://127.0.0.1:9222). Falls back to `AFHTTP_ENDPOINT_URL`
+
+          [env: AFHTTP_ENDPOINT_URL=]
 
       --token-secret <TOKEN>
-          Bearer token, if the host requires one (appended to the panel URLs)
+          Bearer token, if the host requires one. Falls back to `AFHTTP_TOKEN_SECRET`
 
-  -h, --help
-          Print help
-```
-
-## afhttp takeover - Prepare a browser tab for human takeover
-
-```text
-Prepare a browser tab for human takeover
-
-Usage: takeover <COMMAND>
-
-Commands:
-  prepare  Open a persistent tab, navigate it, and print the takeover URL
-  help     Print this message or the help of the given subcommand(s)
-
-Options:
-  -h, --help
-          Print help
-```
-
-### afhttp takeover prepare - Open a persistent tab, navigate it, and print the takeover URL
-
-```text
-Open a persistent tab, navigate it, and print the takeover URL
-
-Usage: prepare [OPTIONS] <URL>
-
-Arguments:
-  <URL>
-          URL to open in the takeover tab
-
-Options:
-      --endpoint-url <ENDPOINT>
-          CDP endpoint of the running host. Defaults to the container host port
-
-          [default: ws://127.0.0.1:9222]
-
-      --token-secret <TOKEN>
-          Bearer token, if the host was started with `--token-secret`
-
-      --hard-site
-          Prefer the real display takeover URL and warn when the host lacks it
+          [env: AFHTTP_TOKEN_SECRET=]
 
   -h, --help
           Print help
@@ -435,10 +417,14 @@ Usage: health [OPTIONS] --endpoint-url <ENDPOINT>
 
 Options:
       --endpoint-url <ENDPOINT>
-          CDP endpoint of the running host
+          CDP endpoint of the running host (e.g. `ws://127.0.0.1:9222`). Falls back to `AFHTTP_ENDPOINT_URL`
+
+          [env: AFHTTP_ENDPOINT_URL=]
 
       --token-secret <TOKEN>
-          Bearer token, if the host was started with `--token-secret`
+          Bearer token, if the host was started with `--token-secret`. Falls back to `AFHTTP_TOKEN_SECRET`
+
+          [env: AFHTTP_TOKEN_SECRET=]
 
   -h, --help
           Print help
@@ -453,10 +439,14 @@ Usage: capabilities [OPTIONS] --endpoint-url <ENDPOINT>
 
 Options:
       --endpoint-url <ENDPOINT>
-          CDP endpoint of the running host
+          CDP endpoint of the running host (e.g. `ws://127.0.0.1:9222`). Falls back to `AFHTTP_ENDPOINT_URL`
+
+          [env: AFHTTP_ENDPOINT_URL=]
 
       --token-secret <TOKEN>
-          Bearer token, if the host was started with `--token-secret`
+          Bearer token, if the host was started with `--token-secret`. Falls back to `AFHTTP_TOKEN_SECRET`
+
+          [env: AFHTTP_TOKEN_SECRET=]
 
   -h, --help
           Print help
@@ -511,6 +501,9 @@ Arguments:
           Profile name
 
 Options:
+      --backend <BACKEND>
+          Profile backend scope (for example chromium, brave, camoufox). Required when the same profile name exists under multiple backends
+
       --profile-root <PROFILE_ROOT>
           Profiles root directory. Defaults to `$XDG_DATA_HOME/afhttp/profiles`
 
@@ -530,6 +523,9 @@ Arguments:
           Profile name
 
 Options:
+      --backend <BACKEND>
+          Profile backend scope (for example chromium, brave, camoufox). Required when the same profile name exists under multiple backends
+
       --profile-root <PROFILE_ROOT>
           Profiles root directory. Defaults to `$XDG_DATA_HOME/afhttp/profiles`
 
@@ -549,6 +545,9 @@ Arguments:
           Profile name
 
 Options:
+      --backend <BACKEND>
+          Profile backend scope (for example chromium, brave, camoufox). Required when the same profile name exists under multiple backends
+
       --profile-root <PROFILE_ROOT>
           Profiles root directory. Defaults to `$XDG_DATA_HOME/afhttp/profiles`
 
@@ -568,6 +567,9 @@ Arguments:
           Profile name to delete
 
 Options:
+      --backend <BACKEND>
+          Profile backend scope (for example chromium, brave, camoufox). Required when the same profile name exists under multiple backends
+
       --confirm <CONFIRM>
           Confirmation guard: must equal the profile name for the delete to proceed
 
@@ -611,6 +613,9 @@ Arguments:
           Profile name
 
 Options:
+      --backend <BACKEND>
+          Profile backend scope (for example chromium, brave, camoufox). Required when the same profile name exists under multiple backends
+
       --profile-root <PROFILE_ROOT>
           Profiles root directory. Defaults to `$XDG_DATA_HOME/afhttp/profiles`
 
@@ -644,10 +649,14 @@ Usage: list [OPTIONS] --endpoint-url <ENDPOINT>
 
 Options:
       --endpoint-url <ENDPOINT>
-          CDP endpoint URL (e.g. `ws://127.0.0.1:9222`)
+          CDP endpoint URL (e.g. `ws://127.0.0.1:9222`). Falls back to `AFHTTP_ENDPOINT_URL`
+
+          [env: AFHTTP_ENDPOINT_URL=]
 
       --token-secret <TOKEN>
-          Bearer token, if the host was started with `--token-secret`
+          Bearer token, if the host was started with `--token-secret`. Falls back to `AFHTTP_TOKEN_SECRET`
+
+          [env: AFHTTP_TOKEN_SECRET=]
 
   -h, --help
           Print help
@@ -658,18 +667,21 @@ Options:
 ```text
 Close a target by its CDP target id
 
-Usage: close [OPTIONS] --endpoint-url <ENDPOINT> <ID>
-
-Arguments:
-  <ID>
-          CDP target id to close (e.g. `41A0F1E0FD…`)
+Usage: close [OPTIONS] --tab <TAB> --endpoint-url <ENDPOINT>
 
 Options:
+      --tab <TAB>
+          CDP target id (tab) to close (e.g. `41A0F1E0FD…`)
+
       --endpoint-url <ENDPOINT>
-          CDP endpoint URL (e.g. `ws://127.0.0.1:9222`)
+          CDP endpoint URL (e.g. `ws://127.0.0.1:9222`). Falls back to `AFHTTP_ENDPOINT_URL`
+
+          [env: AFHTTP_ENDPOINT_URL=]
 
       --token-secret <TOKEN>
-          Bearer token, if the host was started with `--token-secret`
+          Bearer token, if the host was started with `--token-secret`. Falls back to `AFHTTP_TOKEN_SECRET`
+
+          [env: AFHTTP_TOKEN_SECRET=]
 
   -h, --help
           Print help
@@ -702,14 +714,16 @@ Usage: status [OPTIONS]
 
 Options:
       --agent <AGENT>
-          Agent to manage: all, codex, claude-code, opencode
+          Agent to manage
 
           [default: all]
+          [possible values: all, codex, claude-code, opencode]
 
       --scope <SCOPE>
-          Skill scope: personal or project (project is Claude Code / opencode only)
+          Skill scope (project is Claude Code / opencode only)
 
           [default: personal]
+          [possible values: personal, project]
 
       --skills-dir <SKILLS_DIR>
           Skills directory; requires a single concrete --agent
@@ -727,14 +741,16 @@ Usage: install [OPTIONS]
 
 Options:
       --agent <AGENT>
-          Agent to manage: all, codex, claude-code, opencode
+          Agent to manage
 
           [default: all]
+          [possible values: all, codex, claude-code, opencode]
 
       --scope <SCOPE>
-          Skill scope: personal or project (project is Claude Code / opencode only)
+          Skill scope (project is Claude Code / opencode only)
 
           [default: personal]
+          [possible values: personal, project]
 
       --skills-dir <SKILLS_DIR>
           Skills directory; requires a single concrete --agent
@@ -755,14 +771,16 @@ Usage: uninstall [OPTIONS]
 
 Options:
       --agent <AGENT>
-          Agent to manage: all, codex, claude-code, opencode
+          Agent to manage
 
           [default: all]
+          [possible values: all, codex, claude-code, opencode]
 
       --scope <SCOPE>
-          Skill scope: personal or project (project is Claude Code / opencode only)
+          Skill scope (project is Claude Code / opencode only)
 
           [default: personal]
+          [possible values: personal, project]
 
       --skills-dir <SKILLS_DIR>
           Skills directory; requires a single concrete --agent
@@ -785,7 +803,7 @@ Commands:
   install    Build the host image if missing and run the container; print the client command
   uninstall  Stop and remove the container (--purge also removes the image and cache)
   status     Report whether the host is running, with its endpoint and client command
-  logs       Stream the container logs (raw passthrough, not a JSON envelope)
+  logs       Capture or explicitly stream the container logs
   help       Print this message or the help of the given subcommand(s)
 
 Options:
@@ -824,17 +842,19 @@ Options:
           [default: 9222]
 
       --profile <PROFILE>
-          Profile name inside the container
-
-          [default: work]
+          Initial logical profile name inside the container. Defaults to `-` (ephemeral); persistent profiles are scoped by backend
 
       --shm-size <SHM_SIZE>
-          Chromium /dev/shm size
+          Chromium /dev/shm size. Defaults to `1g`, or `2g` when takeover is on
 
-          [default: 1g]
+      --takeover-provider <TAKEOVER_PROVIDER>
+          Real-display takeover provider for the built host. A provider name (default `kasmvnc`) builds a Brave + KasmVNC takeover-ready host with an ephemeral initial profile and 2g /dev/shm; `off` builds a lean headless host
 
-      --with <BACKEND>
-          Optional backend to build in (repeatable): chrome-headless-shell, lightpanda, fingerprint-chromium, camoufox, kasmvnc
+          [default: kasmvnc]
+          [possible values: off, kasmvnc]
+
+      --with <COMPONENT>
+          Extra component to build into the image (repeatable). Browser backends: chrome-headless-shell, lightpanda, fingerprint-chromium, camoufox, brave. Plus the takeover provider: kasmvnc
 
       --rebuild
           Rebuild the image even if it already exists
@@ -844,6 +864,9 @@ Options:
 
       --context <DIR>
           Source checkout to build from with --from-source (default: current dir, then the checkout this afhttp binary was built from)
+
+      --reveal-token-secret
+          Explicitly include the long-lived host token in stdout
 
   -h, --help
           Print help (see a summary with '-h')
@@ -903,14 +926,17 @@ Options:
 
           [default: 9222]
 
+      --reveal-token-secret
+          Explicitly include the long-lived host token in stdout
+
   -h, --help
           Print help (see a summary with '-h')
 ```
 
-### afhttp container logs - Stream the container logs (raw passthrough, not a JSON envelope)
+### afhttp container logs - Capture or explicitly stream the container logs
 
 ```text
-Stream the container logs (raw passthrough, not a JSON envelope)
+Capture or explicitly stream the container logs
 
 Usage: logs [OPTIONS]
 
@@ -928,8 +954,11 @@ Options:
 
           [default: afhttp-host]
 
-  -f, --follow
+      --follow
           Follow the log output
+
+      --raw
+          Stream raw runtime logs instead of returning a JSON summary
 
   -h, --help
           Print help (see a summary with '-h')

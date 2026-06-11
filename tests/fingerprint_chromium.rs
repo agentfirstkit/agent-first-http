@@ -46,7 +46,7 @@ async fn spawn_host_with_fingerprint_chromium() -> Option<(String, tempfile::Tem
         browser: BrowserChoice::FingerprintChromium,
         browser_bin: Some(bin),
         token: None,
-        ops_enabled: true,
+        takeover_enabled: true,
         health_enabled: true,
         health_public: HealthPublic::Off,
         engine_envs: Vec::new(),

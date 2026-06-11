@@ -43,7 +43,7 @@ fn make_args(browser_bin: std::path::PathBuf) -> HostArgs {
         browser: BrowserChoice::Chromium,
         browser_bin: Some(browser_bin),
         token: None,
-        ops_enabled: true,
+        takeover_enabled: true,
         health_enabled: true,
         health_public: HealthPublic::Off,
         engine_envs: Vec::new(),

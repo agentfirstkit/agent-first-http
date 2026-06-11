@@ -4,6 +4,7 @@
 pub mod body;
 pub mod collectors;
 pub mod console;
+pub mod content;
 pub mod network;
 pub mod network_bodies;
 pub mod observation;

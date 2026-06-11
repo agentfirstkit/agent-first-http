@@ -30,7 +30,7 @@ pub async fn build(state: &AppState, authenticated: bool) -> HealthResponse {
     let default_entry = state.get_profile();
     let mut backend_error = None;
     let mut tabs_active = 0;
-    let backend_connected = if let Some(entry) = default_entry {
+    let backend_connected = if let Some(entry) = &default_entry {
         match probe_tabs_active(entry).await {
             Ok(count) => {
                 tabs_active = count;
@@ -47,12 +47,12 @@ pub async fn build(state: &AppState, authenticated: bool) -> HealthResponse {
     } else {
         false
     };
-    let backend = default_entry.map(|e| BackendInfo {
+    let backend = default_entry.as_ref().map(|e| BackendInfo {
         family: e.handle.family.clone(),
         version: e.handle.version.clone(),
         connected: backend_connected,
     });
-    let profile_snapshot = default_entry.map(|e| ProfileSnapshot {
+    let profile_snapshot = default_entry.as_ref().map(|e| ProfileSnapshot {
         kind: e.kind.clone(),
         name: if e.kind == "persistent" {
             Some(e.name.clone())
@@ -108,7 +108,7 @@ async fn probe_tabs_active(entry: &ProfileEntry) -> Result<u32, Error> {
 }
 
 fn status_string(state: &AppState, degraded: bool) -> String {
-    if state.profile.is_none() {
+    if state.get_profile().is_none() {
         "starting".into()
     } else if degraded {
         "degraded".into()

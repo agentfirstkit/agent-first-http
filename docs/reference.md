@@ -1,6 +1,6 @@
 # Agent-First HTTP - Protocol Reference
 
-> Reflects the v0.5.0 implementation. [architecture.md](architecture.md) is the canonical contract; this file documents the on-wire JSON shapes the CLI and SDK actually emit. Coverage of the eight artifact tokens and 9 CLI commands matches `src/shared/`, `src/sdk/`, and `src/host/`.
+> Reflects the v0.6.0 implementation. [architecture.md](architecture.md) is the canonical contract; this file documents the on-wire JSON shapes the CLI and SDK actually emit. Coverage of the ten artifact tokens and 11 CLI commands matches `src/shared/`, `src/sdk/`, and `src/host/`.
 
 All command outputs are single JSON objects on stdout unless otherwise stated. Artifact files are referenced by absolute `*_file` paths in those JSON envelopes.
 
@@ -22,12 +22,15 @@ other commands may omit it.
 | Field | Present | Description |
 | --- | --- | --- |
 | `request_id` | always on success | Per-fetch id used in the default artifact directory. |
+| `request_url` | always on success | URL originally requested by the agent. |
 | `status` | if HTTP response exists | Final HTTP status code. 4xx/5xx are successful transport responses, not `error` envelopes. |
 | `final_url` | always on success | URL after redirects/navigation. |
 | `tab_id` | when a browser tab was used | CDP target/tab id for follow-up `afhttp cdp` or `afhttp fetch --tab`. |
 | `body_file` | when `body` requested and body exists | Raw HTTP response body path. |
 | `rendered_html_file` | when produced | Serialized post-JS DOM path. |
 | `text_file` | when produced | `document.body.innerText` path. |
+| `content_file` | when produced | Agent-oriented composed page view (`content.md`); the artifact to read first. |
+| `content_json_file` | when produced | Structured form of `content` with link/action candidates (`content.json`). |
 | `screenshot_file` | when produced | Full-page PNG path. |
 | `network_file` | when produced | Deep network log path. |
 | `console_file` | when produced | Console-event log path. |
@@ -39,6 +42,7 @@ other commands may omit it.
 | `download_url` | with `download_file` | URL that triggered the download. |
 | `download_state` | with `download_file` | Mechanical state, currently `"completed"`. |
 | `warnings` | if non-empty | Per-artifact or per-entry non-fatal failures. |
+| `next_action` | `fetch --takeover`, when human takeover is needed | Present only when `--takeover` could not reach the target with the warmed profile. See [Next action](#next-action). |
 | `trace` | always | Render decision, readiness, phase timings, bytes, and escalation signals. |
 
 Example:
@@ -47,17 +51,20 @@ Example:
 {
   "code": "fetch",
   "request_id": "req",
+  "request_url": "https://example.com/",
   "status": 200,
   "final_url": "https://example.com/",
   "tab_id": "page-1",
-  "body_file": "/work/afhttp-out/req/body.html",
-  "rendered_html_file": "/work/afhttp-out/req/rendered.html",
-  "text_file": "/work/afhttp-out/req/text.txt",
-  "screenshot_file": "/work/afhttp-out/req/page.png",
-  "network_file": "/work/afhttp-out/req/network.json",
-  "console_file": "/work/afhttp-out/req/console.json",
-  "observation_file": "/work/afhttp-out/req/observation.json",
-  "storage_file": "/work/afhttp-out/req/storage.json",
+  "body_file": "/tmp/afhttp-out/req/body.html",
+  "content_file": "/tmp/afhttp-out/req/content.md",
+  "content_json_file": "/tmp/afhttp-out/req/content.json",
+  "rendered_html_file": "/tmp/afhttp-out/req/rendered.html",
+  "text_file": "/tmp/afhttp-out/req/text.txt",
+  "screenshot_file": "/tmp/afhttp-out/req/page.png",
+  "network_file": "/tmp/afhttp-out/req/network.json",
+  "console_file": "/tmp/afhttp-out/req/console.json",
+  "observation_file": "/tmp/afhttp-out/req/observation.json",
+  "storage_file": "/tmp/afhttp-out/req/storage.json",
   "trace": {
     "render_decision": "browser",
     "render_mode": "auto",
@@ -93,6 +100,37 @@ Warnings do not fail the whole fetch.
 | `detail` | Human-readable detail. |
 | `request_id` | Optional network request id when the warning applies to one network entry. |
 
+### Next action
+
+`afhttp fetch --takeover` emits `next_action` only when the warmed profile did
+not reach the target and a human must drive the browser. When the profile already
+reaches the target, the result carries the usual artifacts and no `next_action`.
+
+| Field | Description |
+| --- | --- |
+| `kind` | Currently `"human_takeover"`. |
+| `takeover_url` | Complete short-lived takeover display URL with `handoff=...` for a human to open in a local browser. |
+| `takeover_url_expires_at_rfc3339` | Expiry time for the handoff URL. Default TTL is 900 seconds. |
+| `takeover_url_ttl_s` | Handoff TTL in seconds. |
+| `takeover_url_scope` | Scope for the capability; currently `takeover`, valid only under `/takeover/*`. |
+| `recommended_command` | A ready-to-run `afhttp fetch` that re-fetches the same `--tab` once the human has cleared the wall. |
+
+```json
+{
+  "code": "fetch",
+  "final_url": "https://example.com/login",
+  "tab_id": "page-7",
+  "next_action": {
+    "kind": "human_takeover",
+    "takeover_url": "http://host.mesh.internal:9222/takeover/panel?handoff=…",
+    "takeover_url_expires_at_rfc3339": "2026-06-11T08:15:00Z",
+    "takeover_url_ttl_s": 900,
+    "takeover_url_scope": "takeover",
+    "recommended_command": "afhttp fetch \"https://example.com/login\" --tab page-7 --endpoint-url ws://host.mesh.internal:9222 …"
+  }
+}
+```
+
 ## Trace
 
 `duration_ms`, `timeout_ms`, `current_stage`, and `stages` are always present once fetch execution begins. Successful and failed fetch envelopes use the same trace shape.
@@ -114,7 +152,7 @@ Warnings do not fail the whole fetch.
 | `capture_reason` | Why artifacts were captured, for example `wait_satisfied`, `readiness_timeout`, or `download`. |
 | `cookie_jar_file` | Absolute cookie jar path used for this fetch, when a jar was resolved. |
 | `cookie_jar_warning` | Structured note when `/profile` was unavailable and implicit cookie-jar persistence was disabled. |
-| `sensitive_capture` | Non-empty when `--network-redact off`, `--capture-ws`, or `--capture-sse` may write tokens/PII into artifacts. |
+| `sensitive_capture` | Non-empty when `--no-network-redact`, `--capture-ws`, or `--capture-sse` may write tokens/PII into artifacts. |
 | `stages[]` | Ordered stage timings. Each stage has `name`, `status`, and `duration_ms`; `status` is one of `ok`, `error`, `timeout`, or `started`. |
 
 Failure envelopes for `afhttp fetch` also include this trace:
@@ -269,7 +307,7 @@ Each `entries[]` item may include:
 | `body_base64_file` | Optional captured binary body path when bytes are not UTF-8. |
 | `payload_hints` | Mechanical hints such as `json_valid`, `json_top_level_type`, `graphql_operation_name`, `graphql_operation_type`. |
 
-Sensitive request/response headers are redacted by default in `network.json`: `cookie`, `authorization`, `proxy-authorization`, `set-cookie`, and token/secret-like header names. `--network-redact off` disables this for trusted local debugging and may write raw tokens, cookies, and PII into `network.json`; `trace.sensitive_capture` records that opt-in.
+Sensitive request/response headers are redacted by default in `network.json`: `cookie`, `authorization`, `proxy-authorization`, `set-cookie`, and token/secret-like header names. `--no-network-redact` disables this for trusted local debugging and may write raw tokens, cookies, and PII into `network.json`; `trace.sensitive_capture` records that opt-in.
 
 Network body capture modes:
 
@@ -290,10 +328,11 @@ shell. Pending requests are not hidden: `network.summary.incomplete_total`,
 
 ## CDP Result
 
-`afhttp cdp` returns the CDP method result without adding semantic wrappers:
+`afhttp cdp` wraps the raw CDP method result under `result` so CDP fields cannot
+collide with the top-level command envelope:
 
 ```json
-{"result":{"type":"number","value":42}}
+{"code":"cdp","result":{"result":{"type":"number","value":42}}}
 ```
 
 CDP method errors return the standard error envelope with `error_code: "cdp_error"` or `error_code: "cdp_timeout"`.
@@ -326,10 +365,9 @@ Unauthenticated public health, when enabled, returns only `status`.
 | `backend` | Browser family/version. |
 | `artifacts` | Per-artifact `supported` booleans and notes. |
 | `wait_modes` | Supported wait modes. |
-| `display_takeover` | Whether the backend can expose real-display takeover when the host is launched with `--takeover display --display-provider kasmvnc` (`true` for Chromium-family and camoufox, `false` for lightpanda). |
-| `ops_panel` | Screencast/input support plus provider-neutral display fields (`display_url`, `display_provider`) when display takeover is enabled. |
+| `takeover` | Human-takeover panel support: `backend_capable` (whether the backend can expose a panel at all, `true` for Chromium-family and camoufox, `false` for lightpanda), `supported` (whether this host has a panel enabled now), and `panel_url`/`provider` (the concrete screen-share method, e.g. `kasmvnc`) when enabled. |
 | `profile` | Persistent/ephemeral support. |
-| `features` | Implemented feature support such as `selector_visible`, `network_body_capture`, `capture_ws`, `capture_sse`, `display_takeover`, `ops_panel`, `recent_requests`, and `profile_persistence`; risky captures include a `risk` string. |
+| `features` | Implemented feature support such as `selector_visible`, `network_body_capture`, `capture_ws`, `capture_sse`, `takeover`, `recent_requests`, and `profile_persistence`; risky captures include a `risk` string. |
 | `limits` | Defaults and hard limits relevant to fetch planning. |
 
 Capabilities describe support; they do not guarantee a later page-specific artifact capture will succeed.
@@ -340,10 +378,10 @@ The distributed afhttp binary does not bundle browser engines or KasmVNC. It loc
 
 | Dependency | Used by | Notes |
 | --- | --- | --- |
-| Chromium/Chrome/Edge/Brave/fingerprint-chromium | Browser-backed fetch, screenshots, default ops panel | Set `--browser-bin` to override discovery for the primary browser binary. |
+| Chromium/Chrome/Edge/Brave/fingerprint-chromium | Browser-backed fetch, screenshots, real-display takeover | Set `--browser-bin` to override discovery for the primary browser binary. |
 | lightpanda | `--browser lightpanda` | Rendering subset; no display takeover. |
 | foxbridge + camoufox | `--browser camoufox` | `--browser-bin` may point at foxbridge; camoufox is discovered separately on `PATH`. |
-| KasmVNC `Xvnc` | `--takeover display --display-provider kasmvnc` | GPLv2 external process only. Install it in the container and ensure `Xvnc` plus the KasmVNC web root are present; optional env overrides are `AFHTTP_KASMVNC_BIN` and `AFHTTP_KASMVNC_WEB_ROOT`. |
+| KasmVNC `Xvnc` | `--takeover-provider kasmvnc` | GPLv2 external process only. Install it in the container and ensure `Xvnc` plus the KasmVNC web root are present; optional env overrides are `AFHTTP_KASMVNC_BIN` and `AFHTTP_KASMVNC_WEB_ROOT`. |
 | matchbox-window-manager (or openbox) | KasmVNC display provider | Optional. Keeps the headful browser maximized so the client can resize the framebuffer to the operator's window (`resize=remote`); absent, the panel falls back to scaled rendering. Discovered on `PATH`. |
 
 ## Profile Results
@@ -358,8 +396,9 @@ Profile lifecycle commands are local-only.
   "profile_root": "/Users/me/.local/share/afhttp/profiles",
   "profiles": [
     {
+      "backend": "brave",
       "name": "work",
-      "path": "/Users/me/.local/share/afhttp/profiles/work",
+      "path": "/Users/me/.local/share/afhttp/profiles/brave/work",
       "locked": true,
       "metadata_present": true,
       "last_used_at_rfc3339": "2026-05-27T01:23:45Z",
@@ -371,7 +410,7 @@ Profile lifecycle commands are local-only.
 
 ### `profile info`
 
-Returns one profile object with metadata, lock owner when known, approximate size, path, and browser-family hints.
+Returns one profile object with backend, metadata, lock owner when known, approximate size, path, and browser-family hints. Pass `--backend` when multiple backend scopes contain the same logical profile name.
 
 ### `profile lock-status`
 
@@ -384,12 +423,13 @@ Read-only listing of files the browser captured in the profile download director
 ```json
 {
   "code": "profile_downloads",
+  "backend": "brave",
   "name": "work",
-  "download_dir": "/Users/me/.local/share/afhttp/profiles/work/downloads",
+  "download_dir": "/Users/me/.local/share/afhttp/profiles/brave/work/downloads",
   "downloads": [
     {
       "filename": "report.csv",
-      "path": "/Users/me/.local/share/afhttp/profiles/work/downloads/report.csv",
+      "path": "/Users/me/.local/share/afhttp/profiles/brave/work/downloads/report.csv",
       "size_bytes": 12345,
       "state": "completed"
     }
@@ -426,6 +466,8 @@ Examples below are representative `error` / Chromium `errorText` strings.
 | `artifact_capture_timeout` | `fetch timed out after 30000ms during capture_screenshot` | Use the partial result or retry with a larger `--timeout-ms` / smaller artifact set. |
 | `artifact_empty` | `text artifact was empty after trimming whitespace` | Check `trace` readiness fields and `network.json`; the page may still be a shell. |
 | `artifact_tiny` | `text artifact was 12 bytes; threshold is 32` | Inspect network bodies or retry with a larger timeout if the page is still rendering. |
+| `bot_wall_detected` | `detected bot wall/security challenge` | Treat the page as unverified target content; use `next_action` / `fetch --takeover` instead of answering from the challenge page. |
+| `security_challenge_detected` | `detected security challenge/access denied page` | Treat the page as unverified target content; use human takeover or report that verification failed. |
 | `network_not_idle` | `1 request(s) were still pending/responded at capture` | Inspect pending entries and captured XHR bodies before deciding whether to retry. |
 | `pending_xhr_at_capture` | `pending XHR/fetch/EventSource at capture` | Treat `status: 200` as incomplete acquisition until network payloads are checked. |
 | `observation_empty` | `observation contained zero projected nodes` | Fall back to rendered/text/network artifacts or retry after readiness improves. |

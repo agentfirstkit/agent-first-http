@@ -1,6 +1,25 @@
 # Agent-First HTTP
 
-Give an AI agent any URL and get back a usable page — fetched directly, or rendered in a real browser when the page needs one — with a human able to take over the same browser for a login, captcha, or 2FA.
+Give an AI agent its own isolated browser to actually open a URL — running JavaScript when the page needs it and returning the page as files the agent can read — so it works from the real page instead of a search guess, an empty app shell, or a login wall, all without touching the browser you use every day.
+
+## What problem does this solve?
+
+Agents are bad at opening pages. Ask one to read a specific URL and it tends to:
+
+- answer from a **search-result guess** instead of the page you actually named,
+- hand back an **empty app shell** because the page needed JavaScript it never ran, or
+- mistake a **bot check or login wall** for the real content.
+
+afhttp fixes this by loading the actual URL itself — falling back to a real
+browser of its own to render JavaScript when the page needs one — and returns
+the page as files the agent can inspect, so it answers from verified content
+instead of a guess.
+
+That browser is **fully isolated**: it runs separately from the browser you use
+every day and never touches your cookies, logins, or history. When a page needs
+a login, captcha, or 2FA, you can take over that same isolated browser, clear
+the wall yourself, and let the agent continue — without ever mixing it into your
+own session.
 
 ## The basics: hand it a URL, get the page back as data
 
@@ -8,25 +27,28 @@ Give afhttp a URL; it writes the page to disk and prints one line of JSON saying
 
 ```bash
 $ afhttp fetch https://example.com
-{"code":"fetch","status":200,"final_url":"https://example.com/","body_file":"afhttp-out/<id>/body.html","text_file":"afhttp-out/<id>/text.txt"}
+{"code":"fetch","request_url":"https://example.com","status":200,"final_url":"https://example.com/","body_file":"/tmp/afhttp-out/<id>/body.html","text_file":"/tmp/afhttp-out/<id>/text.txt"}
 ```
 
 That is the whole job: **hand it a URL, get the page back as files an agent can read** — never a terminal blob to scrape, and every failure a stable `error_code` rather than a guess.
 
-By default afhttp sends a **plain HTTP request** and only starts a **real browser** when the page actually needs one (`--render none` forces the fast path, `--render always` forces the browser, `--render auto` decides). A browser-backed fetch captures more of what a human would look at — rendered HTML, a screenshot, a DOM observation, the network and console logs — each a flat `*_file` field on the same JSON, never nested:
+By default afhttp sends a **plain HTTP request** and only starts a **real browser** when the page actually needs one (`--render none` forces the fast path, `--render always` forces the browser, `--render auto` decides). A browser-backed fetch captures more of what a human would look at — an agent-oriented composed page view (`content.md`, the one to read first), rendered HTML, a screenshot, a DOM observation, the network and console logs — each a flat `*_file` field on the same JSON, never nested:
 
 ```json
 {
   "code": "fetch",
+  "request_url": "https://example.com",
   "status": 200,
   "final_url": "https://example.com/",
-  "body_file": "afhttp-out/<id>/body.html",
-  "rendered_html_file": "afhttp-out/<id>/rendered.html",
-  "text_file": "afhttp-out/<id>/text.txt",
-  "screenshot_file": "afhttp-out/<id>/page.png",
-  "network_file": "afhttp-out/<id>/network.json",
-  "console_file": "afhttp-out/<id>/console.json",
-  "observation_file": "afhttp-out/<id>/observation.json"
+  "body_file": "/tmp/afhttp-out/<id>/body.html",
+  "content_file": "/tmp/afhttp-out/<id>/content.md",
+  "content_json_file": "/tmp/afhttp-out/<id>/content.json",
+  "rendered_html_file": "/tmp/afhttp-out/<id>/rendered.html",
+  "text_file": "/tmp/afhttp-out/<id>/text.txt",
+  "screenshot_file": "/tmp/afhttp-out/<id>/page.png",
+  "network_file": "/tmp/afhttp-out/<id>/network.json",
+  "console_file": "/tmp/afhttp-out/<id>/console.json",
+  "observation_file": "/tmp/afhttp-out/<id>/observation.json"
 }
 ```
 
@@ -39,23 +61,45 @@ afhttp is not "headless Chromium." How hard a site fights back decides which eng
 - **fingerprint-chromium** — Chromium that randomizes its fingerprint per profile, for bot-walled sites.
 - **camoufox** — a Firefox stealth fork (via foxbridge) for sites that fingerprint Chromium.
 - **lightpanda** — an ultralight engine covering a rendering subset without a full browser.
-- **edge / brave** — when a target expects that specific engine.
+- **edge** — Microsoft Edge, when a target expects that specific engine.
+- **brave** — Brave, with built-in ad/tracker blocking; also the browser a human drives during takeover.
 
 ## Human takeover: a person drives the same browser when a step needs it
 
-For a manual login, captcha, or 2FA, a person drives the *same* browser the agent is using — through an ops panel that needs no VNC/X server by default, or optional real-display takeover for hard sites currently backed by KasmVNC — then hands it back with session state intact.
+When a fetch hits a login, captcha, or 2FA wall, `afhttp fetch <url> --takeover` keeps a persistent tab open on a takeover-ready host and hands back a complete short-lived `takeover_url` a human opens to drive the *same* browser the agent is using, via real-display takeover backed by KasmVNC. Once the human is past the wall, the agent re-fetches the same tab to continue.
 
 ## Running it: inline for a one-shot, a host for sessions
 
 `afhttp fetch <url>` with no `--endpoint-url` runs **inline** — it spins up a sandboxed browser for that one fetch and tears it down. Zero setup; use it for stateless, one-shot acquisition.
 
-For state that outlives a single fetch — a reused login, a warmed profile, human takeover — run a long-lived **host** in a container (the isolation boundary) and point the driver at it with `--endpoint-url`. One command builds the image from a recipe embedded in the binary and runs it (Docker, Podman, or Apple `container`, auto-detected — override with `--runtime`); it prints a bearer token and a ready-to-run driver command:
+For state that outlives a single fetch — a reused login, a warmed profile, human takeover — run a long-lived **host** in a container (the isolation boundary). One command builds the image from a recipe embedded in the binary and runs it (Docker, Podman, or Apple `container`, auto-detected — override with `--runtime`); it prints structured connection metadata and a ready-to-run driver command without exposing the long-lived host token by default:
 
 ```bash
 afhttp container install
 ```
 
-Building from a source checkout instead? `docker compose -f container/docker/compose.yaml up --build` is the from-source path. See [docs/deployment.md](docs/deployment.md) for the full container setup and security posture.
+`container install` is takeover-ready by default (Brave + KasmVNC + an
+ephemeral initial profile + a 2g `/dev/shm`). A takeover fetch auto-discovers
+the standard local `afhttp-host`, switches to a persistent per-site profile
+derived from the URL, and lets a human clear a wall on the same browser the
+agent drives:
+
+```bash
+afhttp fetch "$URL" --takeover
+```
+
+If the warmed profile already reaches the target, `fetch --takeover` just returns
+the page. Otherwise it keeps a persistent tab open and returns a `next_action`
+with `kind: "human_takeover"`, a `takeover_url` for a human to open, and a
+`recommended_command` that re-fetches the same `--tab` once the wall is cleared.
+`fetch --takeover` needs a running host (auto-discovered locally, or supplied
+with `--endpoint-url` / `AFHTTP_ENDPOINT_URL`) and a browser render
+(`--render auto` or `always`); it does not auto-create containers.
+
+Building from a source checkout instead? Use `afhttp container install --from-source`
+(or `docker compose -f container/docker/compose.yaml up --build` when driving the
+runtime directly). See [docs/deployment.md](docs/deployment.md) for the full
+container setup, upgrades, and security posture.
 
 ## Adopt it: hand afhttp to your agent
 
@@ -98,7 +142,7 @@ To remove it, run `afhttp skill uninstall`.
 ## Docs
 
 - [Overview](docs/overview.md) — narrative introduction with worked examples and Rust SDK usage
-- [Architecture](docs/architecture.md) — the canonical contract: roles, CLI surface, profile model, artifacts, health/capabilities endpoints, ops panel, backends, error codes, SDK
+- [Architecture](docs/architecture.md) — the canonical contract: roles, CLI surface, profile model, artifacts, health/capabilities endpoints, human takeover, backends, error codes, SDK
 - [Deployment](docs/deployment.md) — running the host in a container: backends, security, human takeover
 - [Design Principles](docs/design.md) — codebase-wide conventions
 - [CLI Reference](docs/cli.md) — flag-by-flag reference for the `afhttp` binary

@@ -5,6 +5,7 @@ use crate::shared::error::{Error, ErrorCode};
 
 pub(super) fn resolve_profile_dir(
     choice: &ProfileChoice,
+    backend: &str,
 ) -> Result<
     (
         PathBuf,
@@ -29,8 +30,9 @@ pub(super) fn resolve_profile_dir(
         ProfileChoice::Persistent(name) => {
             crate::sdk::profile::paths::validate_name(name)?;
             let root = crate::sdk::profile::paths::default_root();
-            crate::sdk::profile::paths::ensure_no_filesystem_collision(&root, name)?;
-            let dir = root.join(name);
+            let backend_dir = crate::sdk::profile::paths::ensure_backend_dir(&root, backend)?;
+            crate::sdk::profile::paths::ensure_no_filesystem_collision(&backend_dir, name)?;
+            let dir = backend_dir.join(name);
             std::fs::create_dir_all(&dir).map_err(|e| {
                 Error::new(
                     ErrorCode::ProfileRootUnavailable,
@@ -38,8 +40,14 @@ pub(super) fn resolve_profile_dir(
                 )
             })?;
             let guard = crate::sdk::profile::lock::Guard::acquire(&dir)?;
-            let meta = crate::sdk::profile::meta::ProfileMeta::new(name);
             let meta_path = dir.join("afhttp-profile.json");
+            let meta = if meta_path.exists() {
+                let existing = crate::sdk::profile::read_profile_meta(&meta_path)?;
+                crate::sdk::profile::validate_profile_meta(&existing, backend, name, &dir)?;
+                existing.touch_for_host()
+            } else {
+                crate::sdk::profile::meta::ProfileMeta::new(name, backend)
+            };
             let meta_json = serde_json::to_vec_pretty(&meta).map_err(|e| {
                 Error::new(
                     ErrorCode::InternalError,

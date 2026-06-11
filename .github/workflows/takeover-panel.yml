@@ -1,10 +1,9 @@
-name: Ops & Takeover
+name: Display Takeover
 
-# The ops-panel and display-takeover suites are flaky by design: ops tests spawn
-# (and sometimes leak) chromium children under Docker resource pressure, and the
-# takeover suite drives a real KasmVNC display. They run here on a nightly
-# schedule (and on demand) in their own workflow so they never gate a merge or a
-# release — `wait_for_ci_green` watches ci.yml only.
+# The display-takeover suite is flaky by design: it drives a real KasmVNC
+# display under the Docker harness. It runs here on a nightly schedule (and on
+# demand) in its own workflow so it never gates a merge or a release —
+# `wait_for_ci_green` watches ci.yml only.
 
 on:
   schedule:
@@ -14,7 +13,7 @@ on:
 # afhttp depends on a sibling crate at ../agent-first-data/rust via a Cargo path
 # override; check out both repos in the layout the Docker harness expects.
 jobs:
-  ops-takeover:
+  display-takeover:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -26,9 +25,6 @@ jobs:
           repository: agentfirstkit/agent-first-data
           path: kit/spores/agent-first-data
           fetch-depth: 1
-      - name: Ops-panel suite (serialized, Docker harness)
-        working-directory: kit/spores/agent-first-http
-        run: tests/test.sh ops
       - name: Display-takeover suite (KasmVNC, Docker harness)
         working-directory: kit/spores/agent-first-http
         run: tests/test.sh takeover

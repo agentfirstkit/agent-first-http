@@ -57,6 +57,7 @@ RUN chmod +x /usr/local/bin/install-backends.sh \
     && install-backends.sh lightpanda \
     && install-backends.sh fingerprint-chromium \
     && install-backends.sh camoufox \
+    && install-backends.sh brave \
     && install-backends.sh kasmvnc
 
 # Cargo caches live on named volumes so docker rebuilds don't redownload crates.
@@ -68,6 +69,7 @@ ENV CARGO_HOME=/cargo-home \
     AFHTTP_TEST_FINGERPRINT_CHROMIUM_BIN=/usr/local/bin/fingerprint-chromium \
     AFHTTP_TEST_FOXBRIDGE_BIN=/usr/local/bin/foxbridge \
     AFHTTP_TEST_CAMOUFOX_BIN=/usr/local/bin/camoufox \
+    AFHTTP_TEST_BRAVE_BIN=/usr/bin/brave-browser \
     AFHTTP_TEST_KASMVNC_BIN=/usr/bin/Xvnc \
     AFHTTP_KASMVNC_BIN=/usr/bin/Xvnc \
     AFHTTP_KASMVNC_WEB_ROOT=/usr/share/kasmvnc/www \

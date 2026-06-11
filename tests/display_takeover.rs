@@ -20,7 +20,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_first_http::host::bootstrap::{
-    BrowserChoice, DisplayMode, DisplayProvider, HealthPublic, HostArgs, ProfileChoice, Takeover,
+    BrowserChoice, DisplayMode, HealthPublic, HostArgs, ProfileChoice, Takeover,
+    TakeoverProviderKind,
 };
 use agent_first_http::host::browser::BrowserHandle;
 use agent_first_http::host::listener::{router_for_tests, test_state, AppState};
@@ -70,7 +71,7 @@ async fn fake_ws(ws: WebSocketUpgrade) -> impl IntoResponse {
 
 async fn spawn_display_router(token: Option<&str>, upstream_port: u16) -> String {
     support::ensure_rustls_provider();
-    let state = test_state(token, HealthPublic::Off).with_display_takeover_for_tests(upstream_port);
+    let state = test_state(token, HealthPublic::Off).with_takeover_for_tests(upstream_port);
     let app = router_for_tests(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind host");
     let addr = listener.local_addr().expect("addr");
@@ -94,11 +95,28 @@ async fn spawn_screencast_only_router(token: Option<&str>) -> String {
     format!("http://{addr}")
 }
 
+async fn takeover_handoff_url(base: &str, token: &str) -> String {
+    let body = reqwest::Client::new()
+        .post(format!("{base}/takeover/handoff"))
+        .bearer_auth(token)
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("handoff send")
+        .json::<serde_json::Value>()
+        .await
+        .expect("handoff json");
+    let url = body["takeover_url"].as_str().expect("takeover_url");
+    assert!(url.contains("handoff="), "{body}");
+    assert!(body["takeover_url_ttl_s"].as_u64().unwrap_or_default() > 0);
+    url.to_string()
+}
+
 #[tokio::test]
 async fn display_route_is_provider_neutral_and_unavailable_without_provider() {
     let base = spawn_screencast_only_router(None).await;
     let resp = reqwest::Client::new()
-        .get(format!("{base}/ops/display"))
+        .get(format!("{base}/takeover/panel"))
         .send()
         .await
         .expect("send");
@@ -106,40 +124,54 @@ async fn display_route_is_provider_neutral_and_unavailable_without_provider() {
 }
 
 #[tokio::test]
-async fn display_proxy_rewrites_paths_strips_auth_and_accepts_ops_cookie() {
+async fn takeover_handoff_is_unavailable_without_display_provider() {
+    let base = spawn_screencast_only_router(Some("secret")).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/takeover/handoff"))
+        .bearer_auth("secret")
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    let body = resp.json::<serde_json::Value>().await.expect("json");
+    assert_eq!(body["error_code"], "backend_unsupported");
+}
+
+#[tokio::test]
+async fn display_proxy_rewrites_paths_strips_auth_and_accepts_takeover_cookie() {
     let upstream_port = spawn_fake_kasm().await;
     let base = spawn_display_router(Some("secret"), upstream_port).await;
     let no_redirect = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("client");
+    let takeover_url = takeover_handoff_url(&base, "secret").await;
 
     let redirected = no_redirect
-        .get(format!("{base}/ops/display?token_secret=secret"))
+        .get(&takeover_url)
         .send()
         .await
         .expect("redirect");
     assert_eq!(redirected.status(), reqwest::StatusCode::TEMPORARY_REDIRECT);
     // The redirect seeds noVNC's `path` (so its websocket targets the proxied
     // prefix instead of a root-level `/websockify`) and `resize` settings,
-    // appends quality params, and preserves the token.
+    // appends quality params, and drops the one-time handoff query after
+    // setting the takeover cookie.
     let location = redirected
         .headers()
         .get(reqwest::header::LOCATION)
         .and_then(|v| v.to_str().ok())
         .expect("location header");
     assert!(
-        location.starts_with("/ops/display/?path=ops/display/websockify&resize=scale"),
+        location.starts_with("/takeover/panel/?path=takeover/panel/websockify&resize=scale"),
         "unexpected redirect target: {location}"
     );
     assert!(
         location.contains("&max_video_resolution_x="),
         "missing quality params: {location}"
     );
-    assert!(
-        location.ends_with("&token_secret=secret"),
-        "token not preserved: {location}"
-    );
+    assert!(!location.contains("handoff="), "handoff leaked: {location}");
     let cookie = redirected
         .headers()
         .get(reqwest::header::SET_COOKIE)
@@ -149,9 +181,10 @@ async fn display_proxy_rewrites_paths_strips_auth_and_accepts_ops_cookie() {
         .next()
         .expect("cookie pair")
         .to_string();
+    assert!(cookie.starts_with("afhttp_handoff="));
 
     let through_cookie = reqwest::Client::new()
-        .get(format!("{base}/ops/display/echo?x=1"))
+        .get(format!("{base}/takeover/panel/echo?x=1"))
         .header(reqwest::header::COOKIE, cookie)
         .send()
         .await
@@ -163,8 +196,14 @@ async fn display_proxy_rewrites_paths_strips_auth_and_accepts_ops_cookie() {
     assert_eq!(through_cookie["saw_cookie"], false);
     assert_eq!(through_cookie["saw_authorization"], false);
 
+    let handoff = url::Url::parse(&takeover_url)
+        .expect("parse takeover URL")
+        .query_pairs()
+        .find(|(k, _)| k == "handoff")
+        .map(|(_, v)| v.into_owned())
+        .expect("handoff query");
     let stripped_query = reqwest::Client::new()
-        .get(format!("{base}/ops/display/echo?token_secret=secret&x=2"))
+        .get(format!("{base}/takeover/panel/echo?handoff={handoff}&x=2"))
         .send()
         .await
         .expect("query auth")
@@ -175,11 +214,30 @@ async fn display_proxy_rewrites_paths_strips_auth_and_accepts_ops_cookie() {
 }
 
 #[tokio::test]
+async fn display_proxy_rejects_long_lived_token_query() {
+    let upstream_port = spawn_fake_kasm().await;
+    let base = spawn_display_router(Some("secret"), upstream_port).await;
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/takeover/panel?token_secret=secret"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn display_proxy_forwards_websocket_upgrades_behind_token() {
     let upstream_port = spawn_fake_kasm().await;
     let base = spawn_display_router(Some("secret"), upstream_port).await;
-    let ws_url =
-        base.replacen("http://", "ws://", 1).to_string() + "/ops/display/ws?token_secret=secret";
+    let takeover_url = takeover_handoff_url(&base, "secret").await;
+    let handoff = url::Url::parse(&takeover_url)
+        .expect("parse takeover URL")
+        .query_pairs()
+        .find(|(k, _)| k == "handoff")
+        .map(|(_, v)| v.into_owned())
+        .expect("handoff query");
+    let ws_url = base.replacen("http://", "ws://", 1).to_string()
+        + &format!("/takeover/panel/ws?handoff={handoff}");
 
     let (mut socket, _resp) = tokio_tungstenite::connect_async(&ws_url)
         .await
@@ -203,7 +261,9 @@ fn capabilities_advertise_display_takeover_by_backend_family() {
     let chromium_state =
         test_state(None, HealthPublic::Off).with_default_browser(Arc::new(chromium));
     assert!(
-        agent_first_http::host::listener::capabilities::build(&chromium_state).display_takeover
+        agent_first_http::host::listener::capabilities::build(&chromium_state)
+            .takeover
+            .backend_capable
     );
 
     let mut camoufox = BrowserHandle::synthetic(tmp.path().join("camoufox"));
@@ -211,7 +271,9 @@ fn capabilities_advertise_display_takeover_by_backend_family() {
     let camoufox_state =
         test_state(None, HealthPublic::Off).with_default_browser(Arc::new(camoufox));
     assert!(
-        agent_first_http::host::listener::capabilities::build(&camoufox_state).display_takeover
+        agent_first_http::host::listener::capabilities::build(&camoufox_state)
+            .takeover
+            .backend_capable
     );
 
     let mut lightpanda = BrowserHandle::synthetic(tmp.path().join("lightpanda"));
@@ -219,17 +281,19 @@ fn capabilities_advertise_display_takeover_by_backend_family() {
     let lightpanda_state =
         test_state(None, HealthPublic::Off).with_default_browser(Arc::new(lightpanda));
     assert!(
-        !agent_first_http::host::listener::capabilities::build(&lightpanda_state).display_takeover
+        !agent_first_http::host::listener::capabilities::build(&lightpanda_state)
+            .takeover
+            .backend_capable
     );
 }
 
 #[test]
 fn capabilities_include_provider_neutral_display_fields() {
-    let state = test_state(None, HealthPublic::Off).with_display_takeover_for_tests(5900);
+    let state = test_state(None, HealthPublic::Off).with_takeover_for_tests(5900);
     let caps = agent_first_http::host::listener::capabilities::build(&state);
-    assert!(caps.ops_panel.display);
-    assert_eq!(caps.ops_panel.display_url.as_deref(), Some("/ops/display"));
-    assert_eq!(caps.ops_panel.display_provider.as_deref(), Some("kasmvnc"));
+    assert!(caps.takeover.supported);
+    assert_eq!(caps.takeover.panel_url.as_deref(), Some("/takeover/panel"));
+    assert_eq!(caps.takeover.provider.as_deref(), Some("kasmvnc"));
 }
 
 #[tokio::test]
@@ -238,14 +302,14 @@ async fn lightpanda_rejects_kasmvnc_takeover_before_launch() {
         listen: "tcp:127.0.0.1:0".into(),
         profile: ProfileChoice::Ephemeral,
         display: DisplayMode::Headful,
-        takeover: Takeover::Display {
-            provider: DisplayProvider::KasmVnc,
+        takeover: Takeover::On {
+            provider: TakeoverProviderKind::KasmVnc,
         },
         display_quality: 100,
         browser: BrowserChoice::Lightpanda,
         browser_bin: None,
         token: None,
-        ops_enabled: true,
+        takeover_enabled: true,
         health_enabled: true,
         health_public: HealthPublic::Off,
         engine_envs: Vec::new(),
@@ -266,7 +330,7 @@ async fn kasmvnc_process_launches_when_binary_available() {
         return;
     };
     std::env::set_var("AFHTTP_KASMVNC_BIN", bin);
-    let handle = agent_first_http::host::display::launch_kasmvnc_provider()
+    let handle = agent_first_http::host::takeover::launch_kasmvnc_provider()
         .await
         .expect("launch kasmvnc");
     assert!(handle.display.starts_with(':'));

@@ -1,9 +1,13 @@
-//! In-container real-display takeover supervision.
+//! In-container human-takeover supervision.
 //!
-//! Display providers are process-level adapters behind `/ops/display`.
-//! KasmVNC is the current provider and is kept as an external GPL process:
-//! afhttp only starts `Xvnc`, waits for its X display + localhost web listener,
-//! and reverse-proxies the web client from the authenticated host listener.
+//! Takeover providers are process-level adapters behind `/takeover/panel`, each
+//! a concrete screen-share method selected by `--takeover-provider` (parallel
+//! to how `--browser` selects an engine). Add one by giving
+//! [`TakeoverProviderKind`] a variant and a `match` arm in [`launch_provider`]
+//! and [`TakeoverProxyState::proxy`]. KasmVNC is the only provider today and is
+//! kept as an external GPL process: afhttp only starts `Xvnc`, waits for its X
+//! display + localhost web listener, and reverse-proxies the web client from
+//! the authenticated host listener.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -20,7 +24,7 @@ use futures::{SinkExt, StreamExt};
 // KasmVNC takeover is Unix-only (Xvnc + a unix-socket control channel); these
 // imports are used solely by the `#[cfg(unix)]` launch path below. On Windows
 // `launch_kasmvnc_provider()` returns BackendUnsupported, so the rest of
-// afhttp — fetch, host, ops-panel screencast — still builds and runs.
+// afhttp — fetch, host, takeover-panel screencast — still builds and runs.
 #[cfg(unix)]
 use tokio::io::AsyncBufReadExt;
 #[cfg(unix)]
@@ -32,7 +36,7 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite;
 
-use crate::host::bootstrap::DisplayProvider;
+use crate::host::bootstrap::TakeoverProviderKind;
 use crate::host::browser::{pick_ephemeral_port, resolve_named_bin, wait_for_tcp_ready};
 use crate::shared::error::{Error, ErrorCode};
 
@@ -44,7 +48,7 @@ pub const DISPLAY_HEIGHT: u16 = 720;
 
 /// Running KasmVNC display. Cloning the surrounding `Arc` keeps the process
 /// alive until the listener state is dropped.
-pub struct DisplayHandle {
+pub struct ProviderHandle {
     pub display: String,
     pub web_port: u16,
     /// Whether a window manager is running on the display. With one, the
@@ -58,7 +62,7 @@ pub struct DisplayHandle {
     stderr_task: Option<JoinHandle<()>>,
 }
 
-impl Drop for DisplayHandle {
+impl Drop for ProviderHandle {
     fn drop(&mut self) {
         if let Some(task) = self.stderr_task.take() {
             task.abort();
@@ -74,13 +78,13 @@ impl Drop for DisplayHandle {
     }
 }
 
-/// Launch a display provider and return the runtime state used by `/ops/display`.
-pub async fn launch_display_provider(
-    provider: DisplayProvider,
+/// Launch a display provider and return the runtime state used by `/takeover/panel`.
+pub async fn launch_provider(
+    provider: TakeoverProviderKind,
     quality: u8,
-) -> Result<DisplayProxyState, Error> {
+) -> Result<TakeoverProxyState, Error> {
     match provider {
-        DisplayProvider::KasmVnc => Ok(DisplayProxyState::new(
+        TakeoverProviderKind::KasmVnc => Ok(TakeoverProxyState::new(
             provider,
             launch_kasmvnc_provider().await?,
             quality,
@@ -90,7 +94,7 @@ pub async fn launch_display_provider(
 
 /// Launch KasmVNC's `Xvnc` and wait until both the X display socket and the
 /// embedded web client are reachable on localhost.
-pub async fn launch_kasmvnc_provider() -> Result<Arc<DisplayHandle>, Error> {
+pub async fn launch_kasmvnc_provider() -> Result<Arc<ProviderHandle>, Error> {
     #[cfg(not(unix))]
     {
         return Err(Error::new(
@@ -106,7 +110,7 @@ pub async fn launch_kasmvnc_provider() -> Result<Arc<DisplayHandle>, Error> {
 }
 
 #[cfg(unix)]
-async fn launch_kasmvnc_unix() -> Result<Arc<DisplayHandle>, Error> {
+async fn launch_kasmvnc_unix() -> Result<Arc<ProviderHandle>, Error> {
     let bin = resolve_kasmvnc_bin()?;
     let web_root = resolve_kasmvnc_web_root()?;
     let display_num = pick_display_number()?;
@@ -184,7 +188,7 @@ async fn launch_kasmvnc_unix() -> Result<Arc<DisplayHandle>, Error> {
     // client just falls back to scaled rendering.
     let wm_child = spawn_window_manager(&display);
 
-    Ok(Arc::new(DisplayHandle {
+    Ok(Arc::new(ProviderHandle {
         display,
         web_port,
         window_manager: wm_child.is_some(),
@@ -292,8 +296,8 @@ fn x_socket_path(display: u16) -> PathBuf {
 /// Minimal state used by the listener reverse proxy. Tests can construct this
 /// without spawning KasmVNC; production keeps the process alive via `_handle`.
 #[derive(Clone)]
-pub struct DisplayProxyState {
-    pub provider: DisplayProvider,
+pub struct TakeoverProxyState {
+    pub provider: TakeoverProviderKind,
     pub display: String,
     pub web_addr: SocketAddr,
     /// A window manager is running, so the client can use `resize=remote`
@@ -301,11 +305,11 @@ pub struct DisplayProxyState {
     pub window_manager: bool,
     /// Image quality 0-100 seeded onto the client (see `host::bootstrap`).
     pub quality: u8,
-    _handle: Option<Arc<DisplayHandle>>,
+    _handle: Option<Arc<ProviderHandle>>,
 }
 
-impl DisplayProxyState {
-    pub fn new(provider: DisplayProvider, handle: Arc<DisplayHandle>, quality: u8) -> Self {
+impl TakeoverProxyState {
+    pub fn new(provider: TakeoverProviderKind, handle: Arc<ProviderHandle>, quality: u8) -> Self {
         Self {
             provider,
             display: handle.display.clone(),
@@ -319,7 +323,7 @@ impl DisplayProxyState {
     #[cfg(any(test, feature = "host"))]
     pub fn for_tests(web_port: u16) -> Self {
         Self {
-            provider: DisplayProvider::KasmVnc,
+            provider: TakeoverProviderKind::KasmVnc,
             display: ":99".to_string(),
             web_addr: SocketAddr::from(([127, 0, 0, 1], web_port)),
             window_manager: false,
@@ -328,7 +332,7 @@ impl DisplayProxyState {
         }
     }
 
-    /// Proxy an authenticated `/ops/display` request to the active provider.
+    /// Proxy an authenticated `/takeover/panel` request to the active provider.
     pub async fn proxy(
         self,
         ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
@@ -336,24 +340,24 @@ impl DisplayProxyState {
         request: axum::extract::Request,
     ) -> Response {
         match self.provider {
-            DisplayProvider::KasmVnc => proxy_kasmvnc(self, ws, uri, request).await,
+            TakeoverProviderKind::KasmVnc => proxy_kasmvnc(self, ws, uri, request).await,
         }
     }
 }
 
 async fn proxy_kasmvnc(
-    display: DisplayProxyState,
+    display: TakeoverProxyState,
     ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
     uri: Uri,
     request: axum::extract::Request,
 ) -> Response {
     // noVNC builds its WebSocket URL from the host root (default
-    // `/websockify`), ignoring this `/ops/display/` mount prefix — so without
+    // `/websockify`), ignoring this `/takeover/panel/` mount prefix — so without
     // help the client connects to `/websockify` and 404s. Seed noVNC's `path`
     // setting via query param so it targets the proxied
-    // `/ops/display/websockify`. Applied by redirecting the landing page when
+    // `/takeover/panel/websockify`. Applied by redirecting the landing page when
     // the param is absent; the redirect also normalizes the missing trailing
-    // slash (axum's `{*path}` wildcard never matches the bare `/ops/display/`).
+    // slash (axum's `{*path}` wildcard never matches the bare `/takeover/panel/`).
     // `resize=remote` makes the framebuffer (and the WM-maximized browser)
     // track the client window for an exact fit; without a window manager fall
     // back to `resize=scale` (letterboxed) since the browser window can't
@@ -363,7 +367,7 @@ async fn proxy_kasmvnc(
     } else {
         "scale"
     };
-    let is_landing = matches!(uri.path(), "/ops/display" | "/ops/display/");
+    let is_landing = matches!(uri.path(), "/takeover/panel" | "/takeover/panel/");
     let q = uri.query().unwrap_or("");
     let has_path = q.split('&').any(|p| p.starts_with("path="));
     // Match the exact preferred value, not just presence, so a client that
@@ -372,15 +376,19 @@ async fn proxy_kasmvnc(
     let want_resize = format!("resize={resize}");
     let resize_ok = q.split('&').any(|p| p == want_resize);
     if is_landing && ws.is_err() && !(has_path && resize_ok) {
-        // Rebuild canonically, dropping any stale `path`/`resize` and keeping
-        // the rest (e.g. `token_secret`). Redirecting whenever *either* is
+        // Rebuild canonically, dropping stale `path`/`resize` and the one-time
+        // handoff query. Redirecting whenever *either* is
         // missing also fixes clients that cached a `?path=...` URL from before
         // `resize` existed. Once both are present the condition is false.
         let quality = kasmvnc_quality_params(display.quality);
         let mut location =
-            format!("/ops/display/?path=ops/display/websockify&resize={resize}{quality}");
+            format!("/takeover/panel/?path=takeover/panel/websockify&resize={resize}{quality}");
         for pair in q.split('&') {
-            if pair.is_empty() || pair.starts_with("path=") || pair.starts_with("resize=") {
+            if pair.is_empty()
+                || pair.starts_with("path=")
+                || pair.starts_with("resize=")
+                || pair.starts_with("handoff=")
+            {
                 continue;
             }
             location.push('&');
@@ -410,7 +418,7 @@ async fn proxy_kasmvnc(
 
 /// KasmVNC client quality settings seeded on the display panel (the client's
 /// values override the server's). The `pct` (0-100, from
-/// `--display-quality-percent`) maps to KasmVNC's 0-9 JPEG quality tiers.
+/// `--takeover-quality-percent`) maps to KasmVNC's 0-9 JPEG quality tiers.
 /// Static/idle content can always climb to tier 9 (`dynamic_quality_max`);
 /// `pct` sets the floor for moving content. Regardless of `pct` we stop the
 /// client's default 960x540 "video mode" downscale (`max_video_resolution`),
@@ -567,7 +575,7 @@ async fn forward_kasmvnc_ws(client: WebSocket, upstream_url: String) {
 fn display_upstream_path_and_query(uri: &Uri) -> String {
     let suffix = uri
         .path()
-        .strip_prefix("/ops/display")
+        .strip_prefix("/takeover/panel")
         .filter(|s| !s.is_empty())
         .unwrap_or("/");
     let path = if suffix.starts_with('/') {
@@ -580,7 +588,7 @@ fn display_upstream_path_and_query(uri: &Uri) -> String {
     };
     let filtered: Vec<&str> = query
         .split('&')
-        .filter(|pair| !pair.starts_with("token_secret="))
+        .filter(|pair| !pair.starts_with("handoff=") && !pair.starts_with("token_secret="))
         .collect();
     if filtered.is_empty() {
         path

@@ -38,6 +38,10 @@ pub struct FetchBuilder {
     pub(crate) timeout: Duration,
     pub(crate) want: BTreeSet<Artifact>,
     pub(crate) tab: Option<TabId>,
+    /// Keep a freshly-opened ("new") target open after the fetch instead of
+    /// closing it, so a human can take the tab over. No effect when an explicit
+    /// `tab` is reused (those are already left open).
+    pub(crate) keep_tab_open: bool,
     pub(crate) request: RequestOptions,
     pub(crate) out_dir: Option<PathBuf>,
     pub(crate) readiness: ReadinessOptions,
@@ -154,6 +158,7 @@ impl FetchBuilder {
             timeout: Duration::from_secs(30),
             want: Artifact::ALL.iter().copied().collect(),
             tab: None,
+            keep_tab_open: false,
             request: RequestOptions::default(),
             out_dir: None,
             readiness: ReadinessOptions {
@@ -232,6 +237,13 @@ impl FetchBuilder {
     #[must_use]
     pub fn tab(mut self, tab: TabId) -> Self {
         self.tab = Some(tab);
+        self
+    }
+
+    /// Keep a freshly-opened target open after the fetch (for human takeover).
+    #[must_use]
+    pub fn keep_tab_open(mut self, keep: bool) -> Self {
+        self.keep_tab_open = keep;
         self
     }
 

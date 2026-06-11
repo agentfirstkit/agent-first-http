@@ -40,7 +40,7 @@ async fn spawn_host_with_browser() -> Option<(String, tempfile::TempDir)> {
         browser: BrowserChoice::Chromium,
         browser_bin: Some(bin),
         token: None,
-        ops_enabled: true,
+        takeover_enabled: true,
         health_enabled: true,
         health_public: HealthPublic::Off,
         engine_envs: Vec::new(),

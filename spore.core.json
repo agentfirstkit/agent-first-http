@@ -2,10 +2,10 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-http",
   "name": "Agent-First HTTP",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
-  "synopsis": "Give an AI agent any URL and get back a usable page — fetched directly, or rendered in a real browser when the page needs one — with a human able to take over the same browser for a login, captcha, or 2FA.",
+  "synopsis": "Give an AI agent its own isolated browser to actually open a URL — running JavaScript when the page needs it and returning the page as files the agent can read — so it works from the real page instead of a search guess, an empty app shell, or a login wall, all without touching the browser you use every day.",
   "intent": [
     "Give AI agents a deterministic URL acquisition layer that reports status, final URL, headers, body artifacts, redirects, timing, and typed transport failures as structured JSONL instead of prose",
     "Focus on pages and web resources that are hard for agents to acquire through a simple shell fetch: JavaScript-rendered, cookie- or session-bound, bot-walled, or XHR-injected pages a plain HTTP request cannot turn into usable artifacts",
@@ -13,20 +13,17 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Detect bot-wall and security-challenge pages (Cloudflare, Turnstile, generic access-denied) on the HTTP fast path, surface them as a page_kind plus warning, and auto-escalate to the real browser path when one is detected.",
-    "Enrich the fetch trace with per-stage timing and status, plus current_stage, capture_reason, wait_mode, wait_satisfied_by, and timeout_ms so agents can see where a fetch spent time and why it captured.",
-    "Add a takeover prepare <url> subcommand that opens a persistent host tab for a human and returns a recommended_url to hand off, with --hard-site to prefer real-display takeover for input-sensitive pages.",
-    "Add a --display-provider flag and route real-display takeover through a named provider abstraction, currently backed by KasmVNC.",
-    "Expose browser auto-wait readiness tuning via --readiness-idle-ms, --readiness-stable-ms, and --readiness-min-text-bytes.",
-    "Rename --timeout to --timeout-ms to make the unit explicit.",
-    "Raise the default per-response network-body capture cap from 1 MiB to 10 MiB.",
-    "Harden container install for display-capable hosts (rebuild, from-source, --with kasmvnc) and accept 'container' as a CLI alias for the Apple runtime.",
-    "Rewrite the skill to require afhttp for a supplied URL instead of web-searching it first, document the default fetch and direct-access/takeover flows, and require container status before container install."
+    "Redact AFDATA _secret fields by default in envelope output; revealing requires an explicit flag",
+    "Add --reveal-token-secret to container install and inspect to opt into printing the host token",
+    "Rename the panel handoff to takeover: takeover_url, --takeover-quality-percent, and a /takeover/handoff endpoint with an SDK takeover_handoff client",
+    "Add --raw to container logs for unprocessed output",
+    "Handle --version and --help as structured output via afdata",
+    "Reframe README and docs around the isolated-browser model and the takeover/reveal surface"
   ],
   "bonds": [
     {
       "relation": "depends_on",
-      "uri": "cmn://agentfirstkit.com/b3.AZ3tZaFq6XC4HrSHneBd7i34Sc42YDDbbSxcniuKqDpp",
+      "uri": "cmn://agentfirstkit.com/b3.2evoUgQ3aJHXXc3MHmhJkGEg2rMRLdvKtQKZBDno4UM4",
       "id": "agent-first-data",
       "reason": "All request/response fields use Agent-First Data suffix conventions, and runtime protocol/log events are emitted on stdout only"
     }

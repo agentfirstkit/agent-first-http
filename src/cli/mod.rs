@@ -18,6 +18,11 @@ pub fn run() -> ExitCode {
     // with "no rustls crypto provider is configured".
     crate::host::bootstrap::install_rustls_provider();
 
+    // Version/help are rendered without spinning up the async runtime so
+    // machine-readable requests do not fall through to clap's plain text exits.
+    if let Some(code) = maybe_render_version() {
+        return code;
+    }
     // Help is rendered without spinning up the async runtime so
     // `--help --recursive --output markdown` can feed generated docs.
     if let Some(code) = maybe_render_help() {
@@ -76,6 +81,30 @@ fn run_blocking() -> ExitCode {
     }
 }
 
+/// Render version and return an exit code, or `None` to continue normal parsing.
+fn maybe_render_version() -> Option<ExitCode> {
+    use std::io::Write;
+
+    let raw: Vec<String> = std::env::args().collect();
+    let mut handle = std::io::stdout();
+    match agent_first_data::cli_handle_version_or_continue(
+        &raw,
+        "afhttp",
+        env!("CARGO_PKG_VERSION"),
+        &agent_first_data::VersionConfig::conventional_default(),
+    ) {
+        Ok(Some(version)) => {
+            let _ = write!(handle, "{version}");
+            Some(ExitCode::SUCCESS)
+        }
+        Ok(None) => None,
+        Err(err) => {
+            let _ = writeln!(handle, "{}", agent_first_data::output_json(&err));
+            Some(ExitCode::from(2))
+        }
+    }
+}
+
 /// Render help and return an exit code, or `None` to continue normal parsing.
 fn maybe_render_help() -> Option<ExitCode> {
     use clap::CommandFactory;
@@ -114,8 +143,7 @@ async fn dispatch(parsed: args::Parsed) -> Result<(), Error> {
         args::Command::Fetch(_) => unreachable!("fetch handled above"),
         args::Command::Upload(a) => cmd::upload::run(a).await,
         args::Command::Cdp(a) => cmd::cdp::run(a).await,
-        args::Command::Ui(a) => cmd::ui::run(a).await,
-        args::Command::Takeover(a) => cmd::takeover::run(a).await,
+        args::Command::Panel(a) => cmd::panel::run(a).await,
         args::Command::Health(a) => cmd::health::run(a).await,
         args::Command::Capabilities(a) => cmd::capabilities::run(a).await,
         args::Command::Profile(a) => cmd::profile::run(a).await,

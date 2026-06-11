@@ -65,12 +65,24 @@ impl std::fmt::Display for CdpRemoteError {
 }
 
 impl Connection {
-    /// Open a CDP connection from a parsed endpoint.
-    pub async fn connect_endpoint(endpoint: &Endpoint, token: Option<&str>) -> Result<Self, Error> {
+    /// Open a CDP connection from a parsed endpoint. `profile`, when set, is
+    /// sent as `?profile=` so the host switches its active profile.
+    pub async fn connect_endpoint(
+        endpoint: &Endpoint,
+        token: Option<&str>,
+        profile: Option<&str>,
+    ) -> Result<Self, Error> {
         match endpoint {
             #[cfg(unix)]
-            Endpoint::Unix { path } => Self::connect_unix(path, token).await,
-            _ => Self::connect(&endpoint.cdp_ws_url(), token).await,
+            Endpoint::Unix { path } => Self::connect_unix(path, token, profile).await,
+            _ => {
+                let base = endpoint.cdp_ws_url();
+                let url = match profile {
+                    Some(p) => append_query_pairs(&base, &[("profile", p)])?,
+                    None => base,
+                };
+                Self::connect(&url, token).await
+            }
         }
     }
 
@@ -117,38 +129,33 @@ impl Connection {
                 })?;
             let (ws, _resp) = tokio_tungstenite::client_async(request, stream)
                 .await
-                .map_err(|e| {
-                    Error::new(
-                        ErrorCode::HostUnreachable,
-                        format!(
-                            "CDP websocket {}: {e}",
-                            agent_first_data::redact_url_secrets(&url)
-                        ),
-                    )
-                })?;
+                .map_err(|e| cdp_connect_error("CDP websocket", &url, e))?;
             return Ok(Self::from_ws(ws));
         }
         // wss:// — keep the TLS-capable connector.
         let (ws, _resp) = tokio_tungstenite::connect_async(request)
             .await
-            .map_err(|e| {
-                // Redact the token before it lands in the error envelope.
-                Error::new(
-                    ErrorCode::HostUnreachable,
-                    format!(
-                        "CDP connect {}: {e}",
-                        agent_first_data::redact_url_secrets(&url)
-                    ),
-                )
-            })?;
+            .map_err(|e| cdp_connect_error("CDP connect", &url, e))?;
         Ok(Self::from_ws(ws))
     }
 
     #[cfg(unix)]
-    async fn connect_unix(path: &std::path::Path, token: Option<&str>) -> Result<Self, Error> {
-        let url = match token {
-            Some(t) => append_query_pairs("ws://localhost/cdp", &[("token_secret", t)])?,
-            None => "ws://localhost/cdp".to_string(),
+    async fn connect_unix(
+        path: &std::path::Path,
+        token: Option<&str>,
+        profile: Option<&str>,
+    ) -> Result<Self, Error> {
+        let mut pairs: Vec<(&str, &str)> = Vec::new();
+        if let Some(t) = token {
+            pairs.push(("token_secret", t));
+        }
+        if let Some(p) = profile {
+            pairs.push(("profile", p));
+        }
+        let url = if pairs.is_empty() {
+            "ws://localhost/cdp".to_string()
+        } else {
+            append_query_pairs("ws://localhost/cdp", &pairs)?
         };
         let request = build_ws_request(&url)?;
         let stream = tokio::net::UnixStream::connect(path).await.map_err(|e| {
@@ -427,6 +434,37 @@ fn build_ws_request(url: &str) -> Result<Request<()>, Error> {
     })
 }
 
+fn cdp_connect_error(context: &str, url: &str, err: tungstenite::Error) -> Error {
+    let redacted = agent_first_data::redact_url_secrets(url);
+    if let tungstenite::Error::Http(resp) = err {
+        let status = resp.status();
+        if let Some(bytes) = resp.body().as_ref() {
+            if let Ok(remote) = serde_json::from_slice::<Error>(bytes) {
+                return Error::new(
+                    remote.error_code,
+                    format!("{context} {redacted}: HTTP {status}: {}", remote.detail),
+                )
+                .with_retryable(remote.retryable);
+            }
+            let body = String::from_utf8_lossy(bytes).trim().to_string();
+            if !body.is_empty() {
+                return Error::new(
+                    ErrorCode::HostUnreachable,
+                    format!("{context} {redacted}: HTTP {status}: {body}"),
+                );
+            }
+        }
+        return Error::new(
+            ErrorCode::HostUnreachable,
+            format!("{context} {redacted}: HTTP {status}"),
+        );
+    }
+    Error::new(
+        ErrorCode::HostUnreachable,
+        format!("{context} {redacted}: {err}"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -452,5 +490,27 @@ mod tests {
             "token not redacted: {msg}"
         );
         assert!(!msg.contains("supersecret"), "raw token leaked: {msg}");
+    }
+
+    #[test]
+    fn cdp_http_error_includes_profile_switch_body() {
+        let body = serde_json::to_vec(&Error::new(
+            ErrorCode::ProfileLocked,
+            "profile switch to \"contabo.com\" failed: profile contabo.com already locked",
+        ))
+        .unwrap();
+        let resp = tokio_tungstenite::tungstenite::http::Response::builder()
+            .status(503)
+            .body(Some(body))
+            .unwrap();
+        let err = cdp_connect_error(
+            "CDP websocket",
+            "ws://127.0.0.1:9222/cdp?profile=contabo.com&token_secret=supersecret",
+            tungstenite::Error::Http(Box::new(resp)),
+        );
+        assert_eq!(err.error_code, ErrorCode::ProfileLocked);
+        assert!(err.detail.contains("contabo.com"), "{}", err.detail);
+        assert!(err.detail.contains("token_secret=***"), "{}", err.detail);
+        assert!(!err.detail.contains("supersecret"), "{}", err.detail);
     }
 }

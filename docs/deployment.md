@@ -2,10 +2,10 @@
 
 `afhttp` has two roles, and they deploy differently:
 
-- The **driver** (`afhttp fetch` / `cdp` / `upload` / `ui` / `health` /
+- The **driver** (`afhttp fetch` / `cdp` / `upload` / `panel` / `health` /
   `capabilities` / `tabs`) is a thin client. Install it wherever the agent runs —
   no container needed.
-- The **host** (`afhttp host`) runs a real browser, holds a persistent profile,
+- The **host** (`afhttp host`) runs a real browser, holds browser profile state,
   and exposes a CDP endpoint. **Run the host in a container.** That is the
   supported deployment, and this spore ships one at
   [`container/docker/`](../container/docker/).
@@ -25,7 +25,8 @@ isolated and disposable:
 
 - non-root (the image already runs as an unprivileged `afhttp` user),
 - the default seccomp profile and dropped capabilities,
-- `--shm-size=1g` (or a `/dev/shm` mount) for Chromium,
+- `--shm-size=2g` (or a `/dev/shm` mount) for Chromium on the takeover-ready
+  host; `--takeover-provider off` builds lean down to `--shm-size=1g`,
 - on a private network — never host networking with the port exposed publicly.
 
 ## Quick start
@@ -35,14 +36,21 @@ can stand up a host in one command:
 
 ```bash
 # Build the image if needed and run the host. Auto-detects Docker or Apple
-# `container`; add optional backends with repeated --with (see below).
+# `container`; add optional backends with repeated --with (see below). The host
+# is takeover-ready by default (Brave + KasmVNC + ephemeral initial profile + 2g shm).
 afhttp container install
+
+# Lean headless host instead (no takeover, 1g shm):
+afhttp container install --takeover-provider off
 
 # Show the running host, its endpoint, and a ready-to-run driver command:
 afhttp container status
 
-# Tail logs / tear it down (--purge also drops the image and build cache):
-afhttp container logs -f
+# Capture a structured log summary, or explicitly stream raw logs:
+afhttp container logs
+afhttp container logs --raw --follow
+
+# Tear it down (--purge also drops the image and build cache):
 afhttp container uninstall --purge
 ```
 
@@ -74,10 +82,27 @@ Dockerfile is runtime-agnostic — giving a 2×2 of {prebuilt, from-source} ×
 {docker/podman, apple}:
 
 ```bash
-afhttp container install                              # prebuilt, auto runtime
+afhttp container install                              # prebuilt, takeover-ready
+afhttp container install --takeover-provider off               # lean headless host
 afhttp container install --from-source                # source build, auto runtime
 afhttp container install --runtime apple --from-source  # source build under Apple
 ```
+
+### Version upgrades and profile preservation
+
+Managed images are tagged with the driver version (`afhttp-host:<version>`), and
+the prebuilt path downloads that exact `AFHTTP_VERSION` into the image. After
+upgrading the local driver, run `afhttp container install` again: the new driver
+builds/uses the matching image, stops and removes the old `afhttp-host`
+container, and starts a replacement with the same named data volume
+(`afhttp-host-data` by default). The host token and persistent profiles live in
+that volume under `/data/afhttp`, so they survive the recreate; only ephemeral
+profile state (`--profile -`) is intentionally disposable.
+
+`afhttp container status` reports both the driver version and the running host
+version. `fetch --takeover` auto-discovery refuses a standard local host whose
+version differs from the driver and tells you to rerun `afhttp container
+install`, rather than silently driving a stale protocol surface.
 
 Caveat for `--from-source` **under Apple `container`**: its builder runs in a
 separate persistent VM that defaults to **2 GiB**, and compiling afhttp pulls
@@ -103,8 +128,9 @@ cd spores/agent-first-http
 # Build the host image (chromium only; build context is the spore root):
 docker build -t afhttp-host -f container/docker/Dockerfile .
 
-# Run it. The entrypoint generates a bearer token on first start and prints it
-# along with a ready-to-run driver command. The profile persists in the volume.
+# Run it. The entrypoint generates a bearer token secret on first start and
+# prints it along with a ready-to-run driver command. Persistent profiles and the
+# host token live in the volume.
 docker run --rm -p 9222:9222 --shm-size=1g -v afhttp-profile:/data afhttp-host
 
 # …or with compose (toggles backends via WITH_* env, see below):
@@ -115,15 +141,18 @@ Then, from wherever the agent runs (the driver needs no container):
 
 ```bash
 afhttp fetch https://example.com \
-  --endpoint-url ws://<host>:9222 --token-secret "<token-from-host-logs>"
+  --endpoint-url ws://<host>:9222 --token-secret "<host-token>"
 ```
 
 ## Security
 
 The CDP endpoint is **full control of the browser and its profile** (cookies,
 live sessions, downloads), so the container is **token-by-default**: if you don't
-pass `AFHTTP_TOKEN`, the entrypoint generates one and persists it to the profile
-volume (`/data/afhttp/host-token`). Set `AFHTTP_TOKEN` yourself to pin it.
+pass `AFHTTP_TOKEN_SECRET`, the entrypoint generates a 32-byte base64url token
+secret and persists it to the profile volume (`/data/afhttp/host-token`). Set
+`AFHTTP_TOKEN_SECRET` yourself to pin it. The managed `afhttp container`
+commands do not print this long-lived token unless you pass
+`--reveal-token-secret`; takeover links use short-lived handoff URLs instead.
 
 afhttp does **not** terminate TLS. For cross-host use, keep the endpoint on a
 private network and reach it as `wss://` through a mesh/proxy that provides TLS.
@@ -136,25 +165,28 @@ build time and arch-guarded (several upstreams ship x86_64-only Linux builds):
 
 | Build arg | Adds backend(s) | Arch |
 | --- | --- | --- |
-| `WITH_CHROME_HEADLESS_SHELL=1` | `chrome_shell` | x86_64 |
+| `WITH_CHROME_HEADLESS_SHELL=1` | `chrome-headless-shell` | x86_64 |
 | `WITH_LIGHTPANDA=1` | `lightpanda` | x86_64 + arm64 |
-| `WITH_FINGERPRINT_CHROMIUM=1` | `fingerprint_chromium` | x86_64 |
+| `WITH_FINGERPRINT_CHROMIUM=1` | `fingerprint-chromium` | x86_64 |
 | `WITH_CAMOUFOX=1` | `camoufox` (+ foxbridge) | x86_64 + arm64 |
-| `WITH_KASMVNC=1` | KasmVNC display provider for `--takeover display` | x86_64 + arm64 |
+| `WITH_BRAVE=1` | `brave` | x86_64 + arm64 |
+| `WITH_KASMVNC=1` | KasmVNC display provider for `--takeover-provider kasmvnc` | x86_64 + arm64 |
 
 ```bash
 docker build -t afhttp-host:stealth \
-  --build-arg WITH_CAMOUFOX=1 --build-arg WITH_FINGERPRINT_CHROMIUM=1 \
+  --build-arg WITH_BRAVE=1 --build-arg WITH_KASMVNC=1 \
   -f container/docker/Dockerfile .
 ```
 
-The pinned versions live in one place — `container/docker/install-backends.sh` —
-shared with the test image (`tests/Dockerfile.test`) so they cannot drift.
+The pinned/download recipes live in one place —
+`container/docker/install-backends.sh` — shared with the test image
+(`tests/Dockerfile.test`) so they cannot drift. Brave is installed from Brave's
+stable apt repository because it publishes architecture-native Debian packages.
 
-### Proprietary browsers (Chrome / Edge / Brave)
+### Proprietary browsers (Chrome / Edge)
 
-These can't be redistributed, so they're not bundled. Mount the vendor binary into
-the container and point at it:
+These can't be redistributed, so they're not bundled. Mount the vendor binary
+into the container and point at it:
 
 ```bash
 docker run --rm -p 9222:9222 --shm-size=1g \
@@ -166,10 +198,29 @@ docker run --rm -p 9222:9222 --shm-size=1g \
 
 ## Human takeover
 
-The default ops panel (CDP screencast) needs no X or VNC and works in the slim
-image — `afhttp ui --endpoint-url … --token-secret …` prints its URL. Real-display takeover
-for hard captcha/IME sites needs `--build-arg WITH_KASMVNC=1`, then start the host
-with `--takeover display --display-provider kasmvnc --display headful`. See
+Human takeover is real-display takeover backed by KasmVNC. The default
+`afhttp container install` host is takeover-ready (Brave + KasmVNC + ephemeral
+initial profile + 2g `/dev/shm`); a raw `afhttp host` opts in with `--takeover-provider kasmvnc`.
+The driver-side entry point is:
+
+```bash
+afhttp fetch "$URL" --takeover
+```
+
+`fetch --takeover` auto-discovers the standard local `afhttp-host` when no
+endpoint is supplied, switches the host to the URL-derived persistent site
+profile (e.g. `contabo.com`), opens or reuses a persistent tab, and navigates it.
+If the warmed profile already reaches the target, it returns the content.
+Otherwise it returns a `next_action` with `kind: "human_takeover"`, a complete
+short-lived `takeover_url` a human opens to drive the real display, expiry
+metadata, and a `recommended_command` that re-fetches the same `--tab` once the
+wall is cleared. For remote/custom hosts, pass
+`--endpoint-url ws://<host>:9222 --token-secret "<token-secret>"`; the token is
+used to mint the handoff URL and is not embedded in it. `afhttp panel
+--endpoint-url … --token-secret …` prints a short-lived display URL directly.
+
+If the takeover host still fails, the likely remaining causes are IP/network
+reputation, account state, or site policy rather than the takeover surface. See
 [architecture.md §9](architecture.md).
 
 ## Lifecycle

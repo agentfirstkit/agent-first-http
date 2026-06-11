@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::sdk::fetch::deadline::FetchDeadline;
 use crate::sdk::fetch::result::{EscalationReason, FetchResult, RenderDecision};
 use crate::sdk::fetch::FetchBuilder;
-use crate::shared::artifacts::ArtifactPaths;
+use crate::shared::artifacts::{Artifact, ArtifactPaths};
 use crate::shared::error::{Error, ErrorCode};
 use crate::shared::ids::RequestId;
 
@@ -106,10 +106,7 @@ pub(crate) async fn execute(
         )
         .await?;
     let request_id = RequestId::new_v4();
-    let out_root = builder
-        .out_dir
-        .clone()
-        .unwrap_or_else(|| std::path::PathBuf::from("./afhttp-out"));
+    let out_root = builder.out_dir.clone().unwrap_or_else(default_out_dir);
     let paths = ArtifactPaths::new(out_root, &request_id);
 
     let start = Instant::now();
@@ -190,6 +187,26 @@ pub(crate) async fn execute(
                         )
                         .await;
                     }
+                    if builder.want.contains(&Artifact::Content)
+                        || builder.want.contains(&Artifact::ContentJson)
+                    {
+                        let reason = "requested_content_artifact".to_string();
+                        deadline.update_trace(|trace| {
+                            trace.render_decision = RenderDecision::Browser;
+                            trace.render_used = true;
+                            trace.escalation_reason = Some(reason.clone());
+                        });
+                        return browser::browser_path(
+                            builder,
+                            request_options,
+                            request_id,
+                            paths,
+                            start,
+                            Some(reason),
+                            &deadline,
+                        )
+                        .await;
+                    }
                     browser::reject_http_only_evaluate(&request_options)?;
                     Ok(o.result)
                 }
@@ -236,6 +253,10 @@ pub(crate) async fn execute(
     }
 }
 
+fn default_out_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join("afhttp-out")
+}
+
 pub(super) fn sensitive_capture(builder: &FetchBuilder) -> Vec<String> {
     let mut risks = Vec::new();
     if !builder.network.redact {
@@ -268,5 +289,11 @@ mod tests {
         assert_eq!(NetworkBodies::parse("xhr").unwrap(), NetworkBodies::Xhr);
         assert_eq!(NetworkBodies::parse("all").unwrap(), NetworkBodies::All);
         assert!(NetworkBodies::parse("some").is_err());
+    }
+
+    #[test]
+    fn default_out_dir_is_under_system_temp() {
+        let dir = default_out_dir();
+        assert_eq!(dir, std::env::temp_dir().join("afhttp-out"));
     }
 }

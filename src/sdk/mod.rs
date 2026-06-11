@@ -9,6 +9,7 @@ pub mod endpoint;
 pub mod fetch;
 pub mod health;
 pub mod profile;
+pub mod takeover;
 
 pub mod inline;
 
@@ -17,3 +18,4 @@ pub use endpoint::Endpoint;
 pub use fetch::{FetchBuilder, FetchCookie, FetchCookieSameSite, FetchResult, RenderMode, Wait};
 #[cfg(feature = "host")]
 pub use inline::InlineConfig;
+pub use takeover::TakeoverHandoffResponse;

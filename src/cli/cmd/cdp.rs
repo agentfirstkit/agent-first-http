@@ -1,6 +1,7 @@
 //! `afhttp cdp` subcommand. Raw CDP method invocation.
 
 use clap::Args as ClapArgs;
+use serde::Serialize;
 
 use crate::cli::output;
 use crate::sdk::Client;
@@ -8,24 +9,30 @@ use crate::shared::error::{Error, ErrorCode};
 use crate::shared::ids::TabId;
 use crate::shared::time::parse_duration;
 
+#[derive(Serialize)]
+struct CdpResult {
+    result: serde_json::Value,
+}
+
 #[derive(ClapArgs, Debug)]
 pub struct Args {
     /// CDP method name (e.g. Runtime.evaluate).
     pub method: String,
-    /// CDP endpoint of the running host.
-    #[arg(long = "endpoint-url")]
+    /// CDP endpoint of the running host (e.g. `ws://127.0.0.1:9222`). Falls back to `AFHTTP_ENDPOINT_URL`.
+    #[arg(long = "endpoint-url", env = "AFHTTP_ENDPOINT_URL")]
     pub endpoint: String,
     /// Bearer token, if the host was started with `--token-secret`.
-    #[arg(long = "token-secret")]
+    /// Falls back to `AFHTTP_TOKEN_SECRET`.
+    #[arg(long = "token-secret", env = "AFHTTP_TOKEN_SECRET")]
     pub token: Option<String>,
-    /// CDP target id to drive.
+    /// CDP target id (tab) to drive.
     #[arg(long)]
     pub tab: String,
     /// JSON literal, or `@-` to read from stdin.
-    #[arg(long)]
+    #[arg(long, value_name = "JSON|@-")]
     pub params: Option<String>,
     /// "<event>:<timeout>" — wait for a CDP event before exiting.
-    #[arg(long)]
+    #[arg(long = "wait-event")]
     pub wait: Option<String>,
 }
 
@@ -66,12 +73,12 @@ pub async fn run(args: Args) -> Result<(), Error> {
         let (ev, timeout) = spec.rsplit_once(':').ok_or_else(|| {
             Error::new(
                 ErrorCode::InvalidArgument,
-                "--wait: expected <event>:<timeout>",
+                "--wait-event: expected <event>:<timeout>",
             )
         })?;
         let d = parse_duration(timeout)?;
         req = req.wait_for(ev, d);
     }
     let value = req.send().await?;
-    output::emit("cdp", &value)
+    output::emit("cdp", &CdpResult { result: value })
 }

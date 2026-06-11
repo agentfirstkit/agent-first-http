@@ -13,7 +13,7 @@ scoop bucket add agentfirstkit https://github.com/agentfirstkit/scoop-bucket \
 cargo install agent-first-http                                                    # any platform
 ```
 
-Install the embedded Agent Skill for Codex and Claude Code straight from the
+Install the embedded Agent Skill for Codex, Claude Code, and opencode straight from the
 binary (check with `afhttp skill status`, remove with `afhttp skill uninstall`):
 
 ```bash
@@ -30,7 +30,7 @@ The hard part for an agent is not fetching bytes. It is that many useful URLs do
 - **Browser-backed fetch** when it does not, producing rendered HTML, an agent-readable observation snapshot, screenshot, and network/console logs as artifacts.
 - **Deep network capture** when the visible page is only chrome and the useful data arrives through XHR/fetch/GraphQL calls.
 - **Raw CDP escape hatch** when the agent needs to drive the browser directly (DOM inspection, form submission, custom waits) without going through any "click/type" abstraction layer.
-- **Ops panel** when a human needs to step in (manual login, captcha, 2FA) on the same browser the agent is using — the default panel needs no remote-desktop stack, and optional real-display takeover is available for hard sites, currently backed by KasmVNC.
+- **Human takeover** when a human needs to step in on the same browser the agent is using — `afhttp fetch <url> --takeover` on a takeover-ready host (auto-discovered for the standard local container) hands a person the browser for a login, 2FA, captcha, or security challenge, then lets the agent re-fetch the same tab once the wall is cleared.
 - **Host health/capabilities and local profile tools** so agents can discover backend support and operators can list, inspect, retrieve captured downloads, prune, or delete persistent profiles.
 
 The agent never has to parse human-readable error messages. Every output is structured JSON. Every failure carries a stable `error_code`. See [architecture.md](architecture.md) for the full contract.
@@ -39,12 +39,12 @@ The agent never has to parse human-readable error messages. Every output is stru
 
 | Role | Command | What it does |
 | --- | --- | --- |
-| **browser-host** | `afhttp host` | Long-running foreground process. Holds Chromium + a profile. Exposes a CDP endpoint and the ops panel. |
-| **agent-driver** | `afhttp fetch`, `afhttp upload`, `afhttp cdp`, `afhttp ui`, `afhttp health`, `afhttp capabilities`, `afhttp profile`, `afhttp tabs`, or the Rust SDK | Short-lived client. Connects to a host's endpoint when needed, does work, writes artifacts locally. |
+| **browser-host** | `afhttp host` | Long-running foreground process. Holds Chromium + a profile. Exposes a CDP endpoint and optional real-display takeover. |
+| **agent-driver** | `afhttp fetch`, `afhttp upload`, `afhttp cdp`, `afhttp panel`, `afhttp health`, `afhttp capabilities`, `afhttp profile`, `afhttp tabs`, or the Rust SDK | Short-lived client. Connects to a host's endpoint when needed, does work, writes artifacts locally. |
 
 Hosts and drivers are independently locatable. Run the host where the browser needs to be (residential IP, GUI machine, datacenter); run the driver wherever the agent runs. Connectivity is your mesh's problem, not `afhttp`'s.
 
-The CLI has 9 commands: `host`, `fetch`, `upload`, `cdp`, `ui`, `health`, `capabilities`, `profile`, and `tabs`.
+The CLI has 11 commands: `host`, `fetch`, `upload`, `cdp`, `panel`, `health`, `capabilities`, `profile`, `tabs`, `skill`, and `container`.
 
 ## Quick start
 
@@ -61,9 +61,9 @@ afhttp fetch https://example.com
   "code": "fetch",
   "status": 200,
   "final_url": "https://example.com/",
-  "body_file": "/work/afhttp-out/<id>/body.html",
-  "rendered_html_file": "/work/afhttp-out/<id>/rendered.html",
-  "network_file": "/work/afhttp-out/<id>/network.json",
+  "body_file": "/tmp/afhttp-out/<id>/body.html",
+  "rendered_html_file": "/tmp/afhttp-out/<id>/rendered.html",
+  "network_file": "/tmp/afhttp-out/<id>/network.json",
   "trace": {
     "render_decision": "browser",
     "render_mode": "auto",
@@ -88,19 +88,19 @@ For real workflows: start one `afhttp host`, drive it from anywhere.
 # A non-loopback listener (anything other than 127.0.0.1 / a unix: socket) serves
 # full browser control over /cdp, so a --token-secret is required — the host refuses to
 # bind otherwise:
-export AFHTTP_TOKEN=$(head -c32 /dev/urandom | base64)
+export AFHTTP_TOKEN_SECRET=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n')
 afhttp host --listen tcp:0.0.0.0:9222 --profile work --display headless \
-            --token-secret "$AFHTTP_TOKEN"
+            --token-secret "$AFHTTP_TOKEN_SECRET"
 
 # From the agent's machine:
-afhttp fetch --endpoint-url ws://host.mesh.internal:9222 --token-secret "$AFHTTP_TOKEN" \
+afhttp fetch --endpoint-url ws://host.mesh.internal:9222 --token-secret "$AFHTTP_TOKEN_SECRET" \
              --render auto --wait auto \
              --want rendered_html,observation,screenshot,network,console \
              --network-bodies xhr \
              https://target.example.com/dashboard
 ```
 
-The token gates `/cdp`, the ops panel, and `/profile`; bind `tcp:127.0.0.1:<port>` or a `unix:` socket instead when the host and driver share a machine and you want to skip it. The profile persists across host restarts. Cookies and localStorage acquired in one fetch are available to the next.
+The token secret gates `/cdp`, display takeover, and `/profile`; bind `tcp:127.0.0.1:<port>` or a `unix:` socket instead when the host and driver share a machine and you want to skip it. The profile persists across host restarts. Cookies and localStorage acquired in one fetch are available to the next.
 
 ### Raw CDP escape hatch
 
@@ -130,17 +130,44 @@ afhttp capabilities --endpoint-url ws://host.mesh.internal:9222
 
 `/health` is for readiness. `/capabilities` is for planning artifact requests and avoiding predictable `backend_unsupported` warnings.
 
-### Human takes over (ops panel)
+### Human takes over (real-display takeover)
 
-When the agent hits a login wall or captcha:
+When the agent hits a login, 2FA, or captcha wall, run a takeover fetch. With
+the default local `afhttp container install` host running, `fetch --takeover`
+discovers its endpoint and token automatically:
 
 ```bash
-afhttp ui --endpoint-url ws://host.mesh.internal:9222
-# {"code":"ui","screencast_url":"http://host.mesh.internal:9222/ops/screencast","display_url":"http://host.mesh.internal:9222/ops/display","recommended_url":"http://host.mesh.internal:9222/ops/screencast","recommended_url_kind":"screencast_url","display_provider":null}
-# open that URL in your local browser
+afhttp fetch "$URL" --takeover
 ```
 
-The default ops panel shows the remote browser's live screen via CDP screencast and replays local pointer/keyboard events over CDP. For captchas, IME/CJK input, camoufox, or sites where CDP-synthesized input is flaky, start the host with `--takeover display --display-provider kasmvnc --display headful` and open the `display_url`; this proxies the display provider's web client so the human drives the same browser through a real X display. The agent can stay attached the whole time. See [architecture.md §9](architecture.md) for the risk-control honest assessment.
+If the warmed profile already reaches the target, `fetch --takeover` just
+returns the content. Otherwise it keeps a persistent tab open and returns a
+`next_action`:
+
+```json
+{
+  "code": "fetch",
+  "next_action": {
+    "kind": "human_takeover",
+    "takeover_url": "http://host.mesh.internal:9222/takeover/panel?handoff=…",
+    "takeover_url_expires_at_rfc3339": "2026-06-11T08:15:00Z",
+    "takeover_url_ttl_s": 900,
+    "takeover_url_scope": "takeover",
+    "recommended_command": "afhttp fetch \"$URL\" --tab page-7 --endpoint-url ws://host.mesh.internal:9222 …"
+  }
+}
+```
+
+A human opens the `takeover_url` in a local browser and drives the real display
+(Brave on KasmVNC). Once they are past the wall, the agent runs the
+`recommended_command` to re-fetch the same tab and continue. The agent can stay
+CDP-attached the whole time. `afhttp panel --endpoint-url …` prints the same display
+URL directly. See [architecture.md §9](architecture.md) for the risk-control
+honest assessment. `fetch --takeover` needs a running takeover-ready host (the
+standard local `afhttp-host` is auto-discovered, remote/custom hosts use
+`--endpoint-url` or `AFHTTP_ENDPOINT_URL`) and a browser render (`--render auto`
+or `always`); it does not auto-create containers. Without `--profile`, takeover
+switches to a persistent profile derived from the URL's registrable domain.
 
 ### Manage persistent profiles
 
@@ -148,14 +175,16 @@ Persistent browser profiles are local disk identities. Operators can inspect and
 
 ```bash
 afhttp profile list
-afhttp profile info work
-afhttp profile lock-status work
-afhttp profile downloads work
+afhttp profile info work --backend brave
+afhttp profile lock-status work --backend brave
+afhttp profile downloads work --backend brave
 afhttp profile prune --older-than 30d --dry-run
-afhttp profile delete old-work --confirm old-work
+afhttp profile delete old-work --backend brave --confirm old-work
 ```
 
 Profile lifecycle commands are local-only; `downloads` only lists captured files, and destructive commands refuse locked profiles.
+Profile names are logical and persistent storage is backend-scoped, so
+`work` under Brave and `work` under Chromium are different directories.
 
 ## From Rust
 
@@ -190,11 +219,11 @@ The protocol layer is CDP-generic. `afhttp host` knows how to launch:
 
 | Backend | Notes |
 | --- | --- |
-| Chromium / Chrome / Edge / Brave | Full support: all artifacts, observation, network body capture, ops panel, optional real-display takeover currently backed by KasmVNC, multi-attach. |
+| Chromium / Chrome / Edge / Brave | Full support: all artifacts, observation, network body capture, optional real-display takeover currently backed by KasmVNC, multi-attach. |
 | chrome-headless-shell | Same as Chromium — Google's slimmer headless distribution, identical CDP surface. Useful when the full browser is unavailable. |
 | fingerprint-chromium | Same capability matrix as Chromium, including optional real-display takeover, with engine-level fingerprint spoofing (UA, WebGL, canvas, CDP-detection evasion). The host derives a stable seed from the profile path so identity stays per-profile. |
-| Lightpanda | HTML / text / network metadata / console / limited observation only — no screenshot, no screencast, no display takeover (no rendering). |
-| Camoufox (via foxbridge) | Firefox stealth fork driven through the [foxbridge](https://foxbridge.vulpineos.com/) CDP→Juggler proxy. Same CDP subset as Lightpanda — no chromium screenshot/screencast — but optional real-display takeover works because the human drives the real X display. |
+| Lightpanda | HTML / text / network metadata / console / limited observation only — no screenshot, no display takeover (no rendering). |
+| Camoufox (via foxbridge) | Firefox stealth fork driven through the [foxbridge](https://foxbridge.vulpineos.com/) CDP→Juggler proxy. Same CDP subset as Lightpanda — no chromium screenshot — but optional real-display takeover works because the human drives the real X display. |
 | Any other CDP-compatible browser | Launch it yourself; drivers connect via `--endpoint-url`. |
 
 Unsupported per-artifact operations return per-artifact warnings (`backend_unsupported`), not whole-fetch failures.
@@ -227,7 +256,7 @@ When a page requires an emailed verification link or OTP, hand off to **afmail**
 
 ## Docs
 
-- [Architecture](architecture.md) — the canonical contract: roles, CLI surface, profile model, artifacts, health/capabilities endpoints, ops panel, backends, error codes, SDK.
+- [Architecture](architecture.md) — the canonical contract: roles, CLI surface, profile model, artifacts, health/capabilities endpoints, human takeover, backends, error codes, SDK.
 - [Design Principles](design.md) — codebase-wide conventions (field naming, structured errors, output formats, no-panic policy).
 - [CLI Reference](cli.md) — flag-by-flag reference for the `afhttp` binary.
 - [Protocol Reference](reference.md) — output schemas for fetch, cdp, health, capabilities, and profile results.

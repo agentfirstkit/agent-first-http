@@ -2,7 +2,7 @@
 //! Agent Skill across Codex, Claude Code, and opencode via the shared
 //! `agent_first_data::skill` admin.
 
-use clap::{Args as ClapArgs, Subcommand};
+use clap::{Args as ClapArgs, Subcommand, ValueEnum};
 
 use agent_first_data::skill::{
     self, SkillAction, SkillAgentSelection, SkillError, SkillOptions, SkillScope, SkillSpec,
@@ -10,6 +10,42 @@ use agent_first_data::skill::{
 
 use crate::cli::output;
 use crate::shared::error::{Error, ErrorCode};
+
+/// `--agent` selector.
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SkillAgentArg {
+    All,
+    Codex,
+    ClaudeCode,
+    Opencode,
+}
+
+impl From<SkillAgentArg> for SkillAgentSelection {
+    fn from(v: SkillAgentArg) -> Self {
+        match v {
+            SkillAgentArg::All => SkillAgentSelection::All,
+            SkillAgentArg::Codex => SkillAgentSelection::Codex,
+            SkillAgentArg::ClaudeCode => SkillAgentSelection::ClaudeCode,
+            SkillAgentArg::Opencode => SkillAgentSelection::Opencode,
+        }
+    }
+}
+
+/// `--scope` selector.
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SkillScopeArg {
+    Personal,
+    Project,
+}
+
+impl From<SkillScopeArg> for SkillScope {
+    fn from(v: SkillScopeArg) -> Self {
+        match v {
+            SkillScopeArg::Personal => SkillScope::Personal,
+            SkillScopeArg::Project => SkillScope::Project,
+        }
+    }
+}
 
 /// The embedded skill this binary installs.
 const SPEC: SkillSpec = SkillSpec {
@@ -37,12 +73,12 @@ pub enum SkillSub {
 
 #[derive(ClapArgs, Debug)]
 pub struct TargetArgs {
-    /// Agent to manage: all, codex, claude-code, opencode.
+    /// Agent to manage.
     #[arg(long, default_value = "all")]
-    pub agent: String,
-    /// Skill scope: personal or project (project is Claude Code / opencode only).
+    pub agent: SkillAgentArg,
+    /// Skill scope (project is Claude Code / opencode only).
     #[arg(long, default_value = "personal")]
-    pub scope: String,
+    pub scope: SkillScopeArg,
     /// Skills directory; requires a single concrete --agent.
     #[arg(long = "skills-dir")]
     pub skills_dir: Option<String>,
@@ -63,41 +99,19 @@ pub async fn run(args: Args) -> Result<(), Error> {
         SkillSub::Install(w) => (SkillAction::Install, "skill_install", w.target, w.force),
         SkillSub::Uninstall(w) => (SkillAction::Uninstall, "skill_uninstall", w.target, w.force),
     };
-    let options = build_options(target, force)?;
+    let options = build_options(target, force);
     let report = skill::run_skill_admin(&SPEC, action, &options).map_err(to_error)?;
     output::emit(code, &report)
 }
 
-/// Parse the `--agent` / `--scope` string flags into the library enums.
-fn build_options(target: TargetArgs, force: bool) -> Result<SkillOptions, Error> {
-    let agent = match target.agent.as_str() {
-        "all" => SkillAgentSelection::All,
-        "codex" => SkillAgentSelection::Codex,
-        "claude-code" => SkillAgentSelection::ClaudeCode,
-        "opencode" => SkillAgentSelection::Opencode,
-        other => {
-            return Err(Error::new(
-                ErrorCode::InvalidArgument,
-                format!("invalid --agent '{other}': expected all, codex, claude-code, opencode"),
-            ))
-        }
-    };
-    let scope = match target.scope.as_str() {
-        "personal" => SkillScope::Personal,
-        "project" => SkillScope::Project,
-        other => {
-            return Err(Error::new(
-                ErrorCode::InvalidArgument,
-                format!("invalid --scope '{other}': expected personal, project"),
-            ))
-        }
-    };
-    Ok(SkillOptions {
-        agent,
-        scope,
+/// Convert the `--agent` / `--scope` flags into the library options.
+fn build_options(target: TargetArgs, force: bool) -> SkillOptions {
+    SkillOptions {
+        agent: target.agent.into(),
+        scope: target.scope.into(),
         skills_dir: target.skills_dir,
         force,
-    })
+    }
 }
 
 /// afhttp's Error has no hint field, so fold the skill hint into the detail.
@@ -124,29 +138,18 @@ mod tests {
     }
 
     #[test]
-    fn build_options_parses_and_rejects() {
+    fn build_options_maps_flags() {
         let ok = build_options(
             TargetArgs {
-                agent: "opencode".into(),
-                scope: "project".into(),
+                agent: SkillAgentArg::Opencode,
+                scope: SkillScopeArg::Project,
                 skills_dir: Some("/tmp/x".into()),
             },
             true,
-        )
-        .unwrap();
+        );
         assert_eq!(ok.agent, SkillAgentSelection::Opencode);
         assert_eq!(ok.scope, SkillScope::Project);
         assert!(ok.force);
-
-        let bad = build_options(
-            TargetArgs {
-                agent: "emacs".into(),
-                scope: "personal".into(),
-                skills_dir: None,
-            },
-            false,
-        );
-        assert_eq!(bad.unwrap_err().error_code, ErrorCode::InvalidArgument);
     }
 
     #[test]

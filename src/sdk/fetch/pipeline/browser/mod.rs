@@ -14,9 +14,9 @@ use crate::sdk::endpoint::Endpoint;
 use crate::sdk::fetch::artifacts::{
     body as body_artifact,
     collectors::{ConsoleCollector, NetworkCollector},
-    console as console_artifact, network as network_artifact, observation as observation_artifact,
-    rendered_html as rendered_html_artifact, screenshot as screenshot_artifact,
-    text as text_artifact,
+    console as console_artifact, content as content_artifact, network as network_artifact,
+    observation as observation_artifact, rendered_html as rendered_html_artifact,
+    screenshot as screenshot_artifact, text as text_artifact,
 };
 use crate::sdk::fetch::deadline::FetchDeadline;
 use crate::sdk::fetch::page_classification;
@@ -43,8 +43,9 @@ mod network_bodies;
 mod wait;
 
 use capture::{
-    capture_inner_text, capture_location, capture_outer_html, capture_page_snapshot,
-    capture_response_body, capture_screenshot, navigation_status_from_performance, PageSnapshot,
+    capture_content, capture_inner_text, capture_location, capture_outer_html,
+    capture_page_snapshot, capture_response_body, capture_screenshot,
+    navigation_status_from_performance, PageSnapshot,
 };
 use download::{
     configure_download_capture, finish_download_navigation, navigate_has_download_flag,
@@ -165,7 +166,9 @@ pub(super) async fn browser_path(
                 session::open_blank_target(&conn),
             )
             .await?;
-        (target_id, session_id, true)
+        // Keep the new target open when the caller asked (human takeover);
+        // otherwise close it once the fetch finishes.
+        (target_id, session_id, !builder.keep_tab_open)
     };
 
     deadline
@@ -424,7 +427,7 @@ pub(super) async fn browser_path(
             Some(&snapshot.text),
             Some(&snapshot.title),
         ) {
-            result.page_kind = Some(classification.kind);
+            result.set_page_kind(classification.kind);
             warnings.push(Warning {
                 artifact: Artifact::RenderedHtml,
                 code: classification.code,
@@ -505,6 +508,62 @@ pub(super) async fn browser_path(
                 code: e.error_code,
                 detail: e.detail,
             }),
+        }
+    }
+
+    if builder.want.contains(&Artifact::Content) || builder.want.contains(&Artifact::ContentJson) {
+        match deadline
+            .run_result(
+                "capture_content",
+                ErrorCode::ArtifactCaptureTimeout,
+                capture_content(&conn, &session_id, deadline),
+            )
+            .await
+        {
+            Ok(content) => {
+                if builder.want.contains(&Artifact::Content) {
+                    push_size_warning(
+                        &mut warnings,
+                        Artifact::Content,
+                        content.markdown.trim().len(),
+                        builder.readiness.min_text_bytes as usize,
+                    );
+                    match content_artifact::write_markdown(&paths, &content.markdown).await {
+                        Ok(path) => result.set_artifact_file(Artifact::Content, path),
+                        Err(e) => warnings.push(Warning {
+                            artifact: Artifact::Content,
+                            code: e.error_code,
+                            detail: e.detail,
+                        }),
+                    }
+                }
+                if builder.want.contains(&Artifact::ContentJson) {
+                    match content_artifact::write_json(&paths, &content.json).await {
+                        Ok(path) => result.set_artifact_file(Artifact::ContentJson, path),
+                        Err(e) => warnings.push(Warning {
+                            artifact: Artifact::ContentJson,
+                            code: e.error_code,
+                            detail: e.detail,
+                        }),
+                    }
+                }
+            }
+            Err(e) => {
+                if builder.want.contains(&Artifact::Content) {
+                    warnings.push(Warning {
+                        artifact: Artifact::Content,
+                        code: e.error_code,
+                        detail: e.detail.clone(),
+                    });
+                }
+                if builder.want.contains(&Artifact::ContentJson) {
+                    warnings.push(Warning {
+                        artifact: Artifact::ContentJson,
+                        code: e.error_code,
+                        detail: e.detail,
+                    });
+                }
+            }
         }
     }
 
@@ -867,7 +926,7 @@ fn cdp_cookie_param(cookie: &PreparedCookie, url: &Url) -> Value {
             serde_json::json!(cdp_same_site(same_site)),
         );
     }
-    if let Some(expires) = cookie.expires_unix {
+    if let Some(expires) = cookie.expires_epoch_s {
         param.insert("expires".to_string(), serde_json::json!(expires));
     }
     if cookie.partitioned == Some(true) {

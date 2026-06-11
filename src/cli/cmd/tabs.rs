@@ -23,23 +23,28 @@ pub enum TabsSub {
 
 #[derive(ClapArgs, Debug)]
 pub struct EndpointArgs {
-    /// CDP endpoint URL (e.g. `ws://127.0.0.1:9222`).
-    #[arg(long = "endpoint-url")]
+    /// CDP endpoint URL (e.g. `ws://127.0.0.1:9222`). Falls back to
+    /// `AFHTTP_ENDPOINT_URL`.
+    #[arg(long = "endpoint-url", env = "AFHTTP_ENDPOINT_URL")]
     pub endpoint: String,
     /// Bearer token, if the host was started with `--token-secret`.
-    #[arg(long = "token-secret")]
+    /// Falls back to `AFHTTP_TOKEN_SECRET`.
+    #[arg(long = "token-secret", env = "AFHTTP_TOKEN_SECRET")]
     pub token: Option<String>,
 }
 
 #[derive(ClapArgs, Debug)]
 pub struct CloseArgs {
-    /// CDP target id to close (e.g. `41A0F1E0FD…`).
-    pub id: String,
-    /// CDP endpoint URL (e.g. `ws://127.0.0.1:9222`).
-    #[arg(long = "endpoint-url")]
+    /// CDP target id (tab) to close (e.g. `41A0F1E0FD…`).
+    #[arg(long)]
+    pub tab: String,
+    /// CDP endpoint URL (e.g. `ws://127.0.0.1:9222`). Falls back to
+    /// `AFHTTP_ENDPOINT_URL`.
+    #[arg(long = "endpoint-url", env = "AFHTTP_ENDPOINT_URL")]
     pub endpoint: String,
     /// Bearer token, if the host was started with `--token-secret`.
-    #[arg(long = "token-secret")]
+    /// Falls back to `AFHTTP_TOKEN_SECRET`.
+    #[arg(long = "token-secret", env = "AFHTTP_TOKEN_SECRET")]
     pub token: Option<String>,
 }
 
@@ -76,7 +81,7 @@ async fn list(args: EndpointArgs) -> Result<(), Error> {
 }
 
 async fn close(args: CloseArgs) -> Result<(), Error> {
-    if args.id.trim().is_empty() {
+    if args.tab.trim().is_empty() {
         return Err(Error::new(
             ErrorCode::InvalidArgument,
             "tabs close: target id must not be empty",
@@ -85,7 +90,7 @@ async fn close(args: CloseArgs) -> Result<(), Error> {
     let client = build_client(&args.endpoint, args.token)?;
     let response = client
         .cdp("Target.closeTarget")
-        .params(serde_json::json!({ "targetId": args.id }))
+        .params(serde_json::json!({ "targetId": args.tab }))
         .send()
         .await?;
     let success = response
@@ -94,7 +99,7 @@ async fn close(args: CloseArgs) -> Result<(), Error> {
         .unwrap_or(false);
     let payload = serde_json::json!({
         "code": "tab_closed",
-        "target_id": args.id,
+        "target_id": args.tab,
         "success": success,
     });
     output::emit("tab_closed", &payload)

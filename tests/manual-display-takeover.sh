@@ -5,7 +5,7 @@
 # with port 9222 forwarded to the host. The example takes the REAL
 # launch path: it spawns KasmVNC's Xvnc, launches the browser headful on
 # that X display, and reverse-proxies the KasmVNC web client under
-# afhttp's listener. Open http://127.0.0.1:9222/ops/display in your own
+# afhttp's listener. Open http://127.0.0.1:9222/takeover/panel in your own
 # browser and drive the in-container browser with real OS-level input.
 #
 # Nothing is installed on the host: KasmVNC, the X server, and the

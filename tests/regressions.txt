@@ -12,7 +12,8 @@ shared::contract_tests::readme_and_reference_fetch_json_examples_are_flat
 sdk::inline::tests::inline_guard_drop_closes_port_and_removes_ephemeral_profile
 cli::args::tests::clap_command_flag_snapshot_matches
 cli::args::tests::cli_contract_has_no_legacy_aliases
-cli::cmd::ui::tests::ui_result_has_no_legacy_url_aliases
+cli::cmd::panel::tests::panel_result_exposes_takeover_url_only
+takeover_handoff_is_unavailable_without_display_provider
 cli_render_none_without_endpoint_does_not_require_browser_env
 secure_cookie_on_http_url_is_skipped_not_invalid
 token_query_parameter_is_percent_decoded

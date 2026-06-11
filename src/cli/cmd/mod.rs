@@ -1,17 +1,17 @@
 //! Per-subcommand implementations. Each builds a request from clap args,
 //! calls into the SDK, and emits a response envelope.
 
+pub mod argenums;
 pub mod capabilities;
 pub mod cdp;
 pub mod container;
 pub mod fetch;
 pub mod health;
 pub mod host;
+pub mod panel;
 pub mod profile;
 pub mod skill;
 pub mod tabs;
-pub mod takeover;
-pub mod ui;
 pub mod upload;
 
 #[cfg(test)]
@@ -59,8 +59,7 @@ mod tests {
                             "screenshot": {"supported": false}
                         },
                         "wait_modes": ["auto", "load"],
-                        "display_takeover": false,
-                        "ops_panel": {"supported": false, "screencast": false},
+                        "takeover": {"supported": false, "backend_capable": false},
                         "profile": {"persistent": true, "ephemeral": true},
                         "features": {},
                         "limits": {}
@@ -267,7 +266,7 @@ mod tests {
 
         tabs::run(tabs::Args {
             sub: tabs::TabsSub::Close(tabs::CloseArgs {
-                id: "tab-1".into(),
+                tab: "tab-1".into(),
                 endpoint: endpoint.clone(),
                 token: None,
             }),
@@ -277,7 +276,7 @@ mod tests {
 
         let err = tabs::run(tabs::Args {
             sub: tabs::TabsSub::Close(tabs::CloseArgs {
-                id: " ".into(),
+                tab: " ".into(),
                 endpoint: "ws://127.0.0.1:1".into(),
                 token: None,
             }),
@@ -309,9 +308,9 @@ mod tests {
     #[tokio::test]
     async fn profile_command_covers_local_lifecycle_branches() {
         let tmp = tempfile::tempdir().unwrap();
-        let profile_dir = tmp.path().join("work");
+        let profile_dir = tmp.path().join("brave").join("work");
         std::fs::create_dir_all(&profile_dir).unwrap();
-        let meta = crate::sdk::profile::meta::ProfileMeta::new("work");
+        let meta = crate::sdk::profile::meta::ProfileMeta::new("work", "brave");
         std::fs::write(
             profile_dir.join("afhttp-profile.json"),
             serde_json::to_string(&meta).unwrap(),
@@ -333,6 +332,7 @@ mod tests {
         profile::run(profile::Args {
             sub: profile::ProfileSub::Info(profile::InfoArgs {
                 name: "work".into(),
+                backend: Some("brave".into()),
                 profile_root: Some(tmp.path().to_path_buf()),
             }),
         })
@@ -341,6 +341,7 @@ mod tests {
         profile::run(profile::Args {
             sub: profile::ProfileSub::LockStatus(profile::InfoArgs {
                 name: "work".into(),
+                backend: Some("brave".into()),
                 profile_root: Some(tmp.path().to_path_buf()),
             }),
         })
@@ -349,6 +350,7 @@ mod tests {
         profile::run(profile::Args {
             sub: profile::ProfileSub::Cookies(profile::InfoArgs {
                 name: "work".into(),
+                backend: Some("brave".into()),
                 profile_root: Some(tmp.path().to_path_buf()),
             }),
         })
@@ -357,6 +359,7 @@ mod tests {
         profile::run(profile::Args {
             sub: profile::ProfileSub::Downloads(profile::InfoArgs {
                 name: "work".into(),
+                backend: Some("brave".into()),
                 profile_root: Some(tmp.path().to_path_buf()),
             }),
         })
@@ -374,6 +377,7 @@ mod tests {
         profile::run(profile::Args {
             sub: profile::ProfileSub::Delete(profile::DeleteArgs {
                 name: "work".into(),
+                backend: Some("brave".into()),
                 confirm: "work".into(),
                 profile_root: Some(tmp.path().to_path_buf()),
             }),

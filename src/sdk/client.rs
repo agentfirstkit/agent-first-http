@@ -33,6 +33,9 @@ pub struct Client {
 pub(crate) struct ClientInner {
     pub(crate) endpoint: Endpoint,
     pub(crate) token: Option<String>,
+    /// Optional profile selector passed to the host on the `/cdp` connection so
+    /// the host switches its active profile (per-domain isolation).
+    pub(crate) profile: Option<String>,
     pub(crate) http: reqwest::Client,
     pub(crate) hostless: bool,
     pub(crate) inline_host: Option<crate::sdk::inline::InlineHost>,
@@ -65,6 +68,7 @@ impl Client {
             inner: Arc::new(ClientInner {
                 endpoint,
                 token: None,
+                profile: None,
                 http,
                 hostless: false,
                 inline_host: None,
@@ -99,6 +103,7 @@ impl Client {
             let new = ClientInner {
                 endpoint: self.inner.endpoint.clone(),
                 token: Some(token),
+                profile: self.inner.profile.clone(),
                 http: self.inner.http.clone(),
                 hostless: self.inner.hostless,
                 inline_host: self.inner.inline_host.clone(),
@@ -108,6 +113,36 @@ impl Client {
             self.inner = Arc::new(new);
         }
         self
+    }
+
+    /// Bind this client to a host profile. The name is sent on the `/cdp`
+    /// connection so the host switches its active profile before serving.
+    #[must_use]
+    pub fn with_profile(mut self, profile: impl Into<String>) -> Self {
+        let profile = profile.into();
+        if let Some(inner) = Arc::get_mut(&mut self.inner) {
+            inner.profile = Some(profile);
+            inner.cdp = Mutex::new(None);
+        } else {
+            let new = ClientInner {
+                endpoint: self.inner.endpoint.clone(),
+                token: self.inner.token.clone(),
+                profile: Some(profile),
+                http: self.inner.http.clone(),
+                hostless: self.inner.hostless,
+                inline_host: self.inner.inline_host.clone(),
+                cdp: Mutex::new(None),
+                profile_info: Mutex::new(None),
+            };
+            self.inner = Arc::new(new);
+        }
+        self
+    }
+
+    /// Optional host profile selector.
+    #[must_use]
+    pub fn profile(&self) -> Option<&str> {
+        self.inner.profile.as_deref()
     }
 
     /// The endpoint this client points at.
@@ -152,6 +187,7 @@ impl Client {
             let new = ClientInner {
                 endpoint: self.inner.endpoint.clone(),
                 token: self.inner.token.clone(),
+                profile: self.inner.profile.clone(),
                 http: self.inner.http.clone(),
                 hostless: false,
                 inline_host: Some(inline_host),
@@ -184,7 +220,8 @@ impl Client {
             return Ok(conn.clone());
         }
         let endpoint = self.effective_endpoint().await?;
-        let conn = Arc::new(Connection::connect_endpoint(&endpoint, self.token()).await?);
+        let conn =
+            Arc::new(Connection::connect_endpoint(&endpoint, self.token(), self.profile()).await?);
         *guard = Some(conn.clone());
         Ok(conn)
     }

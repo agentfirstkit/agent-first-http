@@ -4,8 +4,8 @@
 #   docker compose -f container/docker/compose.yaml up --build
 #
 # Toggle optional backends with the WITH_* build args (chromium is always on).
-# Set AFHTTP_TOKEN to pin the bearer token; leave it empty to let the host
-# generate and persist one to the profile volume (printed on startup).
+# Set AFHTTP_TOKEN_SECRET to pin the bearer token secret; leave it empty to let
+# the host generate and persist one to the profile volume (printed on startup).
 services:
   afhttp-host:
     build:
@@ -16,10 +16,11 @@ services:
         WITH_LIGHTPANDA: "${WITH_LIGHTPANDA:-0}"
         WITH_FINGERPRINT_CHROMIUM: "${WITH_FINGERPRINT_CHROMIUM:-0}"
         WITH_CAMOUFOX: "${WITH_CAMOUFOX:-0}"
+        WITH_BRAVE: "${WITH_BRAVE:-0}"
         WITH_KASMVNC: "${WITH_KASMVNC:-0}"
     environment:
-      AFHTTP_TOKEN: "${AFHTTP_TOKEN:-}"
-      AFHTTP_PROFILE: "${AFHTTP_PROFILE:-work}"
+      AFHTTP_TOKEN_SECRET: "${AFHTTP_TOKEN_SECRET:-}"
+      AFHTTP_PROFILE: "${AFHTTP_PROFILE:--}"
       AFHTTP_PORT: "${AFHTTP_PORT:-9222}"
     # Chromium needs more than the default 64MB /dev/shm even with
     # --disable-dev-shm-usage on some pages.

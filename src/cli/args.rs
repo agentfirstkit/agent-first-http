@@ -11,11 +11,11 @@ use crate::shared::error::{Error, ErrorCode};
 /// decide what to do next: rendered HTML, a DOM observation, a screenshot, and
 /// network and console logs. It covers the whole acquisition range behind one
 /// structured contract — a plain HTTP fetch when that works, a browser-backed
-/// fetch when it does not, deep network capture, a raw CDP escape hatch, and an
-/// ops panel for human takeover (login, captcha, 2FA).
+/// fetch when it does not, deep network capture, a raw CDP escape hatch, and a
+/// takeover panel for human takeover (login, captcha, 2FA).
 ///
 /// Two roles. `afhttp host` is the long-lived browser-host: it holds Chromium and
-/// one on-disk profile, and exposes a CDP endpoint plus the ops panel. The other
+/// one on-disk profile, and exposes a CDP endpoint plus the takeover panel. The other
 /// commands are short-lived drivers that connect to a host, do work, and write
 /// artifacts locally. Run the host where the browser needs to be and the driver
 /// wherever the agent runs.
@@ -31,18 +31,16 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Run the browser host.
-    Host(crate::cli::cmd::host::Args),
     /// Fetch a URL.
     Fetch(Box<crate::cli::cmd::fetch::Args>),
+    /// Run the browser host.
+    Host(crate::cli::cmd::host::Args),
     /// Upload a local file to a browser tab via DOM.setFileInputFiles.
     Upload(crate::cli::cmd::upload::Args),
     /// Send a raw CDP method.
     Cdp(crate::cli::cmd::cdp::Args),
-    /// Print or open the ops panel URL.
-    Ui(crate::cli::cmd::ui::Args),
-    /// Prepare a browser tab for human takeover.
-    Takeover(crate::cli::cmd::takeover::Args),
+    /// Print a short-lived takeover URL.
+    Panel(crate::cli::cmd::panel::Args),
     /// Query /health.
     Health(crate::cli::cmd::health::Args),
     /// Query /capabilities.
@@ -105,15 +103,20 @@ mod tests {
     #[test]
     fn cli_contract_has_no_legacy_aliases() {
         let command = Cli::command();
-        assert_eq!(command.get_subcommands().count(), 12);
+        assert_eq!(command.get_subcommands().count(), 11);
         let mut snapshot = String::new();
         write_command_snapshot(&command, 0, &mut snapshot);
         for forbidden in [
             "  command download\n",
+            "  command takeover\n",
+            "  command hard-site\n",
             "--profile-name",
             concat!("profile", "_name"),
             concat!("?", "profile="),
             "arg timeout --timeout\n",
+            "arg health --health\n",
+            "arg network_redact --network-redact\n",
+            "arg takeover_quality --takeover-quality\n",
             "legacy",
         ] {
             assert!(

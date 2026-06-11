@@ -1,12 +1,25 @@
 //! Profile-root resolution + name validation.
 //!
 //! Root: `$XDG_DATA_HOME/afhttp/profiles/` (or `$HOME/.local/share/afhttp/profiles/`).
+//! Persistent profiles are scoped by backend family under
+//! `<root>/<backend>/<name>`.
 //! Name validation rejects anything that would escape the root or break
 //! filesystem traversal.
 
 use std::path::{Path, PathBuf};
 
 use crate::shared::error::{Error, ErrorCode};
+
+pub const KNOWN_BACKENDS: &[&str] = &[
+    "chromium",
+    "chrome",
+    "chrome-headless-shell",
+    "fingerprint-chromium",
+    "edge",
+    "brave",
+    "lightpanda",
+    "camoufox",
+];
 
 /// Resolve the default profile root.
 pub fn default_root() -> PathBuf {
@@ -65,6 +78,20 @@ pub fn validate_name(name: &str) -> Result<(), Error> {
     Ok(())
 }
 
+pub fn validate_backend_key(backend: &str) -> Result<(), Error> {
+    if KNOWN_BACKENDS.contains(&backend) {
+        Ok(())
+    } else {
+        Err(Error::new(
+            ErrorCode::InvalidArgument,
+            format!(
+                "unknown profile backend {backend:?}; expected one of {}",
+                KNOWN_BACKENDS.join(", ")
+            ),
+        ))
+    }
+}
+
 /// Windows reserved device names per [MSDN naming
 /// conventions](https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file).
 /// A reserved match is the bare name *or* the bare name followed by
@@ -116,12 +143,55 @@ pub fn ensure_no_filesystem_collision(root: &Path, name: &str) -> Result<(), Err
     ))
 }
 
+pub fn ensure_backend_dir(root: &Path, backend: &str) -> Result<PathBuf, Error> {
+    validate_backend_key(backend)?;
+    let dir = root.join(backend);
+    match std::fs::symlink_metadata(&dir) {
+        Ok(md) if md.is_dir() => Ok(dir),
+        Ok(md) => {
+            let kind = if md.file_type().is_symlink() {
+                "symlink"
+            } else if md.is_file() {
+                "regular file"
+            } else {
+                "non-directory entry"
+            };
+            Err(Error::new(
+                ErrorCode::ProfileRootUnavailable,
+                format!(
+                    "profile backend {backend:?} would collide with a {kind} at {}",
+                    dir.display()
+                ),
+            ))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(&dir).map_err(|e| {
+                Error::new(
+                    ErrorCode::ProfileRootUnavailable,
+                    format!("create profile backend dir {}: {e}", dir.display()),
+                )
+            })?;
+            Ok(dir)
+        }
+        Err(e) => Err(Error::new(
+            ErrorCode::ProfileRootUnavailable,
+            format!("stat {}: {e}", dir.display()),
+        )),
+    }
+}
+
 /// Join the root + name into a concrete profile directory path. Performs
 /// structural validation only; callers that touch the filesystem should
 /// also run [`ensure_no_filesystem_collision`].
 pub fn join_root_name(root: &Path, name: &str) -> Result<PathBuf, Error> {
     validate_name(name)?;
     Ok(root.join(name))
+}
+
+pub fn join_root_backend_name(root: &Path, backend: &str, name: &str) -> Result<PathBuf, Error> {
+    validate_backend_key(backend)?;
+    validate_name(name)?;
+    Ok(root.join(backend).join(name))
 }
 
 #[cfg(test)]
@@ -253,6 +323,20 @@ mod tests {
                 assert_eq!(p, root.join(name), "join_root_name drift for {name:?}");
             }
         }
+    }
+
+    #[test]
+    fn backend_scoped_join_uses_backend_then_name() {
+        let root = std::path::Path::new("/tmp/afhttp/profiles");
+        assert_eq!(
+            join_root_backend_name(root, "brave", "work").unwrap(),
+            root.join("brave").join("work")
+        );
+        assert_eq!(
+            join_root_backend_name(root, "chromium", "work").unwrap(),
+            root.join("chromium").join("work")
+        );
+        assert!(join_root_backend_name(root, "firefox", "work").is_err());
     }
 
     #[test]

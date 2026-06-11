@@ -1,16 +1,16 @@
 //! Manual real-display takeover smoke test (KasmVNC provider, human in the loop).
 //!
 //! Counterpart of `examples/manual_screencast_takeover.rs`, which exercises the
-//! lightweight CDP ops panel (`/ops/screencast`). This one exercises the opt-in
+//! lightweight CDP takeover panel (`/takeover/screencast`). This one exercises the opt-in
 //! **real-display takeover** mode (`--takeover display --display-provider
-//! kasmvnc`, served at `/ops/display`): the browser runs *headful* on an in-container
+//! kasmvnc`, served at `/takeover/panel`): the browser runs *headful* on an in-container
 //! KasmVNC X display, and the human drives it with real OS-level input
 //! through a browser tab proxied by afhttp's authenticated listener.
 //!
 //! Unlike the CDP panel, this harness goes through the **real launch
 //! path** — `AppState::launch` actually spawns `Xvnc`, waits for the X
 //! display + web port, launches the browser headful on `DISPLAY=:NN`,
-//! and wires the `/ops/display` reverse proxy. Nothing is faked, so the
+//! and wires the `/takeover/panel` reverse proxy. Nothing is faked, so the
 //! whole point of the feature — input fidelity — is what you test.
 //!
 //! The automated counterpart is `tests/display_takeover.rs` (proxy/token
@@ -47,8 +47,8 @@
 use std::time::Duration;
 
 use agent_first_http::host::bootstrap::{
-    install_rustls_provider, BrowserChoice, DisplayMode, DisplayProvider, HealthPublic, HostArgs,
-    ProfileChoice, Takeover,
+    install_rustls_provider, BrowserChoice, DisplayMode, HealthPublic, HostArgs, ProfileChoice,
+    Takeover, TakeoverProviderKind,
 };
 use agent_first_http::host::listener::{build_router, AppState};
 use agent_first_http::sdk::Client;
@@ -167,14 +167,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         listen: format!("tcp:{LISTEN}"),
         profile,
         display: DisplayMode::Headful,
-        takeover: Takeover::Display {
-            provider: DisplayProvider::KasmVnc,
+        takeover: Takeover::On {
+            provider: TakeoverProviderKind::KasmVnc,
         },
         display_quality: quality,
         browser,
         browser_bin: None,
         token: None,
-        ops_enabled: true,
+        takeover_enabled: true,
         health_enabled: true,
         health_public: HealthPublic::Off,
         engine_envs: Vec::new(),
@@ -185,7 +185,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("launching KasmVNC + {browser_arg} headful (this can take a few seconds)…");
     let state = AppState::launch(&args).await?;
     let display = state
-        .display_takeover
+        .takeover
         .as_ref()
         .map(|d| d.display.clone())
         .unwrap_or_else(|| "(none)".into());
@@ -227,7 +227,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("================================================================");
     println!();
     println!("  1. Open this URL in your browser:");
-    println!("       http://127.0.0.1:9222/ops/display");
+    println!("       http://127.0.0.1:9222/takeover/panel");
     println!();
     if let Some(u) = real_url.as_deref() {
         println!("  2. You're looking at a REAL headful browser on an in-container");

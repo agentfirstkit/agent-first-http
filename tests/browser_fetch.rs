@@ -42,7 +42,7 @@ async fn spawn_host_with_browser() -> Option<(String, tempfile::TempDir, OwnedSe
         browser: BrowserChoice::Chromium,
         browser_bin: Some(bin),
         token: None,
-        ops_enabled: true,
+        takeover_enabled: true,
         health_enabled: true,
         health_public: HealthPublic::Off,
         engine_envs: Vec::new(),
@@ -155,6 +155,105 @@ async fn render_always_returns_rendered_html_and_artifacts() {
     assert!(
         result.trace.navigation_duration_ms.is_some(),
         "navigation_duration_ms should be set"
+    );
+}
+
+#[tokio::test]
+async fn content_artifacts_include_shadow_dom_iframe_and_links() {
+    let Some((endpoint, tmp, _browser_guard)) = spawn_host_with_browser().await else {
+        println!("(skipping: no chromium)");
+        return;
+    };
+    let fixture = support::fixture_server::spawn().await;
+    let url = format!("{}/content-artifact.html", fixture.base_url());
+
+    let client = Client::connect(&endpoint).expect("client");
+    let result = client
+        .fetch(url.clone())
+        .render(RenderMode::Auto)
+        .wait(Wait::Load)
+        .timeout(Duration::from_secs(15))
+        .want([Artifact::Content, Artifact::ContentJson, Artifact::Text])
+        .out_dir(tmp.path().to_path_buf())
+        .send()
+        .await
+        .expect("fetch");
+    assert_eq!(
+        result.trace.escalation_reason.as_deref(),
+        Some("requested_content_artifact")
+    );
+
+    let text =
+        std::fs::read_to_string(result.text_file.as_ref().expect("text_file")).expect("read text");
+    assert!(
+        !text.contains("€4.49"),
+        "plain innerText should not be the source of shadow-root price"
+    );
+
+    let content_path = result.content_file.as_ref().expect("content_file");
+    let content = std::fs::read_to_string(content_path).expect("read content");
+    assert!(
+        content.contains("€4.49"),
+        "content.md must include normalized shadow DOM price: {content}"
+    );
+    assert!(
+        content.contains("Frame Action"),
+        "content.md must include same-origin iframe text: {content}"
+    );
+    assert!(
+        content.contains("[Explore this plan]"),
+        "content.md must include actionable links: {content}"
+    );
+    assert!(
+        !content.contains("external, external"),
+        "content.md should not repeat external metadata: {content}"
+    );
+
+    let content_json_path = result
+        .content_json_file
+        .as_ref()
+        .expect("content_json_file");
+    let content_json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(content_json_path).expect("read json"))
+            .expect("content json");
+    let links = content_json["links"].as_array().expect("links");
+    let explore = links
+        .iter()
+        .find(|link| link["text"].as_str() == Some("Explore this plan"))
+        .expect("explore link");
+    assert_eq!(explore["same_site"].as_bool(), Some(true));
+    assert_eq!(explore["kind"].as_str(), Some("product_detail"));
+    for skipped in ["Missing href", "Empty href", "Hash only", "JS pseudo link"] {
+        assert!(
+            links
+                .iter()
+                .all(|link| link["text"].as_str() != Some(skipped)),
+            "invalid link {skipped:?} should not be actionable: {links:?}"
+        );
+    }
+    let anchor = links
+        .iter()
+        .find(|link| link["text"].as_str() == Some("Pricing details anchor"))
+        .expect("same-page anchor link");
+    assert!(
+        anchor["absolute_url"]
+            .as_str()
+            .is_some_and(|url| url.ends_with("#pricing-details")),
+        "named anchors should remain available: {anchor:?}"
+    );
+    let partner = links
+        .iter()
+        .find(|link| link["text"].as_str() == Some("Partner"))
+        .expect("external partner link");
+    assert_eq!(partner["same_site"].as_bool(), Some(false));
+    assert_eq!(partner["kind"].as_str(), Some("external"));
+    assert!(
+        content_json["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .any(|item| item["title"].as_str() == Some("Starter VPS")),
+        "content_json should expose product cards: {content_json}"
     );
 }
 

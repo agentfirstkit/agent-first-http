@@ -1,6 +1,6 @@
 //! Artifact tokens (`architecture.md §8`) + on-disk path resolution.
 //!
-//! Seven default tokens identify the artifacts a fetch can produce, plus
+//! Nine default tokens identify the artifacts captured by default, plus
 //! `Storage` (default-off, sensitive-data risk). Each maps to a fixed
 //! filename; the response JSON references them as absolute paths under
 //! `--out/<request_id>/`.
@@ -20,6 +20,8 @@ pub enum Artifact {
     Body,
     RenderedHtml,
     Text,
+    Content,
+    ContentJson,
     Screenshot,
     Network,
     Console,
@@ -29,13 +31,15 @@ pub enum Artifact {
 }
 
 impl Artifact {
-    /// The seven default artifacts captured on every browser fetch.
+    /// The nine default artifacts captured on every browser fetch.
     /// `Storage` is intentionally excluded — sensitive data risk means
     /// agents must opt in with `--want storage`.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 9] = [
         Self::Body,
         Self::RenderedHtml,
         Self::Text,
+        Self::Content,
+        Self::ContentJson,
         Self::Screenshot,
         Self::Network,
         Self::Console,
@@ -51,6 +55,8 @@ impl Artifact {
             Self::Body => "body",
             Self::RenderedHtml => "rendered.html",
             Self::Text => "text.txt",
+            Self::Content => "content.md",
+            Self::ContentJson => "content.json",
             Self::Screenshot => "page.png",
             Self::Network => "network.json",
             Self::Console => "console.json",
@@ -65,6 +71,8 @@ impl Artifact {
             Self::Body => "body",
             Self::RenderedHtml => "rendered_html",
             Self::Text => "text",
+            Self::Content => "content",
+            Self::ContentJson => "content_json",
             Self::Screenshot => "screenshot",
             Self::Network => "network",
             Self::Console => "console",
@@ -81,7 +89,7 @@ impl std::fmt::Display for Artifact {
 }
 
 /// Concrete on-disk locations for a single fetch. Built from `--out` (or
-/// the default `./afhttp-out/`) plus the request id.
+/// the default system temp `afhttp-out/`) plus the request id.
 #[derive(Debug, Clone)]
 pub struct ArtifactPaths {
     pub root: std::path::PathBuf,
@@ -121,8 +129,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_seven_tokens_present() {
-        assert_eq!(Artifact::ALL.len(), 7);
+    fn all_default_tokens_present() {
+        assert_eq!(Artifact::ALL.len(), 9);
+        assert!(Artifact::ALL.contains(&Artifact::Content));
+        assert!(Artifact::ALL.contains(&Artifact::ContentJson));
         // Storage is intentionally absent from ALL (default-off).
         assert!(!Artifact::ALL.contains(&Artifact::Storage));
     }
@@ -133,6 +143,8 @@ mod tests {
             (Artifact::Body, "body"),
             (Artifact::RenderedHtml, "rendered.html"),
             (Artifact::Text, "text.txt"),
+            (Artifact::Content, "content.md"),
+            (Artifact::ContentJson, "content.json"),
             (Artifact::Screenshot, "page.png"),
             (Artifact::Network, "network.json"),
             (Artifact::Console, "console.json"),
@@ -175,6 +187,8 @@ mod tests {
             Artifact::Body,
             Artifact::RenderedHtml,
             Artifact::Text,
+            Artifact::Content,
+            Artifact::ContentJson,
             Artifact::Screenshot,
             Artifact::Network,
             Artifact::Console,

@@ -30,8 +30,10 @@ The tool may:
 
 The tool must not:
 
-- infer page intent
-- decide that a page is a login page, a paywall, or a captcha
+- infer open-ended page intent or extract business meaning
+- decide that a page is a login page or a paywall; conservative security-challenge
+  markers may only set `page_kind`/`next_action` so the agent knows the target
+  content is unverified
 - choose selectors
 - rank elements by likely usefulness
 - fill forms or click buttons on its own
@@ -47,8 +49,8 @@ The networked runtime has two roles. Every command that talks to a running brows
 
 | Role | Responsibility |
 | --- | --- |
-| **browser-host** | Runs Chromium (or compatible). Holds an on-disk profile. Exposes a CDP endpoint. Optionally embeds the ops panel. |
-| **agent-driver** | A CDP client. Issues commands to a browser-host endpoint. Writes artifacts to its own local disk. Comes in two flavors: programmatic (`afhttp fetch`, `afhttp cdp`, or the SDK from Rust code) and interactive (ops panel served by the host, opened in any browser). |
+| **browser-host** | Runs Chromium (or compatible). Holds an on-disk profile. Exposes a CDP endpoint. Optionally serves real-display takeover. |
+| **agent-driver** | A CDP client. Issues commands to a browser-host endpoint. Writes artifacts to its own local disk. Comes in two flavors: programmatic (`afhttp fetch`, `afhttp cdp`, or the SDK from Rust code) and interactive (real-display takeover served by the host, opened in any browser). |
 
 There is no third "operator UI" role. Interactive operation is a CDP client served by the browser-host, opened by a human in a normal browser. The host does not know who its CDP clients are; that is not its concern.
 
@@ -64,19 +66,23 @@ These two non-concerns mean `afhttp` only ever sees endpoint URLs. The CLI and S
 
 ## 5. CLI Surface
 
-The CLI has 9 commands and no stdin protocol. The command set is: `host`, `fetch`, `upload`, `cdp`, `ui`, `health`, `capabilities`, `profile`, and `tabs`.
+The CLI has 11 commands and no stdin protocol. The command set is: `host`,
+`fetch`, `upload`, `cdp`, `panel`, `health`, `capabilities`, `profile`, `tabs`,
+`skill`, and `container`.
 
 | Command | Role | Purpose |
 | --- | --- | --- |
-| `afhttp host` | browser-host | Start a foreground browser host, profile, CDP/HTTP listener, optional ops panel, and optional display takeover. |
+| `afhttp host` | browser-host | Start a foreground browser host, profile, CDP/HTTP listener, and optional real-display takeover. |
 | `afhttp fetch` | agent-driver | Acquire a URL through HTTP-only or browser-backed fetch and write requested artifacts. |
 | `afhttp upload` | agent-driver | Attach a local file to an existing `<input type=file>` through `DOM.setFileInputFiles`. |
 | `afhttp cdp` | agent-driver | Send one raw CDP method to a target tab. |
-| `afhttp ui` | agent-driver/human | Print the ops-panel and display takeover URLs for a host. |
+| `afhttp panel` | agent-driver/human | Print a short-lived takeover URL for a host. |
 | `afhttp health` | agent-driver | Query `/health` readiness. |
 | `afhttp capabilities` | agent-driver | Query `/capabilities` planning metadata. |
 | `afhttp profile` | local admin | List, inspect, lock-check, list captured downloads, delete, prune, or inspect redacted cookies for local profiles. |
 | `afhttp tabs` | agent-driver | List or close existing CDP targets. |
+| `afhttp skill` | local admin | Install, remove, or check the embedded Agent Skill for supported coding agents. |
+| `afhttp container` | local admin/operator | Build, run, inspect, log, or remove the managed local host container. |
 
 ### Common conventions
 
@@ -84,12 +90,18 @@ These hold across every command (the per-flag reference is generated into
 [cli.md](cli.md) from `afhttp --help --recursive --output markdown`):
 
 - Flags are long-form only; flag names map to JSON fields with hyphens for
-  underscores (`--browser-bin` ↔ `browser_bin`). Booleans that default to false
-  are bare (`--tls-insecure`); booleans that default to true take a value
-  (`--health on|off`).
+  underscores (`--browser-bin` ↔ `browser_bin`). Boolean flags are bare presence
+  toggles, never `on|off` values: a default-on behavior is disabled with `--no-x`
+  (`--no-health`, `--no-network-redact`, `--no-cookie-jar`); a default-off
+  behavior is enabled with bare `--x` (`--tls-insecure`).
 - `--endpoint-url` accepts `ws://`, `wss://`, `http://`, `https://`, or `unix:`.
-- `--token-secret` is sent as `Authorization: Bearer <token>` (or the `token` query
-  parameter for the panel URLs `afhttp ui` prints).
+  Every driver command (`fetch`/`cdp`/`tabs`/`upload`/`health`/`capabilities`/`panel`)
+  falls back to `AFHTTP_ENDPOINT_URL` when the flag is omitted; the explicit flag
+  wins.
+- `--token-secret` is sent as `Authorization: Bearer <token>` for HTTP
+  control requests. Driver commands fall back to `AFHTTP_TOKEN_SECRET` when the
+  flag is omitted; the explicit flag wins. Human takeover URLs never embed this
+  long-lived token; they carry a short-lived `handoff` capability instead.
 - Every command prints exactly one JSON object on stdout: success carries `code`;
   failure carries `error_code`, `error`, and `retryable`.
 
@@ -102,13 +114,12 @@ afhttp host
   --listen <tcp:HOST:PORT|unix:/path>
   --profile <name|->
   --display headless|headful
-  --takeover none|screencast|display
-  --display-provider kasmvnc
-  --display-quality-percent <0-100>
-  --browser auto|chromium|chrome|chrome_shell|fingerprint_chromium|edge|brave|lightpanda|camoufox
+  --takeover-provider off|<provider> # provider name (currently only kasmvnc); off = no takeover
+  --takeover-quality-percent <0-100>
+  --browser auto|chromium|chrome|chrome-headless-shell|fingerprint-chromium|edge|brave|lightpanda|camoufox
   --browser-bin <path>
   --token-secret <string>
-  --health on|off
+  --no-health
   --health-public off|minimal
   --proxy-url <url>
   --engine-env K=V
@@ -116,7 +127,7 @@ afhttp host
   --recent-requests-cap <N>
 ```
 
-Lifecycle: when `--takeover display --display-provider kasmvnc` is set, starts the KasmVNC display provider first, waits for the X display and localhost web client, launches the browser headful on that display, then opens the listener and serves CDP plus host HTTP routes (`/ops/screencast`, `/ops/display`, `/health`, `/capabilities`). Without display takeover, starts the browser directly. On exit, terminates browser/display subprocesses, removes the profile dir if ephemeral, releases the listener.
+Lifecycle: when `--takeover-provider <provider>` (e.g. `--takeover-provider kasmvnc`) is set, starts that display provider first, waits for the X display and localhost web client, launches the browser headful on that display, then opens the listener and serves CDP plus host HTTP routes (`/takeover/panel`, `/health`, `/capabilities`). With `--takeover-provider off` (the default for the raw `host` binary), starts the browser directly and serves no takeover surface. On exit, terminates browser/display subprocesses, removes the profile dir if ephemeral, releases the listener.
 
 ### `afhttp fetch`
 
@@ -128,12 +139,12 @@ afhttp fetch <url>
   --token-secret <string>
   --render none|auto|always
   --tab new|<id>
+  --takeover                 # prepare the tab for human takeover (see below)
   --wait auto|load|idle|selector:<css>|selector-visible:<css>|ms:<n>
   --method GET|POST|PUT|PATCH|DELETE|...
   --data <string|@file>
-  --data-file <path>
-  --form key=value
-  --header K:V
+  --form name=value
+  --header NAME:VALUE
   --cookie 'name=value[; Path=/; Domain=...; Secure; HttpOnly; SameSite=Lax]'
   --user-agent <string>
   --evaluate-after-wait <js>
@@ -143,7 +154,7 @@ afhttp fetch <url>
   --readiness-idle-ms <n>
   --readiness-stable-ms <n>
   --readiness-min-text-bytes <n>
-  --network-redact on|off
+  --no-network-redact
   --capture-ws
   --capture-sse
   --out <dir>
@@ -157,15 +168,17 @@ afhttp fetch <url>
   --timeout-ms <ms>
 ```
 
-Output: one JSON object on stdout. Successful fetches include `status`, `final_url`, `tab_id`, top-level `*_file` artifact paths, `trace` (render decision, escalation reason, wait/readiness signals, phase timings, cookie-jar path/warnings, sensitive-capture flags), and `warnings` (for non-fatal artifact failures). Fetch execution failures use the standard error envelope plus the same `trace` shape. `--network-redact off`, `--capture-ws`, and `--capture-sse` can expose tokens or PII in artifacts and are reflected in `trace.sensitive_capture`.
+Output: one JSON object on stdout. Successful fetches include `status`, `final_url`, `tab_id`, top-level `*_file` artifact paths, `trace` (render decision, escalation reason, wait/readiness signals, phase timings, cookie-jar path/warnings, sensitive-capture flags), and `warnings` (for non-fatal artifact failures). Fetch execution failures use the standard error envelope plus the same `trace` shape. `--no-network-redact`, `--capture-ws`, and `--capture-sse` can expose tokens or PII in artifacts and are reflected in `trace.sensitive_capture`.
 
 Custom request options are applied before acquisition, not silently ignored. On the HTTP fast path, headers, user-agent, and applicable cookies are attached to the per-request `reqwest` request. Secure cookies are skipped for `http://` URLs rather than failing the fetch, and host-only cookies match only the exact origin host. On the browser path, ordinary headers use `Network.setExtraHTTPHeaders`, user-agent uses `Network.setUserAgentOverride`, and cookies are installed through CDP before `Page.navigate`.
 
 `--evaluate-after-wait` executes JavaScript after the configured wait condition and before artifact capture. It only works when the final path is browser-backed; it does not by itself trigger `--render auto` escalation.
 
+`--takeover` is the human-takeover entry point. It requires a running takeover-ready host and a browser render (`--render auto` or `always`, never `none`). When `--endpoint-url` / `AFHTTP_ENDPOINT_URL` is omitted, the driver auto-discovers the standard local `afhttp-host` container and reads its token; it does not auto-create containers. It opens or reuses a persistent tab (`--tab`) and navigates it. If `--profile` is omitted, it switches the host to the URL's registrable-domain profile (e.g. `contabo.com`) before opening the tab. If the warmed profile already reaches the target, it returns the captured content with no `next_action`. Otherwise it leaves the tab open and returns `next_action` with `kind: "human_takeover"`, a complete short-lived `takeover_url` (the real-display URL a human opens to clear a login/captcha/2FA wall), its expiry metadata, and a `recommended_command` that re-fetches the same `--tab` once the human is past the wall.
+
 ### Other endpoint commands
 
-`afhttp cdp`, `afhttp upload`, and `afhttp tabs` are raw CDP/target-management helpers. They require `--endpoint-url` and do not introduce Playwright-style semantic action wrappers. `afhttp ui`, `afhttp health`, and `afhttp capabilities` are thin HTTP helpers over `/ops/screencast` + `/ops/display`, `/health`, and `/capabilities`; tokens in generated URLs are percent-encoded.
+`afhttp cdp`, `afhttp upload`, and `afhttp tabs` are raw CDP/target-management helpers. They require `--endpoint-url` and do not introduce Playwright-style semantic action wrappers. `afhttp panel`, `afhttp health`, and `afhttp capabilities` are thin HTTP helpers over `/takeover/handoff`, `/health`, and `/capabilities`; panel output is a short-lived takeover URL with `handoff=...`, not the host token.
 
 ### Local commands
 
@@ -173,14 +186,22 @@ Downloads are browser session artifacts, not a standalone command: host-side `Br
 
 ## 6. Host Health and Capabilities Endpoints
 
-`afhttp host` serves JSON host metadata on the same listener as CDP and the ops panel.
+`afhttp host` serves JSON host metadata on the same listener as CDP and display takeover.
 
 | Route | Auth | Purpose |
 | --- | --- | --- |
 | `GET /health` | Token required unless `--health-public minimal` is set | Liveness/readiness for agents and supervisors. |
 | `GET /capabilities` | Token required | Detailed backend and artifact support for planning fetch requests. |
 
-When `--token-secret` is configured, authenticated requests use `Authorization: Bearer <token>` or the same `token` query parameter accepted by `afhttp ui`. Unauthenticated public health is intentionally minimal: it may return only `{ "status": "ok" }` / `{ "status": "starting" }` / `{ "status": "degraded" }` and never exposes profile names, browser versions, paths, tabs, or network policy.
+When `--token-secret` is configured, authenticated control requests use
+`Authorization: Bearer <token>`; legacy `token_secret` query auth remains only
+for non-takeover control endpoints and CDP WebSocket setup. `/takeover/handoff`
+mints a short-lived URL capability with default TTL 900 seconds (allowed range
+60-3600 seconds), scoped only to `/takeover/*`; host restart invalidates all
+handoffs. Unauthenticated public health is intentionally minimal:
+it may return only `{ "status": "ok" }` / `{ "status": "starting" }` /
+`{ "status": "degraded" }` and never exposes profile names, browser versions,
+paths, tabs, or network policy.
 
 `/health` response shape:
 
@@ -213,14 +234,11 @@ When `--token-secret` is configured, authenticated requests use `Authorization: 
     "observation": {"supported": true, "source": "accessibility+dom"}
   },
   "wait_modes": ["auto", "load", "idle", "selector", "ms"],
-  "display_takeover": true,
-  "ops_panel": {
+  "takeover": {
+    "backend_capable": true,
     "supported": true,
-    "screencast": true,
-    "display": true,
-    "screencast_url": "/ops/screencast",
-    "display_url": "/ops/display",
-    "display_provider": "kasmvnc"
+    "panel_url": "/takeover/panel",
+    "provider": "kasmvnc"
   },
   "profile": {"persistent": true, "ephemeral": true},
   "limits": {"network_body_max_bytes_default": 10485760}
@@ -233,9 +251,9 @@ Capabilities are descriptive, not a reservation. A later fetch can still return 
 
 Profiles are Chromium user-data directories. They are host-local on disk and never copied between hosts. A profile holds cookies, localStorage, sessionStorage, IndexedDB, service worker registrations, and cached browser fingerprint state.
 
-One `afhttp host` binds one profile. Run multiple hosts to use multiple identities in parallel.
+One `afhttp host` serves one *active* profile at a time, but it switches at runtime: a client that passes `?profile=<name>` on the `/cdp` connection (or `afhttp fetch --profile <name>`) makes the host relaunch its browser under that profile, handing off the on-disk profile lock. `fetch --takeover` derives the profile from the URL's registrable domain (eTLD+1) by default, so each site gets an isolated identity. Switching is sequential — an in-flight fetch keeps its own browser alive until it finishes, but the host has one foreground browser, so for genuinely parallel multi-domain work run multiple hosts.
 
-- **Persistent**: `afhttp host --profile work` loads `$XDG_DATA_HOME/afhttp/profiles/work/`, creating it on first use. Profile persists across host restarts. The directory is locked while the host is running; a second `afhttp host --profile work` on the same machine will fail with `profile_locked`.
+- **Persistent**: `afhttp host --profile work --browser brave` loads `$XDG_DATA_HOME/afhttp/profiles/brave/work/`, creating it on first use. The same logical name under another backend, such as `--browser chromium`, uses `$XDG_DATA_HOME/afhttp/profiles/chromium/work/`. Profile persists across host restarts. The backend-scoped directory is locked while the host is running; a second host on the same backend/profile will fail with `profile_locked`.
 - **Ephemeral**: `afhttp host --profile -` (or `--profile` omitted) uses a tempdir, removed on exit.
 - **Inline fetch**: always ephemeral. The `afhttp fetch URL` shorthand path spawns a short-lived host with a tempdir profile, uses it, kills it.
 
@@ -259,45 +277,48 @@ Persistent profile directories include a small `afhttp-profile.json` metadata fi
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "name": "work",
+  "backend": "brave",
   "created_at_rfc3339": "2026-05-27T00:00:00Z",
   "last_used_at_rfc3339": "2026-05-27T01:23:45Z",
-  "last_host_version": "0.5.0"
+  "last_host_version": "0.6.0"
 }
 ```
 
-The metadata is advisory. If an existing Chromium profile directory has no metadata file, `afhttp profile list` still reports it with `metadata_present: false` and infers size/mtime from the filesystem.
+The metadata is advisory, but schema/backend mismatches are rejected because the backend directory is part of the isolation boundary. Old unscoped `$XDG_DATA_HOME/afhttp/profiles/<name>` directories are ignored as deprecated data; there is no implicit migration.
 
 Profile lifecycle commands:
 
 | Command | Behavior |
 | --- | --- |
-| `profile list` | Lists persistent profiles with kind, path, size, metadata status, last used time, and lock status. |
-| `profile info <name>` | Reports metadata, profile path, approximate disk usage, active lock owner when known, and browser-family hints. |
-| `profile lock-status <name>` | Returns whether the profile is locked and, when possible, the owning pid/start time. |
-| `profile downloads <name>` | Read-only listing of files captured under `<profile>/downloads`, with path, byte size, and completion state. |
-| `profile delete <name>` | Deletes an unlocked persistent profile after `--confirm <name>`. Refuses ephemeral profiles and locked profiles. |
+| `profile list` | Lists persistent profiles with backend, name, path, size, metadata status, last used time, and lock status. |
+| `profile info <name> [--backend <backend>]` | Reports metadata, profile path, approximate disk usage, active lock owner when known, and browser-family hints. `--backend` is required when multiple backends have the same logical name. |
+| `profile lock-status <name> [--backend <backend>]` | Returns whether the backend-scoped profile is locked and, when possible, the owning pid/start time. |
+| `profile downloads <name> [--backend <backend>]` | Read-only listing of files captured under `<profile>/downloads`, with path, byte size, and completion state. |
+| `profile delete <name> [--backend <backend>]` | Deletes an unlocked persistent profile after `--confirm <name>`. Refuses ephemeral profiles and locked profiles. |
 | `profile prune` | Deletes unlocked persistent profiles older than `--older-than`; `--dry-run` reports the candidate list without deleting. |
 
 `profile delete` and `profile prune` are intentionally local-only. Remote deletion over the CDP/HTTP endpoint would make a stolen token able to destroy browser identities.
 
 ## 8. Artifacts
 
-Eight artifact tokens are identified by stable names. Seven are default artifacts; `storage` is opt-in because it can expose sensitive local state.
+Ten artifact tokens are identified by stable names. Nine are default artifacts; `storage` is opt-in because it can expose sensitive local state.
 
 | Token | Content | Filename | Notes |
 | --- | --- | --- | --- |
 | `body` | Raw HTTP response body | `body.<ext>` | Always produced when an HTTP response was received. Ext derived from content-type. |
 | `rendered_html` | Post-JS DOM serialized to HTML | `rendered.html` | Only when render was used. |
 | `text` | `document.body.innerText` | `text.txt` | Only when render was used. Mechanical, not heuristic. |
+| `content` | Agent-oriented composed page view: visible text from open shadow DOM, same-origin frames, cards, tables, links | `content.md` | Only when render was used. The artifact an agent reads first. |
+| `content_json` | Structured form of `content` with link/action candidates | `content.json` | Only when render was used. Use to choose a follow-up link/action. |
 | `screenshot` | Full-page PNG | `page.png` | Only when render was used. |
 | `network` | Deep request/response log from CDP `Network.*` events | `network.json` | Always produced when a browser was used; HTTP-only fetches produce a one-entry log. Optional captured bodies live under `network-bodies/`. |
 | `console` | Console events | `console.json` | Only when render was used. |
 | `observation` | Agent-readable accessibility/DOM snapshot | `observation.json` | Only when render was used. Mechanical projection of page state; no semantic ranking or intent inference. |
 | `storage` | localStorage/sessionStorage/IndexedDB-name snapshot | `storage.json` | Opt-in with `--want storage`; default-off because of sensitive data risk. |
 
-Files are written to `--out <dir>` (default `./afhttp-out/<request-id>/`) on the agent-driver's machine, not the browser-host's. The response JSON references them as absolute paths.
+Files are written to `--out <dir>` (default: the system temporary directory under `afhttp-out/<request-id>/`) on the agent-driver's machine, not the browser-host's. The response JSON references them as absolute paths. The default temp artifacts persist for inspection; pass `--out` when you want a project-local or long-lived directory.
 
 Each artifact can fail independently of the overall fetch. A missing screenshot returns `warnings: [{artifact: "screenshot", code: "backend_unsupported"}]` rather than failing the whole fetch. The agent decides whether the partial result is useful.
 
@@ -363,36 +384,27 @@ Captured bodies are written under `network-bodies/<request_id>.<ext>` and refere
 `pending_by_resource_type`. These are mechanical counts; they do not classify
 which payload is important.
 
-## 9. Ops Panel
+## 9. Takeover
 
-The default ops panel is a small static HTML+JS application embedded in the `afhttp` binary and served by `afhttp host` at `/ops/screencast`. It exists to let a human drive the browser without VNC, X server, or any system-level remote-desktop stack on the host machine. For hard sites, `--takeover display --display-provider kasmvnc` enables the real-display path at `/ops/display`: afhttp starts the KasmVNC display provider inside the container, runs the browser headful on that X display, and reverse-proxies the provider's web client through the authenticated listener.
+Human takeover lets a person drive the *same* browser the agent is using — for a manual login, 2FA, captcha, or any step the agent cannot complete on its own. The single takeover surface is **real-display takeover**: when `afhttp host` is launched with `--takeover-provider <provider>` (currently only `kasmvnc`), afhttp starts that display provider, runs the browser headful on its X display, and reverse-proxies the provider's web client through the authenticated listener at `/takeover/panel`. The container shipped by `afhttp container install` is takeover-ready by default (Brave + KasmVNC + an ephemeral initial profile + 2g `/dev/shm`).
 
-**Architecture.** The panel page loaded in the operator's local browser opens two WebSocket flows against the host:
+The driver-side entry point is `afhttp fetch <url> --takeover` against such a host (see §5). It opens or reuses a persistent tab, and either returns the content directly (if the warmed profile already reaches the target) or hands back a `takeover_url` and a `recommended_command` re-fetch for the same tab. The human opens the `takeover_url` in a local browser and drives the real display; the agent re-fetches once the wall is cleared.
 
-- **Inbound (host → operator)**: `Page.startScreencast` JPEG frames, decoded into a canvas.
-- **Outbound (operator → host)**: pointer (`pointermove` / `pointerdown` / `pointerup` / `wheel`) and keyboard (`keydown` / `keyup` / `compositionupdate`) events captured locally with `performance.now()` timestamps. The host replays them via CDP `Input.dispatch*` with the original inter-event timing preserved.
+**Risk-control honesty.** Real-display takeover drives a real X display through KasmVNC, so the human's pointer/keyboard input reaches the browser as native OS input events rather than synthesized CDP events. This is the strongest takeover fidelity afhttp offers (full input realism, IME/CJK input, real handedness/timing), but it does **not** by itself bypass captcha reputation systems or the headless/browser fingerprint surface. When real-display takeover still fails, the likely remaining causes are IP/network reputation, account state, or site policy — not the takeover surface. Takeover uses the host's active profile; by default `fetch --takeover` switches to a persistent per-site profile derived from the URL. KasmVNC stays an external GPLv2 process located on `PATH`; afhttp does not link or bundle it.
 
-**Risk-control honesty.** Capturing real human pointer/keyboard events and replaying them via CDP gives substantially higher fingerprint fidelity than synthesized events from a coarse UI. Specifically:
-
-- *Solved*: trajectory entropy, sub-millimeter jitter, sampling density, inter-event timing distribution, key dwell time, click hesitation, scroll-rate patterns, behavior signals from real handedness.
-- *Partial*: network jitter adds a small additional skew on top of human timing (statistically detectable but indistinguishable from a human on a poor connection); `getCoalescedEvents()` may not return identical micro-event sequences.
-- *Not solved*: headless browser fingerprint (`navigator.webdriver`, GPU strings, Canvas/Audio entropy, font fingerprints). These are orthogonal to input fidelity and are mitigated by `--display=headful` plus standard stealth patches, not by the ops panel.
-
-For sites where the residual CDP ops-panel fingerprint is still detected, use `afhttp host --takeover display --display-provider kasmvnc --display headful` inside the container. This improves display/input fidelity and covers camoufox, IME/CJK input, and flaky key sites, but it does not bypass captcha reputation systems by itself: pair it with the right proxy, stealth backend, and a warmed persistent profile. KasmVNC stays an external GPLv2 process located on `PATH`; afhttp does not link or bundle it.
-
-**Multi-attach.** The default ops panel is a CDP client; display takeover is a VNC/X client; the agent (via `afhttp fetch` or `afhttp cdp`) remains a CDP client. CDP supports multiple flattened sessions, so both can be connected to the same browser at the same time. Whichever client sends commands is the one acting. There is no handoff protocol; coordination between agent and human is the agent's concern.
+**Multi-attach.** Display takeover is a VNC/X client; the agent (via `afhttp fetch` or `afhttp cdp`) remains a CDP client. CDP supports multiple flattened sessions, so the agent stays attached while the human drives the display. Whichever side sends input is the one acting. There is no handoff protocol; coordination between agent and human is the agent's concern.
 
 ## 10. Backends
 
-`afhttp`'s protocol layer (fetch logic, CDP escape hatch, ops panel) is CDP-generic. The launcher layer (`afhttp host`) knows specific browser families.
+`afhttp`'s protocol layer (fetch logic, CDP escape hatch, display takeover) is CDP-generic. The launcher layer (`afhttp host`) knows specific browser families.
 
 | Backend | Launch profile in `host` | Capabilities |
 | --- | --- | --- |
-| Chromium / Chrome / Edge / Brave | `chromium` (and aliases) | Full: body, rendered_html, text, screenshot, network, console, observation, network body capture, ops panel, real-display takeover, health/capabilities, multi-attach. |
+| Chromium / Chrome / Edge / Brave | `chromium` (and aliases) | Full: body, rendered_html, text, screenshot, network, console, observation, network body capture, real-display takeover, health/capabilities, multi-attach. |
 | chrome-headless-shell | `chromium` (binary `chrome-headless-shell`) | Same capability matrix as Chromium — chrome-headless-shell is Google's slimmer headless distribution of the same engine, identical CDP surface. Use when the full Chrome/Chromium browser is unavailable or too heavy. |
 | fingerprint-chromium | `fingerprint-chromium` | Same capability matrix as Chromium, including real-display takeover. Engine surface (UA, navigator props, WebGL vendor, canvas/font enumeration, CDP-detection evasion) is spoofed per [adryfish/fingerprint-chromium](https://github.com/adryfish/fingerprint-chromium). The host derives a stable 32-bit `--fingerprint=<seed>` from the resolved profile path so identity stays consistent within a profile and diverges between profiles. Per-surface overrides (`--fingerprint-brand`, `--fingerprint-platform`, etc.) reach the engine via `--browser-arg`. |
-| Lightpanda | `lightpanda` | body, rendered_html (modulo JS engine limits), text, network metadata, console, limited observation. No screenshot, no screencast, no usable ops panel, no display takeover (no rendering), network body capture depends on backend support. |
-| Camoufox (via foxbridge) | `camoufox` | Firefox stealth fork driven by the [foxbridge](https://foxbridge.vulpineos.com/) CDP→Juggler proxy. Same artifact subset as Lightpanda for CDP-only features: no chromium-only screenshot/screencast and no default ops-panel screencast. Display takeover is supported because the human drives the real X display instead of CDP screencast. Body, rendered_html, text, network metadata, console, observation work. Persistent profiles refused with `backend_unsupported` until Firefox profile lifecycle is wired explicitly. The host spawns foxbridge with `--binary <camoufox>` on a pre-reserved port; the SDK sees a chromium-style WebSocket. |
+| Lightpanda | `lightpanda` | body, rendered_html (modulo JS engine limits), text, network metadata, console, limited observation. No screenshot, no display takeover (no rendering), network body capture depends on backend support. |
+| Camoufox (via foxbridge) | `camoufox` | Firefox stealth fork driven by the [foxbridge](https://foxbridge.vulpineos.com/) CDP→Juggler proxy. Same artifact subset as Lightpanda for CDP-only features: no chromium-only screenshot. Display takeover is supported because the human drives the real X display. Body, rendered_html, text, network metadata, console, observation work. Persistent profiles refused with `backend_unsupported` until Firefox profile lifecycle is wired explicitly. The host spawns foxbridge with `--binary <camoufox>` on a pre-reserved port; the SDK sees a chromium-style WebSocket. |
 | Any other CDP-compatible browser | none — user launches it themselves | Whatever the backend implements. `afhttp` clients connect via `--endpoint-url`. |
 
 Unsupported per-artifact operations return per-artifact warnings (`backend_unsupported`), not whole-fetch failures.
@@ -405,9 +417,9 @@ Both backends add stealth, but they address different threat models and are comp
 |---|---|---|
 | **Engine** | Chromium (Blink) | Firefox (Gecko) |
 | **Stealth mechanism** | Patches applied at the Chromium binary level: UA, navigator props, WebGL/Canvas entropy, CDP-detection evasion | Firefox stealth fork with Gecko-native fingerprint randomization; engine-level font/audio/WebGL divergence from stock Chromium |
-| **Full artifact support** | Yes — screenshot, screencast, ops panel | No — subset only (no screenshot/screencast) |
+| **Full artifact support** | Yes — screenshot | No — subset only (no screenshot) |
 | **Target profile** | Sites that block stock headless Chromium or `navigator.webdriver` detection | Sites that actively fingerprint Blink engine characteristics (WebGL vendor strings, V8 timing side-channels) and block Chromium-family browsers regardless of stealth patches |
-| **Ops panel** | Supported, plus optional real-display takeover currently backed by KasmVNC | Default CDP panel not supported; optional real-display takeover currently backed by KasmVNC |
+| **Real-display takeover** | Supported, currently backed by KasmVNC | Supported, currently backed by KasmVNC |
 
 Sites that specifically block all Chromium-family browsers (rare but real) require camoufox. Sites that just block unpatched headless work fine with fingerprint-chromium and get the full capability matrix. Both stay so operators can choose the right tool for the threat.
 
@@ -418,24 +430,24 @@ All errors carry `error_code` (stable enum), `error` (human-readable detail), an
 Three categories:
 
 - **Transport / navigation** — `navigation_timeout`, `host_unreachable`, `dns_resolution_failed`, `target_unreachable`, `tls_error`, `tab_crashed`, `browser_launch_failed`. Most are retryable; `tls_error` is not.
-- **Per-artifact/readiness warnings** — `backend_unsupported`, `artifact_capture_failed`, `artifact_capture_timeout`, `network_body_truncated`, `network_not_idle`, `pending_xhr_at_capture`, `artifact_empty`, `artifact_tiny`, `observation_empty`, `readiness_timeout`. These populate `warnings[]` on an otherwise-successful response; the fetch itself does not fail.
+- **Per-artifact/readiness/classification warnings** — `backend_unsupported`, `artifact_capture_failed`, `artifact_capture_timeout`, `network_body_truncated`, `network_not_idle`, `pending_xhr_at_capture`, `artifact_empty`, `artifact_tiny`, `bot_wall_detected`, `security_challenge_detected`, `observation_empty`, `readiness_timeout`. These populate `warnings[]` on an otherwise-successful response; the fetch itself does not fail. Challenge classifications also set `page_kind` and `next_action` so agents do not treat the transport response as verified target content.
 - **Configuration / profile** — `invalid_argument`, `invalid_endpoint`, `render_unavailable`, `profile_*`, `io_error`. Not retryable without fixing the configuration.
 
 The full enum with example `error` strings and per-code agent guidance lives in [reference.md §Error Codes](reference.md#error-codes).
 
 ## 12. Multi-Client Attach
 
-CDP allows multiple flattened sessions per target. The agent and the ops panel are independent clients. The browser is shared state.
+CDP allows multiple flattened sessions per target. The agent and the human (via real-display takeover) are independent clients. The browser is shared state.
 
-Coordination is the agent's concern, not the protocol's. Common pattern: the agent emits an out-of-band signal (e.g. to its own orchestrator) saying "I need help on `<endpoint>`/tab `<id>`". A human runs `afhttp ui --endpoint-url ...`, does their part, closes the panel. The agent's next `afhttp fetch --tab <id>` or `afhttp cdp` continues from the new browser state.
+Coordination is the agent's concern, not the protocol's. Common pattern: the agent emits an out-of-band signal (e.g. to its own orchestrator) saying "I need help on `<endpoint>`/tab `<id>`". A human runs `afhttp panel --endpoint-url ...`, opens the display takeover, does their part, and closes it. The agent's next `afhttp fetch --tab <id>` or `afhttp cdp` continues from the new browser state.
 
-The Rust SDK keeps one lazy CDP WebSocket per `Client` and reuses it across `fetch` / `cdp` calls until `Client::close().await` or drop. This cache is per SDK client, not a browser-wide lease: the ops panel and other SDK clients still attach through their own CDP connections, and all of them can continue to multi-attach to the same target. Each one-shot `cdp --tab` / `fetch --tab` operation detaches its temporary flattened session when the call completes; `--tab` controls target lifetime, not connection ownership.
+The Rust SDK keeps one lazy CDP WebSocket per `Client` and reuses it across `fetch` / `cdp` calls until `Client::close().await` or drop. This cache is per SDK client, not a browser-wide lease: other SDK clients still attach through their own CDP connections (and a human can drive the real display in parallel), and all of them can continue to multi-attach to the same target. Each one-shot `cdp --tab` / `fetch --tab` operation detaches its temporary flattened session when the call completes; `--tab` controls target lifetime, not connection ownership.
 
 There is no "lease," "lock," or "active driver" in the protocol. Both clients can issue commands at any time; if they conflict, that is the user's coordination bug to solve.
 
 ## 13. Library / SDK
 
-The Rust library exposes the same surface as the CLI, in-process. It is **not** an embedded browser engine; it is an SDK that talks to a `browser-host` over CDP/HTTP. Everything that physically requires a Chromium process — launching, active profile locking, and the ops panel — stays in `afhttp host`. Local profile lifecycle helpers operate on disk and do not pull browser-launch dependencies into SDK-only consumers.
+The Rust library exposes the same surface as the CLI, in-process. It is **not** an embedded browser engine; it is an SDK that talks to a `browser-host` over CDP/HTTP. Everything that physically requires a Chromium process — launching, active profile locking, and display takeover — stays in `afhttp host`. Local profile lifecycle helpers operate on disk and do not pull browser-launch dependencies into SDK-only consumers.
 
 ```rust
 use afhttp::{Client, RenderMode, Wait, Artifact};
@@ -482,7 +494,7 @@ let local = Client::inline_ephemeral().await?;
 
 **What the SDK exposes**: `Client`, fetch/cdp/health/capabilities builders, the artifact and error enums, request/response/cookie/render-mode/network-capture types, and local profile-store helpers.
 
-**What the SDK does not expose**: chromiumoxide types, host launch internals, ops panel internals, or a remote profile-administration API.
+**What the SDK does not expose**: chromiumoxide types, host launch internals, display-takeover internals, or a remote profile-administration API.
 
 **CLI is the first SDK consumer.** `afhttp fetch` and `afhttp cdp` parse args, call into the SDK, format the response. They are not parallel implementations.
 
@@ -505,7 +517,7 @@ External consumers (e.g. the `fetch` service) depend on the crate with `default-
 - Not NAT traversal. Mesh is the user's responsibility.
 - Not service discovery. `afhttp` does not register hosts; the user resolves endpoints.
 - Not a daemon manager. `afhttp host` is a long-running foreground process; the user manages lifecycle.
-- Not heuristic page understanding. No Readability extraction, no "is this a login page" detection, no interstitial / captcha / bot-challenge classification. Challenge pages return the page facts (status, headers, body, screenshot) like any other page; the agent decides what they mean.
+- Not heuristic page understanding. No Readability extraction and no open-ended "is this a login page" / business-meaning detection. Challenge pages still return the page facts (status, headers, body, screenshot); conservative security-challenge markers may add `page_kind` / `next_action`, and the agent decides what to do next.
 - Not semantic observation ranking. `observation.json` reports roles, names, states, and geometry; it does not decide which element matters.
 - Not remote profile administration. Profile delete/prune/list operates on local disk only.
 - Not an embedded engine in the library. The library is an SDK; engines live in `afhttp host`.

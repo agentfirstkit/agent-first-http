@@ -3,7 +3,7 @@
 //! `afhttp` connects to a host over one of:
 //!   - `ws://host:port` / `wss://host:port` — CDP over WebSocket (primary)
 //!   - `http://host:port` / `https://host:port` — for `/health`,
-//!     `/capabilities`, and the ops panel
+//!     `/capabilities`, and the takeover panel
 //!   - `unix:/path/to.sock` — local-machine listener (Linux/macOS only)
 //!
 //! The SDK accepts any of those forms and derives the others when needed
@@ -86,7 +86,7 @@ impl Endpoint {
         }
     }
 
-    /// HTTP base URL for `/health`, `/capabilities`, ops panel. WS endpoints
+    /// HTTP base URL for `/health`, `/capabilities`, takeover panel. WS endpoints
     /// derive an HTTP twin on the same host:port; Unix endpoints derive
     /// `http://unix-socket` and use a unix transport at request time.
     #[must_use]

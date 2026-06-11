@@ -44,6 +44,10 @@ pub struct ListArgs {
 pub struct InfoArgs {
     /// Profile name.
     pub name: String,
+    /// Profile backend scope (for example chromium, brave, camoufox).
+    /// Required when the same profile name exists under multiple backends.
+    #[arg(long)]
+    pub backend: Option<String>,
     /// Profiles root directory. Defaults to `$XDG_DATA_HOME/afhttp/profiles`.
     #[arg(long)]
     pub profile_root: Option<PathBuf>,
@@ -53,6 +57,10 @@ pub struct InfoArgs {
 pub struct DeleteArgs {
     /// Profile name to delete.
     pub name: String,
+    /// Profile backend scope (for example chromium, brave, camoufox).
+    /// Required when the same profile name exists under multiple backends.
+    #[arg(long)]
+    pub backend: Option<String>,
     /// Confirmation guard: must equal the profile name for the delete to proceed.
     #[arg(long)]
     pub confirm: String,
@@ -88,21 +96,24 @@ pub async fn run(args: Args) -> Result<(), Error> {
             )
         }
         ProfileSub::Info(a) => {
-            let entry = profile::info(&a.name, a.profile_root.as_deref())?;
+            let entry = profile::info(&a.name, a.backend.as_deref(), a.profile_root.as_deref())?;
             output::emit("profile_info", &entry)
         }
         ProfileSub::LockStatus(a) => {
-            let status = profile::lock_status(&a.name, a.profile_root.as_deref())?;
+            let status =
+                profile::lock_status(&a.name, a.backend.as_deref(), a.profile_root.as_deref())?;
             output::emit("profile_lock_status", &status)
         }
         ProfileSub::Downloads(a) => {
-            let entry = profile::info(&a.name, a.profile_root.as_deref())?;
+            let entry = profile::info(&a.name, a.backend.as_deref(), a.profile_root.as_deref())?;
             let download_dir = entry.path.join("downloads");
             let download_dir = download_dir.canonicalize().unwrap_or(download_dir);
-            let downloads = profile::downloads(&a.name, a.profile_root.as_deref())?;
+            let downloads =
+                profile::downloads(&a.name, a.backend.as_deref(), a.profile_root.as_deref())?;
             output::emit(
                 "profile_downloads",
                 &serde_json::json!({
+                    "backend": entry.backend,
                     "name": a.name,
                     "download_dir": download_dir.display().to_string(),
                     "downloads": downloads,
@@ -110,10 +121,16 @@ pub async fn run(args: Args) -> Result<(), Error> {
             )
         }
         ProfileSub::Delete(a) => {
-            profile::delete(&a.name, &a.confirm, a.profile_root.as_deref())?;
+            let entry = profile::info(&a.name, a.backend.as_deref(), a.profile_root.as_deref())?;
+            profile::delete(
+                &a.name,
+                &a.confirm,
+                a.backend.as_deref(),
+                a.profile_root.as_deref(),
+            )?;
             output::emit(
                 "profile_delete",
-                &serde_json::json!({"name": a.name, "deleted": true}),
+                &serde_json::json!({"backend": entry.backend, "name": a.name, "deleted": true}),
             )
         }
         ProfileSub::Prune(a) => {
@@ -130,13 +147,14 @@ pub async fn run(args: Args) -> Result<(), Error> {
             )
         }
         ProfileSub::Cookies(a) => {
-            let entry = profile::info(&a.name, a.profile_root.as_deref())?;
+            let entry = profile::info(&a.name, a.backend.as_deref(), a.profile_root.as_deref())?;
             let jar_path = entry.path.join("cookies.jar.json");
             let jar = crate::sdk::profile::cookie_jar::CookieJar::load(&jar_path)?;
             let cookies = jar.cookies_redacted();
             output::emit(
                 "profile_cookies",
                 &serde_json::json!({
+                    "backend": entry.backend,
                     "name": a.name,
                     "jar_path": jar_path.display().to_string(),
                     "count": cookies.len(),

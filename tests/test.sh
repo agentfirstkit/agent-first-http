@@ -5,11 +5,10 @@
 #   tests/test.sh static                # fmt + build + clippy
 #   tests/test.sh unit                  # lib + bin unit tests
 #   tests/test.sh integration           # full browser-integration suite
-#   tests/test.sh ops                   # ops-panel chromium tests (serialized)
 #   tests/test.sh takeover              # display takeover proxy + KasmVNC smoke
 #   tests/test.sh coverage              # cargo-llvm-cov with gate
 #   tests/test.sh all                   # static + unit + integration + coverage
-#   tests/test.sh release               # everything: all + ops + takeover (release gate)
+#   tests/test.sh release               # everything: all + takeover (release gate)
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODE="${1:-default}"
@@ -50,17 +49,6 @@ case "$MODE" in
       --test storage_artifact \
       --test unix_listener"
     ;;
-  ops)
-    # Ops-panel tests spawn chromium and are marked #[ignore] in the
-    # default suite because chromiumoxide leaks chromium children
-    # between tests under Docker resource pressure. Run them here in
-    # isolation. ops_panel_two_browser spawns *two* chromiums per test
-    # (a target + an operator), so the serialized run is mandatory.
-    run "cargo test --all-features \
-      --test ops_panel_live \
-      --test ops_panel_two_browser \
-      -- --ignored --test-threads=1"
-    ;;
   takeover)
     run "cargo test --all-features --test display_takeover -- --test-threads=1"
     run "cargo test --all-features --test display_takeover -- --ignored --test-threads=1"
@@ -83,13 +71,12 @@ case "$MODE" in
     ;;
   release)
     # The full release gate: everything, including the flaky-by-design
-    # ops/takeover suites that `all` deliberately omits.
+    # display-takeover suite that `all` deliberately omits.
     "$0" all
-    "$0" ops
     "$0" takeover
     ;;
   *)
-    echo "Usage: $0 [static|unit|integration|ops|takeover|coverage|default|all|release]" >&2
+    echo "Usage: $0 [static|unit|integration|takeover|coverage|default|all|release]" >&2
     exit 2
     ;;
 esac

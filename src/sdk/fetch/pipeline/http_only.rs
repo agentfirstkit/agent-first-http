@@ -151,7 +151,7 @@ pub(super) async fn http_only(
         });
     }
     if let Some(classification) = classify_http_body(&bytes, content_type.as_deref()) {
-        result.page_kind = Some(classification.kind);
+        result.set_page_kind(classification.kind);
         result.warnings.push(Warning {
             artifact: Artifact::Body,
             code: classification.code,
@@ -347,23 +347,28 @@ pub(super) fn looks_like_empty_html_shell(bytes: &[u8], content_type: Option<&st
 
 fn count_visible_chars_after(html: &str, body_start: usize) -> usize {
     let after_body = &html[body_start..];
-    let mut text = String::with_capacity(after_body.len());
+    let mut visible = 0;
     let mut in_tag = false;
     let mut skip_until: Option<&str> = None;
-    let bytes = after_body.as_bytes();
     let mut i = 0;
-    while i < bytes.len() {
+    while i < after_body.len() {
         if let Some(needle) = skip_until {
             if after_body[i..].starts_with(needle) {
                 i += needle.len();
                 skip_until = None;
             } else {
-                i += 1;
+                i += after_body[i..]
+                    .chars()
+                    .next()
+                    .map(char::len_utf8)
+                    .unwrap_or(1);
             }
             continue;
         }
-        let b = bytes[i];
-        if !in_tag && b == b'<' {
+        let Some(ch) = after_body[i..].chars().next() else {
+            break;
+        };
+        if !in_tag && ch == '<' {
             if after_body[i..].starts_with("<script") {
                 skip_until = Some("</script>");
                 i += "<script".len();
@@ -379,18 +384,18 @@ fn count_visible_chars_after(html: &str, body_start: usize) -> usize {
             continue;
         }
         if in_tag {
-            if b == b'>' {
+            if ch == '>' {
                 in_tag = false;
             }
-            i += 1;
+            i += ch.len_utf8();
             continue;
         }
-        if !b.is_ascii_whitespace() {
-            text.push(b as char);
+        if !ch.is_whitespace() {
+            visible += 1;
         }
-        i += 1;
+        i += ch.len_utf8();
     }
-    text.chars().count()
+    visible
 }
 
 #[cfg(test)]

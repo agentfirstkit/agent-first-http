@@ -97,7 +97,7 @@ pub async fn write(paths: &ArtifactPaths, log: &NetworkLog) -> Result<PathBuf, E
 }
 
 /// Apply the default redaction policy to a header map in-place. Pass
-/// `enabled = false` for `--network-redact off`.
+/// `enabled = false` for `--no-network-redact`.
 pub fn redact_headers(map: &mut BTreeMap<String, String>, enabled: bool) {
     if !enabled {
         return;
