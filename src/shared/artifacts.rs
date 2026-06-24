@@ -1,17 +1,18 @@
 //! Artifact tokens (`architecture.md §8`) + on-disk path resolution.
 //!
-//! Nine default tokens identify the artifacts captured by default, plus
-//! `Storage` (default-off, sensitive-data risk). Each maps to a fixed
-//! filename; the response JSON references them as absolute paths under
-//! `--out/<request_id>/`.
+//! Default fetches start with the HTTP-safe body artifact and expand to the
+//! browser artifact set only when rendering is used. `Storage` stays opt-in due
+//! to sensitive-data risk. Each artifact maps to a fixed filename; the response
+//! JSON references produced files as absolute paths under `--out/<request_id>/`.
 
 use serde::{Deserialize, Serialize};
 
 use crate::shared::ids::RequestId;
 
-/// Artifact kinds. `Body` is the only one HTTP-only fetches produce;
-/// the others all require a browser. `Storage` is default-off due to
-/// sensitive-data risk — agents must request it explicitly via `--want`.
+/// Artifact kinds. `Body` is the default HTTP-safe artifact; browser-backed
+/// fetches can produce the richer DOM/network artifacts. `Storage` is
+/// default-off due to sensitive-data risk — agents must request it explicitly
+/// via `--want`.
 /// Per-artifact warnings (§8 last ¶) are emitted when a backend lacks
 /// the capability rather than failing the fetch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -31,10 +32,13 @@ pub enum Artifact {
 }
 
 impl Artifact {
-    /// The nine default artifacts captured on every browser fetch.
-    /// `Storage` is intentionally excluded — sensitive data risk means
-    /// agents must opt in with `--want storage`.
-    pub const ALL: [Self; 9] = [
+    /// The artifact set used before browser escalation is known.
+    pub const HTTP_DEFAULT: [Self; 1] = [Self::Body];
+
+    /// The default artifacts captured once a browser render is actually used.
+    /// `Storage` is intentionally excluded — sensitive data risk means agents
+    /// must opt in with `--want storage`.
+    pub const BROWSER_DEFAULT: [Self; 9] = [
         Self::Body,
         Self::RenderedHtml,
         Self::Text,
@@ -45,6 +49,9 @@ impl Artifact {
         Self::Console,
         Self::Observation,
     ];
+
+    /// All non-sensitive artifacts. Kept as a stable SDK convenience alias.
+    pub const ALL: [Self; 9] = Self::BROWSER_DEFAULT;
 
     /// Default filename portion (extension chosen from content-type for
     /// `Body`; fixed for everything else). `body.<ext>` is filled in at
@@ -129,7 +136,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_default_tokens_present() {
+    fn default_tokens_present() {
+        assert_eq!(Artifact::HTTP_DEFAULT, [Artifact::Body]);
         assert_eq!(Artifact::ALL.len(), 9);
         assert!(Artifact::ALL.contains(&Artifact::Content));
         assert!(Artifact::ALL.contains(&Artifact::ContentJson));

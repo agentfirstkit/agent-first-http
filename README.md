@@ -1,6 +1,8 @@
 # Agent-First HTTP
 
-Give an AI agent its own isolated browser to actually open a URL — running JavaScript when the page needs it and returning the page as files the agent can read — so it works from the real page instead of a search guess, an empty app shell, or a login wall, all without touching the browser you use every day.
+Give your AI agent its own private browser — so it reads the real page, past logins and bot walls, without ever touching yours.
+
+> **Ask your agent:** "Open this link and pull the pricing table out for me."
 
 ## What problem does this solve?
 
@@ -27,12 +29,18 @@ Give afhttp a URL; it writes the page to disk and prints one line of JSON saying
 
 ```bash
 $ afhttp fetch https://example.com
-{"code":"fetch","request_url":"https://example.com","status":200,"final_url":"https://example.com/","body_file":"/tmp/afhttp-out/<id>/body.html","text_file":"/tmp/afhttp-out/<id>/text.txt"}
+{"code":"fetch","request_url":"https://example.com","status":200,"final_url":"https://example.com/","body_file":"/tmp/afhttp-out/<id>/body.html"}
 ```
 
 That is the whole job: **hand it a URL, get the page back as files an agent can read** — never a terminal blob to scrape, and every failure a stable `error_code` rather than a guess.
 
-By default afhttp sends a **plain HTTP request** and only starts a **real browser** when the page actually needs one (`--render none` forces the fast path, `--render always` forces the browser, `--render auto` decides). A browser-backed fetch captures more of what a human would look at — an agent-oriented composed page view (`content.md`, the one to read first), rendered HTML, a screenshot, a DOM observation, the network and console logs — each a flat `*_file` field on the same JSON, never nested:
+By default afhttp sends a **plain HTTP request**, returns the raw `body_file`,
+and only starts a **real browser** when the page actually needs one (`--render
+none` forces the fast path, `--render always` forces the browser, `--render
+auto` decides). A browser-backed fetch automatically captures more of what a
+human would look at — an agent-oriented composed page view (`content.md`, the
+one to read first), rendered HTML, a screenshot, a DOM observation, the network
+and console logs — each a flat `*_file` field on the same JSON, never nested:
 
 ```json
 {

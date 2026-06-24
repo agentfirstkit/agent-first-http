@@ -148,7 +148,7 @@ afhttp fetch <url>
   --cookie 'name=value[; Path=/; Domain=...; Secure; HttpOnly; SameSite=Lax]'
   --user-agent <string>
   --evaluate-after-wait <js>
-  --want body,rendered_html,text,screenshot,network,console,observation,storage
+  --want body,rendered_html,text,content,content_json,screenshot,network,console,observation,storage
   --network-bodies off|xhr|all
   --network-body-max-bytes <n>
   --readiness-idle-ms <n>
@@ -303,7 +303,11 @@ Profile lifecycle commands:
 
 ## 8. Artifacts
 
-Ten artifact tokens are identified by stable names. Nine are default artifacts; `storage` is opt-in because it can expose sensitive local state.
+Ten artifact tokens are identified by stable names. With no explicit `--want`,
+the HTTP fast path captures `body`; when a browser render is actually used,
+afhttp expands to the browser default set (`body`, `rendered_html`, `text`,
+`content`, `content_json`, `screenshot`, `network`, `console`, `observation`).
+`storage` is opt-in because it can expose sensitive local state.
 
 | Token | Content | Filename | Notes |
 | --- | --- | --- | --- |
@@ -313,7 +317,7 @@ Ten artifact tokens are identified by stable names. Nine are default artifacts; 
 | `content` | Agent-oriented composed page view: visible text from open shadow DOM, same-origin frames, cards, tables, links | `content.md` | Only when render was used. The artifact an agent reads first. |
 | `content_json` | Structured form of `content` with link/action candidates | `content.json` | Only when render was used. Use to choose a follow-up link/action. |
 | `screenshot` | Full-page PNG | `page.png` | Only when render was used. |
-| `network` | Deep request/response log from CDP `Network.*` events | `network.json` | Always produced when a browser was used; HTTP-only fetches produce a one-entry log. Optional captured bodies live under `network-bodies/`. |
+| `network` | Deep request/response log from CDP `Network.*` events | `network.json` | Included in the browser default set and produced when requested. Optional captured bodies live under `network-bodies/`. |
 | `console` | Console events | `console.json` | Only when render was used. |
 | `observation` | Agent-readable accessibility/DOM snapshot | `observation.json` | Only when render was used. Mechanical projection of page state; no semantic ranking or intent inference. |
 | `storage` | localStorage/sessionStorage/IndexedDB-name snapshot | `storage.json` | Opt-in with `--want storage`; default-off because of sensitive data risk. |
@@ -400,7 +404,7 @@ The driver-side entry point is `afhttp fetch <url> --takeover` against such a ho
 
 | Backend | Launch profile in `host` | Capabilities |
 | --- | --- | --- |
-| Chromium / Chrome / Edge / Brave | `chromium` (and aliases) | Full: body, rendered_html, text, screenshot, network, console, observation, network body capture, real-display takeover, health/capabilities, multi-attach. |
+| Chromium / Chrome / Edge / Brave | `chromium` (and aliases) | Full: body, rendered_html, text, content, content_json, screenshot, network, console, observation, network body capture, real-display takeover, health/capabilities, multi-attach. |
 | chrome-headless-shell | `chromium` (binary `chrome-headless-shell`) | Same capability matrix as Chromium — chrome-headless-shell is Google's slimmer headless distribution of the same engine, identical CDP surface. Use when the full Chrome/Chromium browser is unavailable or too heavy. |
 | fingerprint-chromium | `fingerprint-chromium` | Same capability matrix as Chromium, including real-display takeover. Engine surface (UA, navigator props, WebGL vendor, canvas/font enumeration, CDP-detection evasion) is spoofed per [adryfish/fingerprint-chromium](https://github.com/adryfish/fingerprint-chromium). The host derives a stable 32-bit `--fingerprint=<seed>` from the resolved profile path so identity stays consistent within a profile and diverges between profiles. Per-surface overrides (`--fingerprint-brand`, `--fingerprint-platform`, etc.) reach the engine via `--browser-arg`. |
 | Lightpanda | `lightpanda` | body, rendered_html (modulo JS engine limits), text, network metadata, console, limited observation. No screenshot, no display takeover (no rendering), network body capture depends on backend support. |

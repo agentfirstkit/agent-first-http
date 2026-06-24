@@ -37,6 +37,7 @@ pub struct FetchBuilder {
     pub(crate) wait: Wait,
     pub(crate) timeout: Duration,
     pub(crate) want: BTreeSet<Artifact>,
+    pub(crate) want_explicit: bool,
     pub(crate) tab: Option<TabId>,
     /// Keep a freshly-opened ("new") target open after the fetch instead of
     /// closing it, so a human can take the tab over. No effect when an explicit
@@ -156,7 +157,8 @@ impl FetchBuilder {
             render: RenderMode::Auto,
             wait: Wait::Auto,
             timeout: Duration::from_secs(30),
-            want: Artifact::ALL.iter().copied().collect(),
+            want: Artifact::HTTP_DEFAULT.iter().copied().collect(),
+            want_explicit: false,
             tab: None,
             keep_tab_open: false,
             request: RequestOptions::default(),
@@ -231,6 +233,7 @@ impl FetchBuilder {
     #[must_use]
     pub fn want<I: IntoIterator<Item = Artifact>>(mut self, items: I) -> Self {
         self.want = items.into_iter().collect();
+        self.want_explicit = true;
         self
     }
 

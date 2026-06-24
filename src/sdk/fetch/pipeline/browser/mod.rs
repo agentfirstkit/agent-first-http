@@ -76,6 +76,9 @@ pub(super) async fn browser_path(
     escalation_reason: Option<String>,
     deadline: &FetchDeadline,
 ) -> Result<FetchResult, Error> {
+    if !builder.want_explicit {
+        builder.want = Artifact::BROWSER_DEFAULT.iter().copied().collect();
+    }
     deadline.update_trace(|trace| {
         trace.render_decision = RenderDecision::Browser;
         trace.render_mode = builder.render.as_trace();

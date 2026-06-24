@@ -1,8 +1,8 @@
 [package]
 name = "agent-first-http"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2021"
-description = "Give an AI agent its own isolated browser to actually open a URL — running JavaScript when the page needs it and returning the page as files the agent can read — so it works from the real page instead of a search guess, an empty app shell, or a login wall, all without touching the browser you use every day."
+description = "Give your AI agent its own private browser — so it reads the real page, past logins and bot walls, without ever touching yours."
 license = "MIT"
 repository = "https://github.com/agentfirstkit/agent-first-http"
 readme = "README.md"
@@ -58,7 +58,7 @@ thiserror = "2"
 chromiumoxide = { version = "0.9", optional = true, default-features = false }
 axum = { version = "0.8", optional = true, features = ["ws", "macros"] }
 tower = { version = "0.5", optional = true }
-tower-http = { version = "0.6", optional = true, features = ["fs", "trace"] }
+tower-http = { version = "0.7", optional = true, features = ["fs", "trace"] }
 hyper = { version = "1", optional = true, features = ["full"] }
 hyper-util = { version = "0.1", optional = true, features = ["server-auto", "tokio"] }
 
@@ -67,7 +67,7 @@ hyper-util = { version = "0.1", optional = true, features = ["server-auto", "tok
 # crates.io; local monorepo development overrides it to the sibling crate via
 # `.cargo/config.toml` (`paths = ["../agent-first-data/rust"]`), which is not
 # copied into image builds — so they get the matching published version from the registry.
-agent-first-data = { version = "0.13.1", default-features = false }
+agent-first-data = { version = "0.14.2", default-features = false }
 # CLI feature deps.
 clap = { version = "4", optional = true, features = ["derive", "env"] }
 cookie = "0.18"

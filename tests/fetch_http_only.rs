@@ -91,6 +91,33 @@ async fn http_only_fetch_writes_body_artifact() {
 }
 
 #[tokio::test]
+async fn render_auto_default_want_keeps_plain_html_on_http_path() {
+    let fixture = support::fixture_server::spawn().await;
+    let tmpdir = tempfile::tempdir().expect("tempdir");
+
+    let client = Client::connect("ws://localhost:9999").expect("client");
+    let result = client
+        .fetch(format!("{}/plain.html", fixture.base_url()))
+        .render(RenderMode::Auto)
+        .out_dir(tmpdir.path().to_path_buf())
+        .send()
+        .await
+        .expect("fetch");
+
+    assert_eq!(
+        result.trace.render_decision,
+        agent_first_http::sdk::fetch::result::RenderDecision::HttpOnly
+    );
+    assert!(!result.trace.render_used);
+    assert!(result.body_file.is_some(), "body_file should be default");
+    assert!(
+        result.content_file.is_none(),
+        "content_file should not force browser escalation by default"
+    );
+    assert!(result.tab_id.is_none(), "HTTP path should not open a tab");
+}
+
+#[tokio::test]
 async fn http_only_flags_cloudflare_turnstile_as_bot_wall() {
     let fixture = support::fixture_server::spawn().await;
     let tmpdir = tempfile::tempdir().expect("tempdir");
@@ -117,6 +144,19 @@ async fn http_only_flags_cloudflare_turnstile_as_bot_wall() {
         "expected bot-wall warning with takeover guidance; got {:?}",
         result.warnings
     );
+    let next = result.next_action.as_ref().expect("next_action");
+    assert_eq!(
+        next.kind,
+        agent_first_http::sdk::fetch::result::NextActionKind::HumanTakeover
+    );
+    assert_eq!(
+        next.recommended_command,
+        format!(
+            "afhttp fetch {}/cloudflare-turnstile.html --takeover",
+            fixture.base_url()
+        )
+    );
+    assert!(!next.target_content_verified);
 }
 
 #[tokio::test]
@@ -498,6 +538,44 @@ async fn cli_render_none_without_endpoint_does_not_require_browser_env() {
     assert!(
         std::path::Path::new(body_file).is_absolute(),
         "body_file must be absolute: {body_file}"
+    );
+}
+
+#[tokio::test]
+async fn cli_render_auto_without_want_does_not_require_browser_for_plain_html() {
+    let fixture = support::fixture_server::spawn().await;
+    let tmpdir = tempfile::tempdir().expect("tempdir");
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_afhttp"))
+        .arg("fetch")
+        .arg(format!("{}/plain.html", fixture.base_url()))
+        .arg("--render")
+        .arg("auto")
+        .arg("--timeout-ms")
+        .arg("5000")
+        .arg("--out")
+        .arg(tmpdir.path())
+        .env_remove("AFHTTP_TEST_BROWSER_BIN")
+        .output()
+        .await
+        .expect("run afhttp");
+    assert!(
+        output.status.success(),
+        "afhttp failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let body: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(body["code"], "fetch");
+    assert_eq!(body["trace"]["render_decision"], "http_only");
+    assert_eq!(body["trace"]["render_used"], false);
+    assert!(body["body_file"].as_str().is_some());
+    assert!(
+        body.get("content_file").is_none(),
+        "implicit --want must not include browser-only content artifacts"
+    );
+    assert!(
+        body.get("tab_id").is_none(),
+        "plain HTML should not start the lazy inline browser"
     );
 }
 

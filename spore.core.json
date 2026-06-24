@@ -2,10 +2,10 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-http",
   "name": "Agent-First HTTP",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
-  "synopsis": "Give an AI agent its own isolated browser to actually open a URL — running JavaScript when the page needs it and returning the page as files the agent can read — so it works from the real page instead of a search guess, an empty app shell, or a login wall, all without touching the browser you use every day.",
+  "synopsis": "Give your AI agent its own private browser — so it reads the real page, past logins and bot walls, without ever touching yours.",
   "intent": [
     "Give AI agents a deterministic URL acquisition layer that reports status, final URL, headers, body artifacts, redirects, timing, and typed transport failures as structured JSONL instead of prose",
     "Focus on pages and web resources that are hard for agents to acquire through a simple shell fetch: JavaScript-rendered, cookie- or session-bound, bot-walled, or XHR-injected pages a plain HTTP request cannot turn into usable artifacts",
@@ -13,17 +13,18 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Redact AFDATA _secret fields by default in envelope output; revealing requires an explicit flag",
-    "Add --reveal-token-secret to container install and inspect to opt into printing the host token",
-    "Rename the panel handoff to takeover: takeover_url, --takeover-quality-percent, and a /takeover/handoff endpoint with an SDK takeover_handoff client",
-    "Add --raw to container logs for unprocessed output",
-    "Handle --version and --help as structured output via afdata",
-    "Reframe README and docs around the isolated-browser model and the takeover/reveal surface"
+    "Make default artifact capture render-mode-aware: an HTTP fast-path fetch now returns only the raw body_file, while a browser-backed fetch automatically expands to the full composed-page, DOM, screenshot, network, console, and observation artifact set; an explicit --want is still honored verbatim on either path, so agents no longer pay for browser-only artifacts on plain HTTP responses",
+    "Stop the takeover handoff from recommending an auto-discovered endpoint: the suggested 'fetch --takeover' command now pins --endpoint only when the user explicitly preconfigured one, instead of hard-coding an ephemeral discovered host",
+    "Add Hermes as a fourth target for 'afhttp skill' install, remove, and status, alongside Codex, Claude Code, and opencode",
+    "Rename the skill '--scope project' value to '--scope workspace' and drop the Claude-Code/opencode-only restriction, so scope applies uniformly across all agents",
+    "Upgrade the agent-first-data dependency to 0.14.2 and tower-http to 0.7, picking up the shared skill-admin and data-convention updates",
+    "Sharpen the README and synopsis marketing copy to a tighter one-liner and add an 'Ask your agent' usage example",
+    "Update the embedded skill guidance to match the new defaults: start from a bare 'afhttp fetch', read body_file on the fast path, and escalate to '--render always' or explicit --want only when the raw body looks incomplete"
   ],
   "bonds": [
     {
       "relation": "depends_on",
-      "uri": "cmn://agentfirstkit.com/b3.2evoUgQ3aJHXXc3MHmhJkGEg2rMRLdvKtQKZBDno4UM4",
+      "uri": "cmn://agentfirstkit.com/b3.39kCSa6orKxAaLcSGpisgLo3KXCxzCw2KutvdhgajCV3",
       "id": "agent-first-data",
       "reason": "All request/response fields use Agent-First Data suffix conventions, and runtime protocol/log events are emitted on stdout only"
     }

@@ -13,7 +13,7 @@ scoop bucket add agentfirstkit https://github.com/agentfirstkit/scoop-bucket \
 cargo install agent-first-http                                                    # any platform
 ```
 
-Install the embedded Agent Skill for Codex, Claude Code, and opencode straight from the
+Install the embedded Agent Skill for Codex, Claude Code, opencode, and Hermes straight from the
 binary (check with `afhttp skill status`, remove with `afhttp skill uninstall`):
 
 ```bash
@@ -62,17 +62,15 @@ afhttp fetch https://example.com
   "status": 200,
   "final_url": "https://example.com/",
   "body_file": "/tmp/afhttp-out/<id>/body.html",
-  "rendered_html_file": "/tmp/afhttp-out/<id>/rendered.html",
-  "network_file": "/tmp/afhttp-out/<id>/network.json",
   "trace": {
-    "render_decision": "browser",
+    "render_decision": "http_only",
     "render_mode": "auto",
-    "render_used": true,
+    "render_used": false,
     "current_stage": "complete",
-    "duration_ms": 820,
+    "duration_ms": 120,
     "timeout_ms": 30000,
     "stages": [
-      {"name": "navigate", "status": "ok", "duration_ms": 340},
+      {"name": "navigate", "status": "ok", "duration_ms": 110},
       {"name": "capture_body", "status": "ok", "duration_ms": 12}
     ]
   }

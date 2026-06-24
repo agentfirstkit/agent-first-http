@@ -26,21 +26,25 @@ afhttp container --help
 Start with a structured fetch:
 
 ```sh
-afhttp fetch "$URL" --render auto \
-  --want content,content_json,observation,network,console
+afhttp fetch "$URL"
 ```
 
-Read `content.md` first; it is the agent-oriented composed page view and should
-include visible text from open shadow DOM, same-origin frames, cards, tables, and
-links. Use `content.json` when you need to choose a follow-up link/action.
+Read `content.md` first when `content_file` is present; it is the
+agent-oriented composed page view and should include visible text from open
+shadow DOM, same-origin frames, cards, tables, and links. If the fetch stayed on
+the HTTP fast path, read `body_file` first and only retry with `--render always`
+or explicit `--want content,content_json,observation,network,console` when the
+raw body looks incomplete, placeholder-like, or contradicted by warnings. Use
+`content.json` when present and you need to choose a follow-up link/action.
 Inspect `observation.json`, `network.json`, and `console.json` only when needed.
 Use `rendered_html` as a debug artifact, not as the authoritative rendered page.
 
-Before answering, sanity-check `content.md` against stdout warnings. If the main
-facts look incomplete, placeholder-like, or contradicted by readiness/network
-warnings, do not treat the capture as final. Prefer a more specific same-site
-link from `content.json.links`, one longer-wait retry, or clearly state that the
-page did not fully settle.
+Before answering, sanity-check the artifact you read against stdout warnings. If
+the main facts look incomplete, placeholder-like, or contradicted by
+readiness/network warnings, do not treat the capture as final. Prefer a more
+specific same-site link from `content.json.links` when available, one
+longer-wait or browser-render retry, or clearly state that the page did not
+fully settle.
 
 Treat `status: 200` as transport only. If the page is a login, consent gate,
 security check, captcha, or bot wall, do not answer as if the target page was

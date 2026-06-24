@@ -1,5 +1,5 @@
 //! `afhttp skill` subcommand. Installs/uninstalls/reports status of the embedded
-//! Agent Skill across Codex, Claude Code, and opencode via the shared
+//! Agent Skill across Codex, Claude Code, opencode, and Hermes via the shared
 //! `agent_first_data::skill` admin.
 
 use clap::{Args as ClapArgs, Subcommand, ValueEnum};
@@ -18,6 +18,7 @@ pub enum SkillAgentArg {
     Codex,
     ClaudeCode,
     Opencode,
+    Hermes,
 }
 
 impl From<SkillAgentArg> for SkillAgentSelection {
@@ -27,6 +28,7 @@ impl From<SkillAgentArg> for SkillAgentSelection {
             SkillAgentArg::Codex => SkillAgentSelection::Codex,
             SkillAgentArg::ClaudeCode => SkillAgentSelection::ClaudeCode,
             SkillAgentArg::Opencode => SkillAgentSelection::Opencode,
+            SkillAgentArg::Hermes => SkillAgentSelection::Hermes,
         }
     }
 }
@@ -35,14 +37,14 @@ impl From<SkillAgentArg> for SkillAgentSelection {
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SkillScopeArg {
     Personal,
-    Project,
+    Workspace,
 }
 
 impl From<SkillScopeArg> for SkillScope {
     fn from(v: SkillScopeArg) -> Self {
         match v {
             SkillScopeArg::Personal => SkillScope::Personal,
-            SkillScopeArg::Project => SkillScope::Project,
+            SkillScopeArg::Workspace => SkillScope::Workspace,
         }
     }
 }
@@ -76,7 +78,7 @@ pub struct TargetArgs {
     /// Agent to manage.
     #[arg(long, default_value = "all")]
     pub agent: SkillAgentArg,
-    /// Skill scope (project is Claude Code / opencode only).
+    /// Skill scope.
     #[arg(long, default_value = "personal")]
     pub scope: SkillScopeArg,
     /// Skills directory; requires a single concrete --agent.
@@ -142,13 +144,13 @@ mod tests {
         let ok = build_options(
             TargetArgs {
                 agent: SkillAgentArg::Opencode,
-                scope: SkillScopeArg::Project,
+                scope: SkillScopeArg::Workspace,
                 skills_dir: Some("/tmp/x".into()),
             },
             true,
         );
         assert_eq!(ok.agent, SkillAgentSelection::Opencode);
-        assert_eq!(ok.scope, SkillScope::Project);
+        assert_eq!(ok.scope, SkillScope::Workspace);
         assert!(ok.force);
     }
 

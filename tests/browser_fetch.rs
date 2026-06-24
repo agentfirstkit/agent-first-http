@@ -159,6 +159,40 @@ async fn render_always_returns_rendered_html_and_artifacts() {
 }
 
 #[tokio::test]
+async fn render_always_default_want_expands_to_browser_artifacts() {
+    let Some((endpoint, tmp, _browser_guard)) = spawn_host_with_browser().await else {
+        println!("(skipping: no chromium)");
+        return;
+    };
+    let fixture = support::fixture_server::spawn().await;
+    let client = Client::connect(&endpoint).expect("client");
+    let result = client
+        .fetch(format!("{}/js.html", fixture.base_url()))
+        .render(RenderMode::Always)
+        .wait(Wait::Ms(150))
+        .timeout(Duration::from_secs(15))
+        .out_dir(tmp.path().to_path_buf())
+        .send()
+        .await
+        .expect("fetch");
+
+    assert_eq!(
+        result.trace.render_decision,
+        agent_first_http::sdk::fetch::result::RenderDecision::Browser
+    );
+    assert!(result.body_file.is_some(), "body default should be kept");
+    assert!(
+        result.content_file.is_some(),
+        "browser path should add content.md when --want is omitted"
+    );
+    assert!(
+        result.content_json_file.is_some(),
+        "browser path should add content.json when --want is omitted"
+    );
+    assert!(result.observation_file.is_some());
+}
+
+#[tokio::test]
 async fn content_artifacts_include_shadow_dom_iframe_and_links() {
     let Some((endpoint, tmp, _browser_guard)) = spawn_host_with_browser().await else {
         println!("(skipping: no chromium)");

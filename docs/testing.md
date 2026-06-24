@@ -31,7 +31,7 @@ Runs in CI when a browser binary is available, and locally on demand. Separated 
 - `afhttp host` startup, profile directory lifecycle, listener binding, graceful shutdown.
 - `afhttp fetch --render=auto` against a local fixture HTTP server (gates the HTTP fast path).
 - `afhttp fetch --render=always` against a JavaScript-rendered fixture page (gates the browser escalation path).
-- All seven default artifacts plus opt-in `storage` are produced and readable in `--out` when supported, including `observation.json`.
+- Browser default artifacts plus opt-in `storage` are produced and readable in `--out` when supported, including `observation.json`.
 - Deep `network.json` entries for document, script, XHR/fetch, redirect, failed resource, and optional body capture under `network-bodies/`.
 - `afhttp health` and `afhttp capabilities` round-trip against a running host, including token-required, percent-encoded query tokens, minimal-public-health, degraded backend summaries, real tab counts, and implemented capability feature flags.
 - `afhttp cdp` round-trip for a known CDP method (`Browser.getVersion`).

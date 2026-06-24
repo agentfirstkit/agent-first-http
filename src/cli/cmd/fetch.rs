@@ -124,11 +124,11 @@ pub struct Args {
     /// Runs in page context before artifacts are captured.
     #[arg(long, value_name = "JS", help_heading = "Rendering")]
     pub evaluate_after_wait: Vec<String>,
-    /// Artifacts to capture, comma-separated. Default: body, rendered_html,
-    /// text, content, content_json, screenshot, network, console,
-    /// observation. `content` is the agent-oriented composed page view
-    /// (content.md); `content_json` its structured form with link/action
-    /// candidates. `storage` is opt-in (sensitive: localStorage/IndexedDB).
+    /// Artifacts to capture, comma-separated. Default: body on the HTTP fast
+    /// path; browser default artifacts when rendering is used. `content` is the
+    /// agent-oriented composed page view (content.md); `content_json` its
+    /// structured form with link/action candidates. `storage` is opt-in
+    /// (sensitive: localStorage/IndexedDB).
     #[arg(long, value_delimiter = ',', help_heading = "Rendering")]
     pub want: Vec<String>,
     /// HTTP method. Common values: POST, PUT, PATCH, DELETE.
@@ -254,6 +254,7 @@ pub async fn run(args: Args) -> Result<(), Error> {
 
 async fn run_inner(mut args: Args) -> Result<(), FetchRunError> {
     let render: RenderMode = args.render.into();
+    let endpoint_was_preconfigured = args.endpoint.is_some();
     prepare_takeover_connection(&mut args, render, |token| async move {
         crate::cli::cmd::container::discover_default_takeover_host(token.as_deref()).await
     })
@@ -277,6 +278,8 @@ async fn run_inner(mut args: Args) -> Result<(), FetchRunError> {
     }
     let takeover = args.takeover;
     let takeover_endpoint = args.endpoint.clone();
+    let recommended_endpoint =
+        takeover_recommended_endpoint(takeover_endpoint.as_deref(), endpoint_was_preconfigured);
     let takeover_token = args.token.clone();
     let wait = Wait::parse(&args.wait)?;
     let timeout = Duration::from_millis(args.timeout_ms);
@@ -295,7 +298,6 @@ async fn run_inner(mut args: Args) -> Result<(), FetchRunError> {
         .render(render)
         .wait(wait)
         .timeout(timeout)
-        .want(want)
         .network_bodies(network_bodies)
         .network_body_max_bytes(args.network_body_max_bytes)
         .readiness_idle_ms(args.readiness_idle_ms)
@@ -303,6 +305,9 @@ async fn run_inner(mut args: Args) -> Result<(), FetchRunError> {
         .readiness_min_text_bytes(args.readiness_min_text_bytes)
         .network_redact(network_redact)
         .method(args.method);
+    if let Some(want) = want {
+        builder = builder.want(want);
+    }
     if let Some(bytes) = body_bytes {
         builder = builder.body(bytes);
     }
@@ -386,7 +391,7 @@ async fn run_inner(mut args: Args) -> Result<(), FetchRunError> {
                         Some(handoff.takeover_url_expires_at_rfc3339),
                         Some(handoff.takeover_url_ttl_s),
                         Some(handoff.takeover_url_scope),
-                        Some(endpoint),
+                        recommended_endpoint,
                         explicit_profile.as_deref(),
                     );
                 }
@@ -426,6 +431,17 @@ where
         }
     }
     Ok(())
+}
+
+fn takeover_recommended_endpoint(
+    endpoint: Option<&str>,
+    endpoint_was_preconfigured: bool,
+) -> Option<&str> {
+    if endpoint_was_preconfigured {
+        endpoint
+    } else {
+        None
+    }
 }
 
 /// Derive a default host profile from a URL's registrable domain (eTLD+1), so
@@ -512,13 +528,16 @@ async fn resolve_body(args: &Args) -> Result<Option<Vec<u8>>, Error> {
     Ok(None)
 }
 
-/// Parse the `--want` tokens into an artifact set; an empty list means all
-/// default artifacts.
-fn resolve_want(want: &[String]) -> Result<std::collections::BTreeSet<Artifact>, Error> {
+/// Parse the `--want` tokens into an artifact set; `None` means use the
+/// render-mode-aware default.
+fn resolve_want(want: &[String]) -> Result<Option<std::collections::BTreeSet<Artifact>>, Error> {
     if want.is_empty() {
-        return Ok(Artifact::ALL.iter().copied().collect());
+        return Ok(None);
     }
-    want.iter().map(|t| parse_artifact(t)).collect()
+    want.iter()
+        .map(|t| parse_artifact(t))
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()
+        .map(Some)
 }
 
 /// Construct the SDK client for this fetch: a remote connection when
@@ -723,6 +742,22 @@ mod tests {
 
         assert_eq!(err.error_code, ErrorCode::InvalidArgument);
         assert!(err.detail.contains("browser render"));
+    }
+
+    #[test]
+    fn takeover_recommendation_omits_auto_discovered_endpoint() {
+        assert_eq!(
+            takeover_recommended_endpoint(Some("ws://127.0.0.1:9222"), false),
+            None
+        );
+    }
+
+    #[test]
+    fn takeover_recommendation_keeps_preconfigured_endpoint() {
+        assert_eq!(
+            takeover_recommended_endpoint(Some("ws://127.0.0.1:9222"), true),
+            Some("ws://127.0.0.1:9222")
+        );
     }
 
     #[test]

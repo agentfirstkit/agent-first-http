@@ -49,7 +49,7 @@ pub enum Command {
     Profile(crate::cli::cmd::profile::Args),
     /// List and close CDP targets attached to the host.
     Tabs(crate::cli::cmd::tabs::Args),
-    /// Install, remove, or check the embedded Agent Skill (Codex, Claude Code, opencode).
+    /// Install, remove, or check the embedded Agent Skill (Codex, Claude Code, opencode, Hermes).
     Skill(crate::cli::cmd::skill::Args),
     /// Build and run the host container (Docker or Apple) from the embedded recipe.
     Container(crate::cli::cmd::container::Args),
