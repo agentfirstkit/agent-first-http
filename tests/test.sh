@@ -17,6 +17,7 @@ run() { "$SCRIPT_DIR/run-in-docker.sh" bash -c "$1"; }
 
 case "$MODE" in
   static)
+    run "bash tests/check_container_third_party_versions.sh"
     run "cargo fmt --all --check"
     run "cargo build --all-features"
     run "cargo build --no-default-features --features sdk"
@@ -47,6 +48,7 @@ case "$MODE" in
       --test host_extras \
       --test network_artifact \
       --test storage_artifact \
+      --test stream_redirect \
       --test unix_listener"
     ;;
   takeover)

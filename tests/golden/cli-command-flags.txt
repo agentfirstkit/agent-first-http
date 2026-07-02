@@ -1,4 +1,6 @@
-command afhttp
+command Agent-First HTTP
+  arg stdout_file --stdout-file
+  arg stderr_file --stderr-file
   command fetch
     arg url
     arg endpoint --endpoint-url

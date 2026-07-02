@@ -1,30 +1,11 @@
-<!-- Generated. Do not edit by hand. -->
+<!-- Generated. Do not edit by hand. Regenerate: afhttp --help --recursive --output markdown -->
 
 # afhttp CLI Reference
 
-> Regenerate with `scripts/projects/agent-first-http/generate-cli-doc.sh` (runs `afhttp --help --recursive --output markdown`).
-> See [reference.md](reference.md) for field-level response details.
-
-# afhttp - A URL acquisition tool for AI agents.
-
-Give afhttp a URL and it returns the page plus the artifacts an agent needs to
-decide what to do next: rendered HTML, a DOM observation, a screenshot, and
-network and console logs. It covers the whole acquisition range behind one
-structured contract — a plain HTTP fetch when that works, a browser-backed
-fetch when it does not, deep network capture, a raw CDP escape hatch, and a
-takeover panel for human takeover (login, captcha, 2FA).
-
-Two roles. `afhttp host` is the long-lived browser-host: it holds Chromium and
-one on-disk profile, and exposes a CDP endpoint plus the takeover panel. The other
-commands are short-lived drivers that connect to a host, do work, and write
-artifacts locally. Run the host where the browser needs to be and the driver
-wherever the agent runs.
-
-Every output is one line of structured JSON; every failure carries a stable
-error_code. The tool never decides what a page means — the agent does.
+# Agent-First HTTP - Give your AI agent its own private browser — so it reads the real page, past logins and bot walls, without ever touching yours.
 
 ```text
-Usage: afhttp <COMMAND>
+Usage: afhttp [OPTIONS] <COMMAND>
 
 Commands:
   fetch         Fetch a URL
@@ -41,6 +22,12 @@ Commands:
   help          Print this message or the help of the given subcommand(s)
 
 Options:
+      --stdout-file <PATH>
+          Redirect stdout bytes to this file
+
+      --stderr-file <PATH>
+          Redirect stderr bytes to this file
+
   -h, --help
           Print help. Add --recursive to expand every nested subcommand; add --output json|yaml|markdown to render this help in another format.
 
@@ -48,7 +35,7 @@ Options:
           Print version
 ```
 
-## afhttp fetch - Fetch a URL
+## Agent-First HTTP fetch - Fetch a URL
 
 ```text
 Usage: fetch [OPTIONS] <URL>
@@ -222,7 +209,7 @@ Retry:
           [default: 250]
 ```
 
-## afhttp host - Run the browser host
+## Agent-First HTTP host - Run the browser host
 
 ```text
 Usage: host [OPTIONS] --listen <LISTEN>
@@ -296,7 +283,7 @@ Diagnostics:
           [default: 0]
 ```
 
-## afhttp upload - Upload a local file to a browser tab via DOM.setFileInputFiles
+## Agent-First HTTP upload - Upload a local file to a browser tab via DOM.setFileInputFiles
 
 ```text
 Usage: upload [OPTIONS] --endpoint-url <ENDPOINT> --tab <TAB> --selector <SELECTOR> --file <FILE>
@@ -325,7 +312,7 @@ Options:
           Print help
 ```
 
-## afhttp cdp - Send a raw CDP method
+## Agent-First HTTP cdp - Send a raw CDP method
 
 ```text
 Usage: cdp [OPTIONS] --endpoint-url <ENDPOINT> --tab <TAB> <METHOD>
@@ -358,7 +345,7 @@ Options:
           Print help
 ```
 
-## afhttp panel - Print a short-lived takeover URL
+## Agent-First HTTP panel - Print a short-lived takeover URL
 
 ```text
 Usage: panel [OPTIONS] --endpoint-url <ENDPOINT>
@@ -378,7 +365,7 @@ Options:
           Print help
 ```
 
-## afhttp health - Query /health
+## Agent-First HTTP health - Query /health
 
 ```text
 Usage: health [OPTIONS] --endpoint-url <ENDPOINT>
@@ -398,7 +385,7 @@ Options:
           Print help
 ```
 
-## afhttp capabilities - Query /capabilities
+## Agent-First HTTP capabilities - Query /capabilities
 
 ```text
 Usage: capabilities [OPTIONS] --endpoint-url <ENDPOINT>
@@ -418,7 +405,7 @@ Options:
           Print help
 ```
 
-## afhttp profile - Local profile lifecycle commands
+## Agent-First HTTP profile - Local profile lifecycle commands
 
 ```text
 Usage: profile <COMMAND>
@@ -438,7 +425,7 @@ Options:
           Print help
 ```
 
-### afhttp profile list - List on-disk profiles under the profiles root
+### Agent-First HTTP profile list - List on-disk profiles under the profiles root
 
 ```text
 Usage: list [OPTIONS]
@@ -451,7 +438,7 @@ Options:
           Print help
 ```
 
-### afhttp profile info - Show metadata for one profile (size, last use, lock state)
+### Agent-First HTTP profile info - Show metadata for one profile (size, last use, lock state)
 
 ```text
 Usage: info [OPTIONS] <NAME>
@@ -471,7 +458,7 @@ Options:
           Print help
 ```
 
-### afhttp profile lock-status - Report whether a profile is currently locked by a running host
+### Agent-First HTTP profile lock-status - Report whether a profile is currently locked by a running host
 
 ```text
 Usage: lock-status [OPTIONS] <NAME>
@@ -491,7 +478,7 @@ Options:
           Print help
 ```
 
-### afhttp profile downloads - List files captured in the profile's browser download directory
+### Agent-First HTTP profile downloads - List files captured in the profile's browser download directory
 
 ```text
 Usage: downloads [OPTIONS] <NAME>
@@ -511,7 +498,7 @@ Options:
           Print help
 ```
 
-### afhttp profile delete - Delete a profile and all of its on-disk state
+### Agent-First HTTP profile delete - Delete a profile and all of its on-disk state
 
 ```text
 Usage: delete [OPTIONS] --confirm <CONFIRM> <NAME>
@@ -534,7 +521,7 @@ Options:
           Print help
 ```
 
-### afhttp profile prune - Delete profiles whose last use is older than a cutoff
+### Agent-First HTTP profile prune - Delete profiles whose last use is older than a cutoff
 
 ```text
 Usage: prune [OPTIONS] --older-than <OLDER_THAN>
@@ -553,7 +540,7 @@ Options:
           Print help
 ```
 
-### afhttp profile cookies - Show the non-expired cookies in a profile's jar (values redacted)
+### Agent-First HTTP profile cookies - Show the non-expired cookies in a profile's jar (values redacted)
 
 ```text
 Usage: cookies [OPTIONS] <NAME>
@@ -573,7 +560,7 @@ Options:
           Print help
 ```
 
-## afhttp tabs - List and close CDP targets attached to the host
+## Agent-First HTTP tabs - List and close CDP targets attached to the host
 
 ```text
 Usage: tabs <COMMAND>
@@ -588,7 +575,7 @@ Options:
           Print help
 ```
 
-### afhttp tabs list - List currently-attached CDP targets
+### Agent-First HTTP tabs list - List currently-attached CDP targets
 
 ```text
 Usage: list [OPTIONS] --endpoint-url <ENDPOINT>
@@ -608,7 +595,7 @@ Options:
           Print help
 ```
 
-### afhttp tabs close - Close a target by its CDP target id
+### Agent-First HTTP tabs close - Close a target by its CDP target id
 
 ```text
 Usage: close [OPTIONS] --tab <TAB> --endpoint-url <ENDPOINT>
@@ -631,7 +618,7 @@ Options:
           Print help
 ```
 
-## afhttp skill - Install, remove, or check the embedded Agent Skill (Codex, Claude Code, opencode, Hermes)
+## Agent-First HTTP skill - Install, remove, or check the embedded Agent Skill (Codex, Claude Code, opencode, Hermes)
 
 ```text
 Usage: skill <COMMAND>
@@ -647,7 +634,7 @@ Options:
           Print help
 ```
 
-### afhttp skill status - Show whether the skill is installed, valid, and up to date
+### Agent-First HTTP skill status - Show whether the skill is installed, valid, and up to date
 
 ```text
 Usage: status [OPTIONS]
@@ -672,7 +659,7 @@ Options:
           Print help
 ```
 
-### afhttp skill install - Install or refresh the skill
+### Agent-First HTTP skill install - Install or refresh the skill
 
 ```text
 Usage: install [OPTIONS]
@@ -700,7 +687,7 @@ Options:
           Print help
 ```
 
-### afhttp skill uninstall - Remove a managed skill
+### Agent-First HTTP skill uninstall - Remove a managed skill
 
 ```text
 Usage: uninstall [OPTIONS]
@@ -728,7 +715,7 @@ Options:
           Print help
 ```
 
-## afhttp container - Build and run the host container (Docker or Apple) from the embedded recipe
+## Agent-First HTTP container - Build and run the host container (Docker or Apple) from the embedded recipe
 
 ```text
 Usage: container <COMMAND>
@@ -745,7 +732,7 @@ Options:
           Print help
 ```
 
-### afhttp container install - Build the host image if missing and run the container; print the client command
+### Agent-First HTTP container install - Build the host image if missing and run the container; print the client command
 
 ```text
 Usage: install [OPTIONS] [HOST_ARGS]...
@@ -804,7 +791,7 @@ Options:
           Print help (see a summary with '-h')
 ```
 
-### afhttp container uninstall - Stop and remove the container (--purge also removes the image and cache)
+### Agent-First HTTP container uninstall - Stop and remove the container (--purge also removes the image and cache)
 
 ```text
 Usage: uninstall [OPTIONS]
@@ -830,7 +817,7 @@ Options:
           Print help (see a summary with '-h')
 ```
 
-### afhttp container status - Report whether the host is running, with its endpoint and client command
+### Agent-First HTTP container status - Report whether the host is running, with its endpoint and client command
 
 ```text
 Usage: status [OPTIONS]
@@ -861,7 +848,7 @@ Options:
           Print help (see a summary with '-h')
 ```
 
-### afhttp container logs - Capture or explicitly stream the container logs
+### Agent-First HTTP container logs - Capture or explicitly stream the container logs
 
 ```text
 Usage: logs [OPTIONS]

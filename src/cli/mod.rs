@@ -12,6 +12,15 @@ use crate::shared::error::Error;
 /// response (success *or* error); the response itself carries the
 /// success/failure shape on stdout.
 pub fn run() -> ExitCode {
+    let _stream_redirect =
+        match agent_first_data::stream_redirect::install_from_raw_args(std::env::args()) {
+            Ok(redirect) => redirect,
+            Err(err) => {
+                emit_bootstrap_error(&err.to_string());
+                return ExitCode::from(2);
+            }
+        };
+
     // Install the process-wide rustls crypto provider before anything builds a
     // reqwest/TLS client. On the inline-fetch path the host-side CDP fetch runs
     // before the SDK client's own guard, so without this `afhttp fetch` panics

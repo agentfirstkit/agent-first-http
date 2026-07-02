@@ -118,3 +118,92 @@ async fn read_foxbridge_version(bin: &std::path::Path) -> String {
         .trim()
         .to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host::bootstrap::{BrowserChoice, HealthPublic, Takeover};
+
+    fn base_args() -> HostArgs {
+        HostArgs {
+            listen: "tcp:127.0.0.1:0".into(),
+            profile: ProfileChoice::Ephemeral,
+            display: DisplayMode::Headless,
+            takeover: Takeover::Off,
+            display_quality: 100,
+            browser: BrowserChoice::Camoufox,
+            browser_bin: None,
+            token: None,
+            takeover_enabled: true,
+            health_enabled: true,
+            health_public: HealthPublic::Off,
+            engine_envs: Vec::new(),
+            browser_args: Vec::new(),
+            proxy: None,
+            recent_requests_cap: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn launch_rejects_persistent_profiles_before_resolving_binaries() {
+        let mut args = base_args();
+        args.profile = ProfileChoice::Persistent("e2e-camoufox".into());
+        args.browser_bin = Some(std::path::PathBuf::from("/missing/foxbridge"));
+
+        let err = launch(&args).await.err().expect("expected error");
+
+        assert_eq!(err.error_code, ErrorCode::BackendUnsupported);
+        assert!(
+            err.detail
+                .contains("does not yet support persistent profiles"),
+            "unexpected error message: {}",
+            err.detail
+        );
+    }
+
+    #[tokio::test]
+    async fn read_foxbridge_version_returns_unknown_for_missing_binary() {
+        let version = read_foxbridge_version(std::path::Path::new("/missing/foxbridge")).await;
+
+        assert_eq!(version, "unknown");
+    }
+
+    #[cfg(unix)]
+    fn write_executable(contents: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let path = dir.path().join("foxbridge");
+        {
+            let mut file = std::fs::File::create(&path).expect("create script");
+            file.write_all(contents.as_bytes()).expect("write script");
+        }
+        let mut permissions = std::fs::metadata(&path)
+            .expect("script metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).expect("chmod script");
+        (dir, path)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_foxbridge_version_trims_first_stdout_line() {
+        let (_dir, bin) = write_executable("#!/bin/sh\nprintf ' foxbridge 1.2.3 \\nignored\\n'\n");
+
+        let version = read_foxbridge_version(&bin).await;
+
+        assert_eq!(version, "foxbridge 1.2.3");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_foxbridge_version_returns_unknown_for_failed_command() {
+        let (_dir, bin) = write_executable("#!/bin/sh\nprintf 'foxbridge 1.2.3\\n'\nexit 42\n");
+
+        let version = read_foxbridge_version(&bin).await;
+
+        assert_eq!(version, "unknown");
+    }
+}

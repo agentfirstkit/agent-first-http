@@ -48,15 +48,16 @@ RUN apt-get update \
 
 # Browser backends — installed from the single source of truth shared with the
 # runtime image (container/docker/install-backends.sh), so pinned versions can
-# never drift between the test image and the deploy image. The test image
-# installs ALL backends (each self-skips on unsupported arch); the runtime image
-# makes each opt-in. Tests that need a given backend gate on its AFHTTP_TEST_*_BIN.
+# never drift between the test image and the deploy image. The test image keeps
+# very large optional backends opt-in; tests that need a missing backend
+# self-skip via AFHTTP_TEST_*_BIN discovery.
 COPY container/docker/install-backends.sh /usr/local/bin/install-backends.sh
+ARG AFHTTP_TEST_INSTALL_CAMOUFOX=0
 RUN chmod +x /usr/local/bin/install-backends.sh \
     && install-backends.sh chrome-headless-shell \
     && install-backends.sh lightpanda \
     && install-backends.sh fingerprint-chromium \
-    && install-backends.sh camoufox \
+    && if [ "$AFHTTP_TEST_INSTALL_CAMOUFOX" = "1" ]; then install-backends.sh camoufox; else echo "skipping camoufox in test image; set AFHTTP_TEST_INSTALL_CAMOUFOX=1 to include it"; fi \
     && install-backends.sh brave \
     && install-backends.sh kasmvnc
 
@@ -78,6 +79,6 @@ ENV CARGO_HOME=/cargo-home \
 
 # Install cargo-llvm-cov ahead of time so the coverage gate doesn't refetch each run.
 RUN rustup component add llvm-tools-preview clippy rustfmt \
-    && cargo install cargo-llvm-cov --locked --version "^0.6"
+    && cargo install cargo-llvm-cov --locked --version "0.8.7"
 
 WORKDIR /work

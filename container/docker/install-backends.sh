@@ -16,15 +16,24 @@ set -euo pipefail
 
 # Pinned versions for direct-download backends — bump these (and re-verify both
 # images build) together. Apt-backed Brave tracks Brave's stable repository.
-CHROME_FOR_TESTING_VERSION="149.0.7827.22"
-FINGERPRINT_CHROMIUM_VERSION="144.0.7559.132"
+CHROME_FOR_TESTING_VERSION="150.0.7871.46"
+FINGERPRINT_CHROMIUM_VERSION="148.0.7778.215"
 CAMOUFOX_RELEASE="v150.0.2-beta.25"
 CAMOUFOX_X86_BUILD="150.0.2-alpha.26"
 CAMOUFOX_ARM_BUILD="150.0.2-alpha.25"
-GO_VERSION="1.23.4"
+GO_VERSION="1.26.4"
 KASMVNC_VERSION="1.4.0"
 
 arch="$(uname -m)"
+
+download() {
+    local output="$1"
+    local url="$2"
+    echo "downloading ${url}"
+    rm -f "$output"
+    curl -fL --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 20 \
+        --speed-time 60 --speed-limit 1024 --progress-bar -o "$output" "$url"
+}
 
 install_chrome_headless_shell() {
     # Chrome-for-Testing publishes linux64 only (no arm64 as of this writing).
@@ -32,7 +41,7 @@ install_chrome_headless_shell() {
         x86_64) cft_arch="linux64" ;;
         *) echo "skipping chrome-headless-shell on unsupported arch $arch"; return 0 ;;
     esac
-    curl -fsSL -o /tmp/chs.zip \
+    download /tmp/chs.zip \
         "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_FOR_TESTING_VERSION}/${cft_arch}/chrome-headless-shell-${cft_arch}.zip"
     unzip -q /tmp/chs.zip -d /opt/
     ln -sf "/opt/chrome-headless-shell-${cft_arch}/chrome-headless-shell" /usr/local/bin/chrome-headless-shell
@@ -45,7 +54,7 @@ install_lightpanda() {
         aarch64|arm64) lp_arch="aarch64" ;;
         *) echo "skipping lightpanda on unsupported arch $arch"; return 0 ;;
     esac
-    curl -fsSL -o /usr/local/bin/lightpanda \
+    download /usr/local/bin/lightpanda \
         "https://github.com/lightpanda-io/browser/releases/download/nightly/lightpanda-${lp_arch}-linux"
     chmod +x /usr/local/bin/lightpanda
 }
@@ -57,7 +66,7 @@ install_fingerprint_chromium() {
         *) echo "skipping fingerprint-chromium on unsupported arch $arch"; return 0 ;;
     esac
     local url="https://github.com/adryfish/fingerprint-chromium/releases/download/${FINGERPRINT_CHROMIUM_VERSION}/ungoogled-chromium-${FINGERPRINT_CHROMIUM_VERSION}-1-x86_64_linux.tar.xz"
-    curl -fsSL -o /tmp/fpc.tar.xz "$url"
+    download /tmp/fpc.tar.xz "$url"
     mkdir -p /opt/fingerprint-chromium
     tar -xJf /tmp/fpc.tar.xz -C /opt/fingerprint-chromium --strip-components=1
     rm /tmp/fpc.tar.xz
@@ -88,14 +97,14 @@ install_camoufox() {
     apt-get update && apt-get install -y --no-install-recommends \
         libdbus-glib-1-2 libxt6 libasound2
     rm -rf /var/lib/apt/lists/*
-    curl -fsSL -o /tmp/go.tgz "https://go.dev/dl/go${GO_VERSION}.linux-${go_arch}.tar.gz"
+    download /tmp/go.tgz "https://go.dev/dl/go${GO_VERSION}.linux-${go_arch}.tar.gz"
     tar -xzf /tmp/go.tgz -C /usr/local
     rm /tmp/go.tgz
     export PATH="/usr/local/go/bin:$PATH" GOPATH=/go GOBIN=/usr/local/bin
     mkdir -p "$GOPATH"
     go install github.com/VulpineOS/foxbridge/cmd/foxbridge@latest \
         || echo "warning: foxbridge install failed; camoufox backend will be unavailable"
-    curl -fsSL -o /tmp/cf.zip "$cf_url"
+    download /tmp/cf.zip "$cf_url"
     mkdir -p /opt/camoufox
     unzip -q /tmp/cf.zip -d /opt/camoufox
     rm /tmp/cf.zip
@@ -140,7 +149,7 @@ install_kasmvnc() {
     esac
     apt-get update
     apt-get install -y --no-install-recommends matchbox-window-manager
-    curl -fsSL -o /tmp/kasmvnc.deb \
+    download /tmp/kasmvnc.deb \
         "https://github.com/kasmtech/KasmVNC/releases/download/v${KASMVNC_VERSION}/kasmvncserver_bookworm_${KASMVNC_VERSION}_${deb_arch}.deb"
     apt-get install -y --no-install-recommends /tmp/kasmvnc.deb
     rm -rf /var/lib/apt/lists/* /tmp/kasmvnc.deb

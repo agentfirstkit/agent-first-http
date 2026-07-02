@@ -5,26 +5,25 @@ use clap::{Parser, Subcommand};
 
 use crate::shared::error::{Error, ErrorCode};
 
-/// A URL acquisition tool for AI agents.
-///
-/// Give afhttp a URL and it returns the page plus the artifacts an agent needs to
-/// decide what to do next: rendered HTML, a DOM observation, a screenshot, and
-/// network and console logs. It covers the whole acquisition range behind one
-/// structured contract — a plain HTTP fetch when that works, a browser-backed
-/// fetch when it does not, deep network capture, a raw CDP escape hatch, and a
-/// takeover panel for human takeover (login, captcha, 2FA).
-///
-/// Two roles. `afhttp host` is the long-lived browser-host: it holds Chromium and
-/// one on-disk profile, and exposes a CDP endpoint plus the takeover panel. The other
-/// commands are short-lived drivers that connect to a host, do work, and write
-/// artifacts locally. Run the host where the browser needs to be and the driver
-/// wherever the agent runs.
-///
-/// Every output is one line of structured JSON; every failure carries a stable
-/// error_code. The tool never decides what a page means — the agent does.
+pub const DISPLAY_NAME: &str = env!("DISPLAY_NAME");
+
 #[derive(Parser, Debug)]
-#[command(name = "afhttp", version, verbatim_doc_comment)]
+#[command(
+    name = env!("DISPLAY_NAME"),
+    bin_name = "afhttp",
+    version,
+    about = env!("CARGO_PKG_DESCRIPTION"),
+    long_about = concat!(env!("DISPLAY_NAME"), " - ", env!("CARGO_PKG_DESCRIPTION")),
+)]
 pub struct Cli {
+    /// Redirect stdout bytes to this file.
+    #[arg(long = "stdout-file", value_name = "PATH", global = true)]
+    pub stdout_file: Option<String>,
+
+    /// Redirect stderr bytes to this file.
+    #[arg(long = "stderr-file", value_name = "PATH", global = true)]
+    pub stderr_file: Option<String>,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -79,6 +78,7 @@ pub fn parse() -> Result<Parsed, Error> {
         // invalid_argument so machine consumers can branch.
         Error::new(ErrorCode::InvalidArgument, e.to_string())
     })?;
+    let _stream_redirect_args = (&cli.stdout_file, &cli.stderr_file);
     Ok(Parsed {
         command: cli.command,
     })

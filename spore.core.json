@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-http",
   "name": "Agent-First HTTP",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "Give your AI agent its own private browser — so it reads the real page, past logins and bot walls, without ever touching yours.",
@@ -13,18 +13,15 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Make default artifact capture render-mode-aware: an HTTP fast-path fetch now returns only the raw body_file, while a browser-backed fetch automatically expands to the full composed-page, DOM, screenshot, network, console, and observation artifact set; an explicit --want is still honored verbatim on either path, so agents no longer pay for browser-only artifacts on plain HTTP responses",
-    "Stop the takeover handoff from recommending an auto-discovered endpoint: the suggested 'fetch --takeover' command now pins --endpoint only when the user explicitly preconfigured one, instead of hard-coding an ephemeral discovered host",
-    "Add Hermes as a fourth target for 'afhttp skill' install, remove, and status, alongside Codex, Claude Code, and opencode",
-    "Rename the skill '--scope project' value to '--scope workspace' and drop the Claude-Code/opencode-only restriction, so scope applies uniformly across all agents",
-    "Upgrade the agent-first-data dependency to 0.14.2 and tower-http to 0.7, picking up the shared skill-admin and data-convention updates",
-    "Sharpen the README and synopsis marketing copy to a tighter one-liner and add an 'Ask your agent' usage example",
-    "Update the embedded skill guidance to match the new defaults: start from a bare 'afhttp fetch', read body_file on the fast path, and escalate to '--render always' or explicit --want only when the raw body looks incomplete"
+    "Add global --stdout-file and --stderr-file options so afhttp can redirect stdout and stderr streams to separate files before command handling",
+    "Use the product display name in generated CLI help and docs while keeping afhttp as the executable name",
+    "Refresh Docker-installed browser and test backends to current pinned releases, add a release-gated third-party version audit, and keep the very large Camoufox test backend opt-in",
+    "Upgrade agent-first-data to 0.15.0 and use a registry dependency without a manifest-level local path"
   ],
   "bonds": [
     {
       "relation": "depends_on",
-      "uri": "cmn://agentfirstkit.com/b3.39kCSa6orKxAaLcSGpisgLo3KXCxzCw2KutvdhgajCV3",
+      "uri": "cmn://agentfirstkit.com/b3.2TyLnsC2qStf6kjYVgcno4fv2hfiVzWuzuX6bCHwez5K",
       "id": "agent-first-data",
       "reason": "All request/response fields use Agent-First Data suffix conventions, and runtime protocol/log events are emitted on stdout only"
     }

@@ -31,7 +31,8 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 # Build the image when the Dockerfile or pinned deps changed since the last build.
-IMAGE_STAMP="$SPORE_DIR/target/.docker-image-stamp"
+CAMOUFOX_BUILD="${AFHTTP_TEST_INSTALL_CAMOUFOX:-0}"
+IMAGE_STAMP="$SPORE_DIR/target/.docker-image-stamp-camoufox-${CAMOUFOX_BUILD}"
 DOCKERFILE="$SPORE_DIR/tests/Dockerfile.test"
 NEEDS_BUILD=1
 if [ -f "$IMAGE_STAMP" ] && docker image inspect "$IMAGE_TAG" >/dev/null 2>&1; then
@@ -41,7 +42,11 @@ if [ -f "$IMAGE_STAMP" ] && docker image inspect "$IMAGE_TAG" >/dev/null 2>&1; t
 fi
 if [ "$NEEDS_BUILD" = "1" ]; then
   echo "==> docker build $IMAGE_TAG (tests/Dockerfile.test changed or image missing)" >&2
-  docker build -t "$IMAGE_TAG" -f "$DOCKERFILE" "$SPORE_DIR"
+  docker build \
+    --build-arg "AFHTTP_TEST_INSTALL_CAMOUFOX=$CAMOUFOX_BUILD" \
+    -t "$IMAGE_TAG" \
+    -f "$DOCKERFILE" \
+    "$SPORE_DIR"
   mkdir -p "$SPORE_DIR/target"
   touch "$IMAGE_STAMP"
 fi
