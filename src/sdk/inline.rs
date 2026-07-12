@@ -163,7 +163,7 @@ impl Client {
 #[cfg(feature = "host")]
 async fn launch_inline_host(config: &InlineConfig) -> Result<LaunchedInlineHost, Error> {
     use crate::host::bootstrap::{
-        install_rustls_provider, DisplayMode, HealthPublic, HostArgs, ProfileChoice, Takeover,
+        DisplayMode, HealthPublic, HostArgs, ProfileChoice, Takeover, install_rustls_provider,
     };
     use crate::host::listener::AppState;
 

@@ -18,7 +18,7 @@ mod support;
 use std::time::Duration;
 
 use agent_first_http::host::bootstrap::HealthPublic;
-use agent_first_http::host::listener::{router_for_tests, test_state, AppState};
+use agent_first_http::host::listener::{AppState, router_for_tests, test_state};
 use agent_first_http::sdk::Client;
 use tokio::net::TcpListener;
 
@@ -101,9 +101,11 @@ async fn capabilities_reports_browser_artifacts_unsupported_when_no_backend() {
     assert!(response.features.contains_key("capture_ws"));
     assert!(response.features.contains_key("capture_sse"));
     assert!(response.features.contains_key("recent_requests"));
-    assert!(response
-        .wait_modes
-        .contains(&"selector_visible".to_string()));
+    assert!(
+        response
+            .wait_modes
+            .contains(&"selector_visible".to_string())
+    );
 }
 
 #[tokio::test]
@@ -147,7 +149,9 @@ async fn public_minimal_health_allows_unauthenticated_health() {
         .expect("send");
     assert_eq!(r.status(), reqwest::StatusCode::OK);
     let body: serde_json::Value = r.json().await.expect("json");
-    assert_eq!(body["code"], "health");
+    agent_first_data::validate_protocol_event(&body, true).expect("strict AFDATA event");
+    assert_eq!(body["kind"], "result");
+    assert_eq!(body["result"]["code"], "health");
     // Minimal payload hides backend + profile + capabilities_url.
     assert!(body.get("backend").is_none_or(|v| v.is_null()));
     assert!(body.get("profile").is_none_or(|v| v.is_null()));
@@ -171,7 +175,9 @@ async fn public_minimal_health_allows_unauthenticated_health() {
     assert_eq!(full.status(), reqwest::StatusCode::OK);
     let body: serde_json::Value = full.json().await.expect("json");
     assert!(
-        body.get("capabilities_url").is_some_and(|v| !v.is_null()),
+        body["result"]
+            .get("capabilities_url")
+            .is_some_and(|v| !v.is_null()),
         "full health payload must include capabilities_url; got {body}",
     );
 }

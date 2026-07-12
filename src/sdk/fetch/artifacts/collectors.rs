@@ -148,10 +148,10 @@ impl NetworkCollector {
             // that arrives between check and await is not lost.
             let notified = self.main_notify.notified();
             tokio::pin!(notified);
-            if let Some(entry) = self.main_entry().await {
-                if entry.status.is_some() || entry.failure.is_some() {
-                    return Some(entry);
-                }
+            if let Some(entry) = self.main_entry().await
+                && (entry.status.is_some() || entry.failure.is_some())
+            {
+                return Some(entry);
             }
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
@@ -301,25 +301,25 @@ fn handle_event(
             }
             // Redirect chain: if redirectResponse is present, finalize the
             // existing entry first as a redirect and link via hint.
-            if let Some(redirect) = ev.params.get("redirectResponse") {
-                if let Some(existing) = inner.slots.get_mut(&req_id) {
-                    let status = redirect
-                        .get("status")
-                        .and_then(|v| v.as_u64())
-                        .map(|s| s as u16);
-                    existing.entry.status = status;
-                    existing.entry.state = NetworkEntryState::Finished;
-                    let mut h = headers_map(redirect.get("headers"));
-                    if redact_headers {
-                        redact_inplace(&mut h);
-                    }
-                    existing.entry.response_headers = h;
-                    existing
-                        .entry
-                        .hints
-                        .insert("redirected".into(), Value::Bool(true));
-                    inner.finished.push(req_id.clone());
+            if let Some(redirect) = ev.params.get("redirectResponse")
+                && let Some(existing) = inner.slots.get_mut(&req_id)
+            {
+                let status = redirect
+                    .get("status")
+                    .and_then(|v| v.as_u64())
+                    .map(|s| s as u16);
+                existing.entry.status = status;
+                existing.entry.state = NetworkEntryState::Finished;
+                let mut h = headers_map(redirect.get("headers"));
+                if redact_headers {
+                    redact_inplace(&mut h);
                 }
+                existing.entry.response_headers = h;
+                existing
+                    .entry
+                    .hints
+                    .insert("redirected".into(), Value::Bool(true));
+                inner.finished.push(req_id.clone());
             }
             let mut entry = default_entry();
             entry.request_id = req_id.clone();

@@ -2,22 +2,26 @@
 
 > Reflects the v0.6.0 implementation. [architecture.md](architecture.md) is the canonical contract; this file documents the on-wire JSON shapes the CLI and SDK actually emit. Coverage of the ten artifact tokens and 11 CLI commands matches `src/shared/`, `src/sdk/`, and `src/host/`.
 
-All command outputs are single JSON objects on stdout unless otherwise stated. Artifact files are referenced by absolute `*_file` paths in those JSON envelopes.
+All command outputs are AFDATA protocol-v1 JSON events on stdout unless otherwise stated. Successes are `{"kind":"result","result":...,"trace":{}}`; artifact files are referenced by absolute `*_file` paths inside `result`. Failures are `{"kind":"error","error":...,"trace":{}}`.
 
-Every failure envelope carries the standard fields below. `afhttp fetch`
+Every failure `error` payload carries the standard fields below. `afhttp fetch`
 execution failures also include `trace`; parse/configuration failures from
 other commands may omit it.
 
 | Field | Description |
 | --- | --- |
-| `error_code` | Stable machine-readable enum. Agents match on this field, not `error`. |
-| `error` | Human-readable detail for logs. |
-| `retryable` | Whether retrying the same operation may help. |
+| `error.code` | Stable machine-readable enum. Agents match on this field, not `error.message`. |
+| `error.message` | Human-readable detail for logs. |
+| `error.retryable` | Whether retrying the same operation may help. |
 | `trace` | Best-effort timings and phase details on fetch execution failures. |
 
 ## Fetch Result
 
 `afhttp fetch` returns one object when a URL acquisition attempt reaches an HTTP response or browser-rendered page state.
+
+```json
+{"kind":"result","result":{"code":"fetch","request_id":"req","body_file":"/tmp/afhttp-out/req/body.html","rendered_html_file":"/tmp/afhttp-out/req/rendered.html","network_file":"/tmp/afhttp-out/req/network.json"},"trace":{}}
+```
 
 | Field | Present | Description |
 | --- | --- | --- |
@@ -143,7 +147,7 @@ reaches the target, the result carries the usual artifacts and no `next_action`.
 | `render_decision` | `http_only` when the HTTP fast path was used, `browser` when a CDP-driven render was used. |
 | `render_mode` | Requested render mode (`none`, `auto`, or `always`). |
 | `render_used` | Convenience boolean mirroring whether the browser path actually ran. |
-| `escalation_reason` | Stable token describing why the browser path was taken. Values: `"empty_html_shell"` (HTTP returned a JS-bootstrap with no visible text), `"http_status_NNN"` (HTTP returned status NNN), `"http_failed_<code>"` (transport error, `<code>` is the `error_code`). |
+| `escalation_reason` | Stable token describing why the browser path was taken. Values: `"empty_html_shell"` (HTTP returned a JS-bootstrap with no visible text), `"http_status_NNN"` (HTTP returned status NNN), `"http_failed_<code>"` (transport error, `<code>` is `error.code`). |
 | `main_request_observed` | Whether the main document request was observed by the active fetch path. HTTP-only successes set this true; browser-internal URLs like `about:blank` or cancelled navigations may set it false. |
 | `navigation_duration_ms` | Browser-path only: wall-clock from `Page.navigate` to the wait condition resolving. |
 | `wait_mode` | Browser-path wait mode (`auto`, `load`, `idle`, `selector`, `selector_visible`, or `ms`). |
@@ -159,10 +163,12 @@ Failure envelopes for `afhttp fetch` also include this trace:
 
 ```json
 {
-  "code": "error",
-  "error_code": "navigation_timeout",
-  "error": "fetch timed out after 90000ms during capture_text",
-  "retryable": true,
+  "kind": "error",
+  "error": {
+    "code": "navigation_timeout",
+    "message": "fetch timed out after 90000ms during capture_text",
+    "retryable": true
+  },
   "trace": {
     "render_decision": "browser",
     "render_mode": "always",
@@ -332,10 +338,10 @@ shell. Pending requests are not hidden: `network.summary.incomplete_total`,
 collide with the top-level command envelope:
 
 ```json
-{"code":"cdp","result":{"result":{"type":"number","value":42}}}
+{"kind":"result","result":{"code":"cdp","result":{"result":{"type":"number","value":42}}},"trace":{}}
 ```
 
-CDP method errors return the standard error envelope with `error_code: "cdp_error"` or `error_code: "cdp_timeout"`.
+CDP method errors return the standard error event with `error.code: "cdp_error"` or `error.code: "cdp_timeout"`.
 
 ## Health Result
 
@@ -443,7 +449,7 @@ Read-only listing of files the browser captured in the profile download director
 
 ## Error Codes
 
-Agents should branch on `error_code`, not the human-readable `error`.
+Agents should branch on `error.code`, not the human-readable `error.message`.
 Examples below are representative `error` / Chromium `errorText` strings.
 
 | Code | Example detail | Agent should |

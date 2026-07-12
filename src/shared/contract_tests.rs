@@ -7,8 +7,11 @@ fn readme_and_reference_fetch_json_examples_are_flat() {
         let fetch = blocks
             .iter()
             .filter_map(|block| serde_json::from_str::<serde_json::Value>(block).ok())
-            .find(|value| value.get("code").and_then(|v| v.as_str()) == Some("fetch"))
+            .find(|value| value["kind"] == "result" && value["result"]["code"] == "fetch")
             .unwrap_or_else(|| panic!("no fetch JSON block in {}", path.display()));
+        agent_first_data::validate_protocol_event(&fetch, true)
+            .expect("flat protocol-v1 fetch example");
+        let fetch = &fetch["result"];
         assert!(
             fetch.get("artifacts").is_none(),
             "fetch JSON example in {} must not nest *_file fields under artifacts",

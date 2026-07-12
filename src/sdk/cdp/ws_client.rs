@@ -6,23 +6,23 @@
 //! a broadcast event stream respectively.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
 use serde::Serialize;
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
+use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
+use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::{
     self,
     client::IntoClientRequest,
     handshake::client::generate_key,
-    http::{header, Request, Uri},
+    http::{Request, Uri, header},
 };
-use tokio_tungstenite::WebSocketStream;
 
 use crate::sdk::endpoint::Endpoint;
 use crate::shared::error::{Error, ErrorCode};

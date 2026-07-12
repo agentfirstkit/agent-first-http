@@ -178,10 +178,9 @@ pub async fn capture(
         }
         if let Ok(parsed_frames) =
             serde_json::from_value::<Vec<Frame>>(v.get("frames").cloned().unwrap_or_default())
+            && !parsed_frames.is_empty()
         {
-            if !parsed_frames.is_empty() {
-                frames = parsed_frames;
-            }
+            frames = parsed_frames;
         }
         focused_ref = v
             .get("focused_ref")

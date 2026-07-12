@@ -466,10 +466,11 @@ mod tests {
             result.set_artifact_file(artifact, PathBuf::from("/tmp/afhttp-out/req-1").join(file));
         }
         let mut buf = Vec::new();
-        crate::shared::envelope::emit(&mut buf, "fetch", &result).unwrap();
+        crate::shared::afdata::emit(&mut buf, "fetch", &result).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        agent_first_data::validate_protocol_event(&json, true).unwrap();
         assert!(
-            json.get("artifacts").is_none(),
+            json["result"].get("artifacts").is_none(),
             "artifacts map must be gone"
         );
         let canonical = serde_json::to_string(&json).unwrap();

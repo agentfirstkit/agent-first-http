@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 use cookie::{Expiration, SameSite};
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, COOKIE, USER_AGENT};
+use reqwest::header::{COOKIE, HeaderMap, HeaderName, HeaderValue, USER_AGENT};
 use url::Url;
 
 use crate::sdk::fetch::FetchBuilder;
@@ -365,17 +365,17 @@ pub(crate) fn validate_cookie_scope(
             ));
         }
     }
-    if let Some(path) = &cookie.path {
-        if !url.path().starts_with(path) {
-            return Err(Error::new(
-                ErrorCode::InvalidArgument,
-                format!(
-                    "{source}: cookie {:?} Path={path:?} does not match URL path {:?}",
-                    cookie.name,
-                    url.path()
-                ),
-            ));
-        }
+    if let Some(path) = &cookie.path
+        && !url.path().starts_with(path)
+    {
+        return Err(Error::new(
+            ErrorCode::InvalidArgument,
+            format!(
+                "{source}: cookie {:?} Path={path:?} does not match URL path {:?}",
+                cookie.name,
+                url.path()
+            ),
+        ));
     }
     Ok(())
 }

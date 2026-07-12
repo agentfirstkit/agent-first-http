@@ -15,10 +15,10 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::body::{to_bytes, Body};
+use axum::body::{Body, to_bytes};
 use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::http::{header, HeaderMap, StatusCode, Uri};
+use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use futures::{SinkExt, StreamExt};
 // KasmVNC takeover is Unix-only (Xvnc + a unix-socket control channel); these
@@ -67,10 +67,10 @@ impl Drop for ProviderHandle {
         if let Some(task) = self.stderr_task.take() {
             task.abort();
         }
-        if let Some(wm) = &self.wm_child {
-            if let Ok(mut child) = wm.try_lock() {
-                let _ = child.start_kill();
-            }
+        if let Some(wm) = &self.wm_child
+            && let Ok(mut child) = wm.try_lock()
+        {
+            let _ = child.start_kill();
         }
         if let Ok(mut child) = self.child.try_lock() {
             let _ = child.start_kill();
@@ -509,13 +509,12 @@ async fn forward_kasmvnc_ws(client: WebSocket, upstream_url: String) {
             // so synthesize one matching the upstream authority. The browser's
             // own Origin points at afhttp's listener, not KasmVNC, so it can't
             // be forwarded verbatim.
-            if let Some(authority) = req.uri().authority().map(|a| a.to_string()) {
-                if let Ok(origin) =
+            if let Some(authority) = req.uri().authority().map(|a| a.to_string())
+                && let Ok(origin) =
                     tungstenite::http::HeaderValue::from_str(&format!("http://{authority}"))
-                {
-                    req.headers_mut()
-                        .insert(tungstenite::http::header::ORIGIN, origin);
-                }
+            {
+                req.headers_mut()
+                    .insert(tungstenite::http::header::ORIGIN, origin);
             }
             req
         }

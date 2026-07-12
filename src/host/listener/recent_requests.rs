@@ -106,7 +106,7 @@ pub async fn handler(Query(q): Query<RecentQuery>, State(state): State<AppState>
             "reason": "start the host with --recent-requests-cap N to enable",
             "requests": [],
         });
-        return Json(body).into_response();
+        return Json(crate::shared::afdata::result_value("recent_requests", body)).into_response();
     };
     let requests = ring.snapshot().await;
     let body = serde_json::json!({
@@ -115,5 +115,5 @@ pub async fn handler(Query(q): Query<RecentQuery>, State(state): State<AppState>
         "count": requests.len(),
         "requests": requests,
     });
-    Json(body).into_response()
+    Json(crate::shared::afdata::result_value("recent_requests", body)).into_response()
 }

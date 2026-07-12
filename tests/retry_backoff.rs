@@ -18,8 +18,8 @@ mod support;
 
 use std::time::{Duration, Instant};
 
-use agent_first_http::sdk::fetch::RenderMode;
 use agent_first_http::sdk::Client;
+use agent_first_http::sdk::fetch::RenderMode;
 use agent_first_http::shared::artifacts::Artifact;
 use agent_first_http::shared::error::ErrorCode;
 

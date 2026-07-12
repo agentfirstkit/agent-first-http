@@ -157,11 +157,7 @@ fn fingerprint_seed_from_path(path: &std::path::Path) -> u32 {
     // The upstream tool documents `--fingerprint=<u32>`; we coerce
     // away the value 0 so an unlikely all-zeros hash doesn't disable
     // the spoofing pipeline by accident.
-    if h == 0 {
-        1
-    } else {
-        h
-    }
+    if h == 0 { 1 } else { h }
 }
 
 async fn ensure_download_dir(profile_dir: &std::path::Path) -> Result<PathBuf, Error> {
@@ -294,10 +290,11 @@ pub(crate) fn resolve_named_bin(
     name: &str,
     override_bin: &Option<PathBuf>,
 ) -> Result<PathBuf, Error> {
-    if let Some(p) = override_bin {
-        if p.file_name().and_then(|n| n.to_str()) == Some(name) && p.exists() {
-            return Ok(p.clone());
-        }
+    if let Some(p) = override_bin
+        && p.file_name().and_then(|n| n.to_str()) == Some(name)
+        && p.exists()
+    {
+        return Ok(p.clone());
     }
     for dir in [
         "/usr/local/bin",

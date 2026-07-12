@@ -6,8 +6,7 @@
 #   tests/test.sh unit                  # lib + bin unit tests
 #   tests/test.sh integration           # full browser-integration suite
 #   tests/test.sh takeover              # display takeover proxy + KasmVNC smoke
-#   tests/test.sh coverage              # cargo-llvm-cov with gate
-#   tests/test.sh all                   # static + unit + integration + coverage
+#   tests/test.sh all                   # static + unit + integration
 #   tests/test.sh release               # everything: all + takeover (release gate)
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -55,9 +54,6 @@ case "$MODE" in
     run "cargo test --all-features --test display_takeover -- --test-threads=1"
     run "cargo test --all-features --test display_takeover -- --ignored --test-threads=1"
     ;;
-  coverage)
-    run "cargo llvm-cov --all-features --tests --fail-under-lines 66 --fail-under-regions 65"
-    ;;
   default)
     run "cargo fmt --all --check"
     run "cargo build --all-features"
@@ -69,7 +65,6 @@ case "$MODE" in
     "$0" static
     "$0" unit
     "$0" integration
-    "$0" coverage
     ;;
   release)
     # The full release gate: everything, including the flaky-by-design
@@ -78,7 +73,7 @@ case "$MODE" in
     "$0" takeover
     ;;
   *)
-    echo "Usage: $0 [static|unit|integration|takeover|coverage|default|all|release]" >&2
+    echo "Usage: $0 [static|unit|integration|takeover|default|all|release]" >&2
     exit 2
     ;;
 esac

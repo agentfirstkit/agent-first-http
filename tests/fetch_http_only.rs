@@ -15,9 +15,9 @@ mod support;
 
 use std::time::Duration;
 
-use agent_first_http::sdk::fetch::result::TraceStageStatus;
-use agent_first_http::sdk::fetch::RenderMode;
 use agent_first_http::sdk::Client;
+use agent_first_http::sdk::fetch::RenderMode;
+use agent_first_http::sdk::fetch::result::TraceStageStatus;
 use agent_first_http::shared::artifacts::Artifact;
 use agent_first_http::shared::error::ErrorCode;
 
@@ -527,12 +527,17 @@ async fn cli_render_none_without_endpoint_does_not_require_browser_env() {
         String::from_utf8_lossy(&output.stderr)
     );
     let body: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(body["kind"], "result");
+    agent_first_data::validate_protocol_event(&body, true).expect("protocol event");
+    let body = &body["result"];
     assert_eq!(body["code"], "fetch");
     assert_eq!(body["trace"]["render_decision"], "http_only");
     assert_eq!(body["trace"]["timeout_ms"], 5000);
-    assert!(body["trace"]["stages"]
-        .as_array()
-        .is_some_and(|s| !s.is_empty()));
+    assert!(
+        body["trace"]["stages"]
+            .as_array()
+            .is_some_and(|s| !s.is_empty())
+    );
     assert!(body.get("artifacts").is_none(), "fetch output must be flat");
     let body_file = body["body_file"].as_str().expect("body_file");
     assert!(
@@ -565,6 +570,9 @@ async fn cli_render_auto_without_want_does_not_require_browser_for_plain_html() 
         String::from_utf8_lossy(&output.stderr)
     );
     let body: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+    assert_eq!(body["kind"], "result");
+    agent_first_data::validate_protocol_event(&body, true).expect("protocol event");
+    let body = &body["result"];
     assert_eq!(body["code"], "fetch");
     assert_eq!(body["trace"]["render_decision"], "http_only");
     assert_eq!(body["trace"]["render_used"], false);
@@ -603,16 +611,19 @@ async fn cli_fetch_error_envelope_includes_trace() {
         String::from_utf8_lossy(&output.stderr)
     );
     let body: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
-    assert_eq!(body["code"], "error");
+    assert_eq!(body["kind"], "error");
+    agent_first_data::validate_protocol_event(&body, true).expect("protocol event");
     assert!(
         body["trace"].is_object(),
         "error body missing trace: {body}"
     );
     assert_eq!(body["trace"]["timeout_ms"], 1000);
     assert_eq!(body["trace"]["render_mode"], "none");
-    assert!(body["trace"]["stages"]
-        .as_array()
-        .is_some_and(|s| !s.is_empty()));
+    assert!(
+        body["trace"]["stages"]
+            .as_array()
+            .is_some_and(|s| !s.is_empty())
+    );
 }
 
 #[tokio::test]
@@ -635,6 +646,7 @@ async fn cli_fetch_rejects_legacy_timeout_flag() {
         String::from_utf8_lossy(&output.stderr)
     );
     let body: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
-    assert_eq!(body["code"], "error");
-    assert_eq!(body["error_code"], "invalid_argument");
+    assert_eq!(body["kind"], "error");
+    agent_first_data::validate_protocol_event(&body, true).expect("protocol event");
+    assert_eq!(body["error"]["code"], "invalid_argument");
 }

@@ -5,8 +5,8 @@
 
 #![allow(clippy::useless_conversion)]
 
-use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::WebSocketUpgrade;
+use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::{OriginalUri, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -26,11 +26,6 @@ pub async fn display_proxy(
 }
 
 fn service_unavailable(reason: &str) -> Response {
-    let body = serde_json::json!({
-        "code": "error",
-        "error_code": "cdp_unavailable",
-        "error": reason,
-        "retryable": true,
-    });
+    let body = crate::shared::afdata::error_value("cdp_unavailable", reason, true);
     (StatusCode::SERVICE_UNAVAILABLE, axum::Json(body)).into_response()
 }

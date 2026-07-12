@@ -13,9 +13,9 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
+use crate::sdk::fetch::FetchBuilder;
 use crate::sdk::fetch::deadline::FetchDeadline;
 use crate::sdk::fetch::result::{EscalationReason, FetchResult, RenderDecision};
-use crate::sdk::fetch::FetchBuilder;
 use crate::shared::artifacts::{Artifact, ArtifactPaths};
 use crate::shared::error::{Error, ErrorCode};
 use crate::shared::ids::RequestId;

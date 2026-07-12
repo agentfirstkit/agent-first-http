@@ -398,33 +398,31 @@ async fn status(args: StatusArgs) -> Result<(), Error> {
     let mut backend = None;
     let mut provider = None;
     let mut takeover_ready = None;
-    if running {
-        if let Some(token) = token.as_deref() {
-            let client = crate::sdk::Client::connect(&endpoint)?.with_token(token.to_string());
-            match client.health().await {
-                Ok(health) => {
-                    let version_warning = host_version_warning(&args.common.name, &health.version);
-                    if let Some(warning) = version_warning {
-                        warnings.push(warning);
-                    }
-                    version_match = Some(health.version == VERSION);
-                    host_version = Some(health.version);
-                    if let Some(snapshot) = health.profile {
-                        profile_kind = Some(snapshot.kind);
-                        profile = snapshot.name;
-                    }
+    if running && let Some(token) = token.as_deref() {
+        let client = crate::sdk::Client::connect(&endpoint)?.with_token(token.to_string());
+        match client.health().await {
+            Ok(health) => {
+                let version_warning = host_version_warning(&args.common.name, &health.version);
+                if let Some(warning) = version_warning {
+                    warnings.push(warning);
                 }
-                Err(e) => warnings.push(format!("could not read /health: {}", e.detail)),
-            }
-            match client.capabilities().await {
-                Ok(caps) => {
-                    profile_backend = profile_kind.as_ref().map(|_| caps.backend.family.clone());
-                    provider = caps.takeover.provider.clone();
-                    takeover_ready = Some(is_hard_site_capabilities(&caps));
-                    backend = Some(caps.backend);
+                version_match = Some(health.version == VERSION);
+                host_version = Some(health.version);
+                if let Some(snapshot) = health.profile {
+                    profile_kind = Some(snapshot.kind);
+                    profile = snapshot.name;
                 }
-                Err(e) => warnings.push(format!("could not read /capabilities: {}", e.detail)),
             }
+            Err(e) => warnings.push(format!("could not read /health: {}", e.detail)),
+        }
+        match client.capabilities().await {
+            Ok(caps) => {
+                profile_backend = profile_kind.as_ref().map(|_| caps.backend.family.clone());
+                provider = caps.takeover.provider.clone();
+                takeover_ready = Some(is_hard_site_capabilities(&caps));
+                backend = Some(caps.backend);
+            }
+            Err(e) => warnings.push(format!("could not read /capabilities: {}", e.detail)),
         }
     }
     let (exit_code, log_summary) = if running {
@@ -798,7 +796,9 @@ fn require_hard_site_host_arg(
 fn hard_site_install_error(detail: String) -> Error {
     Error::new(
         ErrorCode::InvalidArgument,
-        format!("{detail}. Use `afhttp container install` (takeover is on by default), or `--takeover-provider off` for a lean host."),
+        format!(
+            "{detail}. Use `afhttp container install` (takeover is on by default), or `--takeover-provider off` for a lean host."
+        ),
     )
 }
 
@@ -847,15 +847,15 @@ fn host_arg_has_value(host_args: &[String], name: &str, expected: &str) -> bool 
     let mut iter = host_args.iter().peekable();
     while let Some(arg) = iter.next() {
         if arg == name {
-            if let Some(next) = iter.peek() {
-                if host_arg_values_equal(next, expected) {
-                    return true;
-                }
-            }
-        } else if let Some(value) = arg.strip_prefix(&eq_prefix) {
-            if host_arg_values_equal(value, expected) {
+            if let Some(next) = iter.peek()
+                && host_arg_values_equal(next, expected)
+            {
                 return true;
             }
+        } else if let Some(value) = arg.strip_prefix(&eq_prefix)
+            && host_arg_values_equal(value, expected)
+        {
+            return true;
         }
     }
     false
@@ -1456,12 +1456,12 @@ async fn read_token(runtime: Runtime, name: &str) -> Result<String, Error> {
         "/data/afhttp/host-token".into(),
     ];
     for attempt in 0..20 {
-        if let Ok(out) = capture(runtime.bin(), &argv) {
-            if out.status.success() {
-                let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if !token.is_empty() {
-                    return Ok(token);
-                }
+        if let Ok(out) = capture(runtime.bin(), &argv)
+            && out.status.success()
+        {
+            let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !token.is_empty() {
+                return Ok(token);
             }
         }
         if !container_running(runtime, name) {

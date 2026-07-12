@@ -7,14 +7,13 @@ fn main() -> std::process::ExitCode {
 
 #[cfg(not(feature = "cli"))]
 fn main() -> std::process::ExitCode {
-    // Without the cli feature there is no protocol writer available;
-    // emit a structured JSON error on stdout (the AFDATA channel) and exit.
+    // Without the cli feature there is no protocol writer available.
     use std::io::Write;
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
     let _ = writeln!(
         handle,
-        "{{\"code\":\"error\",\"error_code\":\"internal_error\",\"error\":\"afhttp built without the `cli` feature; rebuild with --features cli.\",\"retryable\":false}}"
+        "{{\"kind\":\"error\",\"error\":{{\"code\":\"internal_error\",\"message\":\"afhttp built without the `cli` feature; rebuild with --features cli.\",\"retryable\":false}},\"trace\":{{}}}}"
     );
     std::process::ExitCode::from(2)
 }

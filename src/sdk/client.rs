@@ -276,12 +276,14 @@ impl Client {
                 format!("GET {url}: status {status}"),
             ));
         }
-        let info: crate::sdk::profile::info::ProfileInfo = resp.json().await.map_err(|e| {
+        let bytes = resp.bytes().await.map_err(|e| {
             Error::new(
                 ErrorCode::InternalError,
-                format!("profile_info: decode response: {e}"),
+                format!("profile_info: read response: {e}"),
             )
         })?;
+        let info: crate::sdk::profile::info::ProfileInfo =
+            crate::shared::afdata::decode_result(&bytes)?;
         let arc = Arc::new(info);
         *guard = Some(arc.clone());
         Ok(arc)

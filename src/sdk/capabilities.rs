@@ -88,7 +88,7 @@ impl Client {
             )
         })?;
         if !status.is_success() {
-            if let Ok(err) = serde_json::from_slice::<Error>(&bytes) {
+            if let Ok(err) = crate::shared::afdata::decode_error(&bytes) {
                 return Err(err);
             }
             return Err(Error::new(
@@ -99,12 +99,7 @@ impl Client {
                 ),
             ));
         }
-        serde_json::from_slice::<CapabilitiesResponse>(&bytes).map_err(|e| {
-            Error::new(
-                ErrorCode::InternalError,
-                format!("capabilities: decode response: {e}"),
-            )
-        })
+        crate::shared::afdata::decode_result(&bytes)
     }
 
     /// Build a raw CDP request. Returns a [`crate::sdk::cdp::CdpBuilder`].

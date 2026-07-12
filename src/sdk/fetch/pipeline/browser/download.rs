@@ -9,11 +9,11 @@ use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
 use crate::sdk::cdp::ws_client::{CdpEvent, Connection};
+use crate::sdk::fetch::FetchBuilder;
 use crate::sdk::fetch::artifacts::{console as console_artifact, network as network_artifact};
 use crate::sdk::fetch::deadline::FetchDeadline;
 use crate::sdk::fetch::pipeline::sensitive_capture;
 use crate::sdk::fetch::result::{FetchResult, RenderDecision};
-use crate::sdk::fetch::FetchBuilder;
 use crate::shared::artifacts::Artifact;
 use crate::shared::error::{Error, ErrorCode};
 use crate::shared::ids::{RequestId, TabId};
@@ -271,19 +271,19 @@ async fn wait_for_download_file(
             let size1 = tokio::fs::metadata(&path).await.map(|m| m.len()).ok();
             tokio::time::sleep(Duration::from_millis(100)).await;
             let size2 = tokio::fs::metadata(&path).await.map(|m| m.len()).ok();
-            if let (Some(a), Some(b)) = (size1, size2) {
-                if a == b {
-                    let filename = path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("download")
-                        .to_string();
-                    return Ok(CompletedDownload {
-                        path,
-                        bytes: b,
-                        filename,
-                    });
-                }
+            if let (Some(a), Some(b)) = (size1, size2)
+                && a == b
+            {
+                let filename = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("download")
+                    .to_string();
+                return Ok(CompletedDownload {
+                    path,
+                    bytes: b,
+                    filename,
+                });
             }
         }
         tokio::time::sleep(Duration::from_millis(50)).await;

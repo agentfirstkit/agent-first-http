@@ -38,16 +38,13 @@ pub(super) async fn navigate_with_method(
             deadline,
         )
         .await
-        {
-            if let Some(frame_id) = frame_tree
+            && let Some(frame_id) = frame_tree
                 .pointer("/frameTree/frame/id")
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
-            {
-                if let Some(obj) = navigate_params.as_object_mut() {
-                    obj.insert("frameId".into(), serde_json::json!(frame_id));
-                }
-            }
+            && let Some(obj) = navigate_params.as_object_mut()
+        {
+            obj.insert("frameId".into(), serde_json::json!(frame_id));
         }
         return cdp_send(
             conn,

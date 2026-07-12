@@ -33,7 +33,7 @@ The hard part for an agent is not fetching bytes. It is that many useful URLs do
 - **Human takeover** when a human needs to step in on the same browser the agent is using — `afhttp fetch <url> --takeover` on a takeover-ready host (auto-discovered for the standard local container) hands a person the browser for a login, 2FA, captcha, or security challenge, then lets the agent re-fetch the same tab once the wall is cleared.
 - **Host health/capabilities and local profile tools** so agents can discover backend support and operators can list, inspect, retrieve captured downloads, prune, or delete persistent profiles.
 
-The agent never has to parse human-readable error messages. Every output is structured JSON. Every failure carries a stable `error_code`. See [architecture.md](architecture.md) for the full contract.
+The agent never has to parse human-readable error messages. Every CLI output is an AFDATA protocol-v1 JSON event. Every failure carries a stable `error.code`. See [architecture.md](architecture.md) for the full contract.
 
 ## Two roles
 
@@ -120,10 +120,10 @@ Before assigning work to a host, an agent or supervisor can ask what is alive an
 
 ```bash
 afhttp health --endpoint-url ws://host.mesh.internal:9222
-# {"code":"health","status":"ok","backend":{"family":"chromium","connected":true},...}
+# {"kind":"result","result":{"code":"health","status":"ok","backend":{"family":"chromium","connected":true},...},"trace":{}}
 
 afhttp capabilities --endpoint-url ws://host.mesh.internal:9222
-# {"code":"capabilities","artifacts":{"observation":{"supported":true},...},...}
+# {"kind":"result","result":{"code":"capabilities","artifacts":{"observation":{"supported":true},...},...},"trace":{}}
 ```
 
 `/health` is for readiness. `/capabilities` is for planning artifact requests and avoiding predictable `backend_unsupported` warnings.
@@ -258,7 +258,7 @@ When a page requires an emailed verification link or OTP, hand off to **afmail**
 - [Design Principles](design.md) — codebase-wide conventions (field naming, structured errors, output formats, no-panic policy).
 - [CLI Reference](cli.md) — flag-by-flag reference for the `afhttp` binary.
 - [Protocol Reference](reference.md) — output schemas for fetch, cdp, health, capabilities, and profile results.
-- [Testing](testing.md) — test strategy and coverage gates.
+- [Testing](testing.md) — test strategy and gates.
 
 ## License
 

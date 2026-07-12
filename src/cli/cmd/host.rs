@@ -9,7 +9,7 @@ use crate::cli::cmd::argenums::{BrowserArg, DisplayArg, HealthPublicArg, Takeove
 use crate::host::bootstrap::{
     BrowserChoice, DisplayMode, HealthPublic, HostArgs, ProfileChoice, Takeover,
 };
-use crate::host::listener::{parse_listen, ListenAddr};
+use crate::host::listener::{ListenAddr, parse_listen};
 use crate::shared::error::{Error, ErrorCode};
 
 #[derive(ClapArgs, Debug)]
@@ -168,18 +168,18 @@ fn enforce_listen_auth(listen: &str, token: Option<&str>) -> Result<(), Error> {
     if token.is_some() {
         return Ok(());
     }
-    if let ListenAddr::Tcp(addr) = parse_listen(listen)? {
-        if !addr.ip().is_loopback() {
-            return Err(Error::new(
-                ErrorCode::InvalidArgument,
-                format!(
-                    "--listen {listen}: refusing to bind a non-loopback address without --token-secret. \
+    if let ListenAddr::Tcp(addr) = parse_listen(listen)?
+        && !addr.ip().is_loopback()
+    {
+        return Err(Error::new(
+            ErrorCode::InvalidArgument,
+            format!(
+                "--listen {listen}: refusing to bind a non-loopback address without --token-secret. \
                      A token-less TCP host exposes full browser and profile control (/cdp) to \
                      anyone who can reach the port. Pass --token-secret, or bind tcp:127.0.0.1:<port> \
                      or a unix: socket."
-                ),
-            ));
-        }
+            ),
+        ));
     }
     Ok(())
 }

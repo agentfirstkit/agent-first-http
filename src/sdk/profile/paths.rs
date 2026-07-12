@@ -256,7 +256,7 @@ mod tests {
         assert!(validate_name("работа").is_err()); // Cyrillic
         assert!(validate_name("作業").is_err()); // CJK
         assert!(validate_name("café").is_err()); // accented Latin
-                                                 // Windows-style separator.
+        // Windows-style separator.
         assert!(validate_name("a\\b").is_err());
     }
 

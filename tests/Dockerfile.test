@@ -1,7 +1,7 @@
 # Test image for agent-first-http.
 #
 # Built on top of rust:bookworm (Debian 12 + recent stable Rust) so the spore's
-# build/test/clippy/coverage cycle runs in a container with chromium preinstalled
+# build/test/clippy cycle runs in a container with chromium preinstalled
 # instead of polluting the host with browser packages and chromiumoxide native deps.
 #
 # Usage is via tests/run-in-docker.sh (which builds from this file with the
@@ -77,8 +77,6 @@ ENV CARGO_HOME=/cargo-home \
     AFHTTP_NO_SANDBOX=1 \
     RUST_BACKTRACE=1
 
-# Install cargo-llvm-cov ahead of time so the coverage gate doesn't refetch each run.
-RUN rustup component add llvm-tools-preview clippy rustfmt \
-    && cargo install cargo-llvm-cov --locked --version "0.8.7"
+RUN rustup component add clippy rustfmt
 
 WORKDIR /work

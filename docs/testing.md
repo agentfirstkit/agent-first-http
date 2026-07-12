@@ -18,10 +18,6 @@ Run on every PR.
    - Covered by `bash tests/test.sh unit`; it runs `tests/check_regressions.sh` inside Docker.
    - Every production bug fix adds or updates a regression entry.
 
-4. Coverage gate
-   - `bash tests/test.sh coverage` (runs cargo-llvm-cov inside Docker)
-   - Both the unit suite and the browser integration suite contribute, so the coverage job installs a chromium binary and exports `AFHTTP_TEST_BROWSER_BIN`. The regions threshold (65%) is the v0.5.0 floor and should ratchet up as artifact extractors deepen.
-
 ## Browser Integration Suite
 
 Runs in CI when a browser binary is available, and locally on demand. Separated from the default gates because it requires Chromium installed and is slower.

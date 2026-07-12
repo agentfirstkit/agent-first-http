@@ -481,7 +481,7 @@ impl FetchBuilder {
 
     /// Execute the fetch and preserve the fetch trace on failure.
     ///
-    /// This is what the CLI uses to emit `code: "error"` envelopes with a
+    /// This is what the CLI uses to emit `kind: "error"` events with a
     /// fetch-local `trace` without adding trace fields to the global `Error`.
     pub async fn send_detailed(self) -> Result<FetchResult, FetchError> {
         if self.retry.attempts == 0 {

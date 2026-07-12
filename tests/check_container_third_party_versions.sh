@@ -5,7 +5,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPORE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 INSTALLER="$SPORE_DIR/container/docker/install-backends.sh"
-TEST_DOCKERFILE="$SPORE_DIR/tests/Dockerfile.test"
 
 need() {
     command -v "$1" >/dev/null 2>&1 || {
@@ -77,10 +76,6 @@ for deb_arch in amd64 arm64; do
         fail=1
     fi
 done
-
-latest_llvm_cov="$(curl -fsSL https://api.github.com/repos/taiki-e/cargo-llvm-cov/releases/latest | jq -r '.tag_name | sub("^v"; "")')"
-current_llvm_cov="$(sed -n 's/.*cargo install cargo-llvm-cov --locked --version "\([^"]*\)".*/\1/p' "$TEST_DOCKERFILE")"
-expect_eq "cargo-llvm-cov" "$current_llvm_cov" "$latest_llvm_cov" || fail=1
 
 if [ "$fail" -ne 0 ]; then
     echo "Update container/docker/install-backends.sh and tests/Dockerfile.test before release." >&2

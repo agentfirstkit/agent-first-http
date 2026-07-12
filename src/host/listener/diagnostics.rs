@@ -39,5 +39,5 @@ pub async fn handler(State(state): State<AppState>) -> Response {
         "uptime_s": uptime_s,
         "profile": profile,
     });
-    Json(body).into_response()
+    Json(crate::shared::afdata::result_value("diagnostics", body)).into_response()
 }

@@ -74,11 +74,11 @@ Concrete rules the implementation enforces:
 
 ### Server errors are errors
 
-If the server violates HTTP protocol (e.g. sends non-ASCII bytes in a header), `afhttp` surfaces this as `code: "error"` with a stable `error_code`. No silent patching, no lossy fallbacks. The agent receives accurate information and decides how to react.
+If the server violates HTTP protocol (e.g. sends non-ASCII bytes in a header), `afhttp` surfaces this as an AFDATA `kind: "error"` event with a stable `error.code`. No silent patching, no lossy fallbacks. The agent receives accurate information and decides how to react.
 
 ### Errors are structured, not prose
 
-Every error carries `error_code` (machine-readable, stable enum), `error` (human-readable detail for logs), and `retryable` (bool). Agents match on `error_code` only — never string-parsing the human message. The enum is documented in [architecture.md §11](architecture.md).
+Every error event carries `error.code` (machine-readable, stable enum), `error.message` (human-readable detail for logs), and `error.retryable` (bool). Agents match on `error.code` only — never string-parsing the human message. The enum is documented in [architecture.md §11](architecture.md).
 
 ### Secrets are redacted in tool-originated output
 
@@ -113,7 +113,7 @@ Boolean flags are bare presence toggles, never `on|off` values. A behavior that 
 
 ### Output is always single-line JSON
 
-CLI mode has no `--output` flag and no alternate rendering. Every command prints exactly one line of JSON on stdout via `agent_first_data::output_json_with()` with `_secret` redaction; a failure prints one JSON object carrying `error_code`, `error`, and `retryable`. Page bytes and captured data go to artifact files referenced by `*_file` fields — the envelope itself is never reshaped per request.
+CLI mode has no `--output` flag and no alternate rendering. Every command prints exactly one AFDATA protocol-v1 JSON event on stdout via `agent_first_data::output_json_with()` with `_secret` redaction: `{"kind":"result","result":{"code":"fetch",...},"trace":{}}` on success or `{"kind":"error","error":{"code":...,"message":...},"trace":{}}` on failure. Page bytes and captured data go to artifact files referenced by `*_file` fields inside `result`.
 
 ### No `unwrap` / `expect` / `panic` in the crate
 
@@ -137,4 +137,4 @@ All output passes through the protocol writer, which guarantees single-line JSON
 
 - [Architecture](architecture.md) — concrete roles, CLI surface, SDK, profile model, artifacts, health/capabilities endpoints, error codes.
 - [Overview](overview.md) — the user-facing introduction.
-- [Testing](testing.md) — test strategy and coverage gates.
+- [Testing](testing.md) — test strategy and gates.

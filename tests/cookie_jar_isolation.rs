@@ -26,8 +26,8 @@ use std::time::Duration;
 
 use agent_first_http::host::bootstrap::HealthPublic;
 use agent_first_http::host::listener::{router_for_tests, test_state};
-use agent_first_http::sdk::fetch::RenderMode;
 use agent_first_http::sdk::Client;
+use agent_first_http::sdk::fetch::RenderMode;
 use agent_first_http::shared::artifacts::Artifact;
 use agent_first_http::shared::error::ErrorCode;
 use tokio::net::TcpListener;

@@ -100,7 +100,7 @@ fn maybe_render_version() -> Option<ExitCode> {
         &raw,
         "afhttp",
         env!("CARGO_PKG_VERSION"),
-        &agent_first_data::VersionConfig::conventional_default(),
+        &agent_first_data::VersionConfig::conventional_default().with_protocol_v1(),
     ) {
         Ok(Some(version)) => {
             let _ = write!(handle, "{version}");
@@ -108,7 +108,11 @@ fn maybe_render_version() -> Option<ExitCode> {
         }
         Ok(None) => None,
         Err(err) => {
-            let _ = writeln!(handle, "{}", agent_first_data::output_json(&err));
+            let err = Error::new(
+                crate::shared::error::ErrorCode::InvalidArgument,
+                err.to_string(),
+            );
+            let _ = crate::shared::afdata::emit_error(&mut handle, &err);
             Some(ExitCode::from(2))
         }
     }
@@ -124,7 +128,7 @@ fn maybe_render_help() -> Option<ExitCode> {
     match agent_first_data::cli_handle_help_or_continue(
         &raw,
         &args::Cli::command(),
-        &agent_first_data::HelpConfig::human_cli_default(),
+        &agent_first_data::HelpConfig::human_cli_default().with_protocol_v1(),
     ) {
         Ok(Some(help)) => {
             let _ = write!(handle, "{help}");
@@ -132,7 +136,11 @@ fn maybe_render_help() -> Option<ExitCode> {
         }
         Ok(None) => None,
         Err(err) => {
-            let _ = writeln!(handle, "{}", agent_first_data::output_json(&err));
+            let err = Error::new(
+                crate::shared::error::ErrorCode::InvalidArgument,
+                err.to_string(),
+            );
+            let _ = crate::shared::afdata::emit_error(&mut handle, &err);
             Some(ExitCode::from(2))
         }
     }
@@ -169,18 +177,14 @@ async fn dispatch(parsed: args::Parsed) -> Result<(), Error> {
 fn emit_cli_error(err: &Error) {
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
-    let _ = crate::shared::envelope::emit_error(&mut handle, err);
+    let _ = crate::shared::afdata::emit_error(&mut handle, err);
 }
 
 fn emit_bootstrap_error(msg: &str) {
     // Fallback path used before the runtime exists. Stays on stdout to
     // match the AFDATA protocol channel rule (clippy bans stderr usage).
-    use std::io::Write;
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
-    let _ = writeln!(
-        handle,
-        "{{\"code\":\"error\",\"error_code\":\"internal_error\",\"error\":{},\"retryable\":false}}",
-        serde_json::Value::String(msg.to_string())
-    );
+    let err = Error::new(crate::shared::error::ErrorCode::InternalError, msg);
+    let _ = crate::shared::afdata::emit_error(&mut handle, &err);
 }

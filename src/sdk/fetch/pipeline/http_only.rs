@@ -5,11 +5,11 @@ use std::time::Instant;
 
 use url::Url;
 
+use crate::sdk::fetch::FetchBuilder;
 use crate::sdk::fetch::artifacts::body as body_artifact;
 use crate::sdk::fetch::deadline::FetchDeadline;
 use crate::sdk::fetch::result::{FetchResult, RenderDecision, Warning};
 use crate::sdk::fetch::writer;
-use crate::sdk::fetch::FetchBuilder;
 use crate::shared::artifacts::{Artifact, ArtifactPaths};
 use crate::shared::error::{Error, ErrorCode};
 use crate::shared::ids::RequestId;
@@ -17,7 +17,7 @@ use crate::shared::time::duration_ms;
 
 use super::super::page_classification;
 use super::cookie_jar_resolve::persist_set_cookies;
-use super::request_opts::{prepare_cookie, BodyPayload, PreparedRequestOptions};
+use super::request_opts::{BodyPayload, PreparedRequestOptions, prepare_cookie};
 
 pub(super) struct HttpOnlyOutcome {
     pub(super) result: FetchResult,

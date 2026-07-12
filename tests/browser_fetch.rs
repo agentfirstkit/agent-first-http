@@ -22,8 +22,8 @@ use agent_first_http::host::bootstrap::{
     BrowserChoice, DisplayMode, HealthPublic, HostArgs, ProfileChoice, Takeover,
 };
 use agent_first_http::host::{browser, listener::router_for_tests, listener::test_state};
-use agent_first_http::sdk::fetch::{RenderMode, Wait};
 use agent_first_http::sdk::Client;
+use agent_first_http::sdk::fetch::{RenderMode, Wait};
 use agent_first_http::shared::artifacts::Artifact;
 use agent_first_http::shared::ids::TabId;
 use tokio::net::TcpListener;
@@ -415,9 +415,10 @@ async fn browser_trace_reports_when_main_request_is_not_observed() {
 
     assert_eq!(result.status, 0);
     assert!(!result.trace.main_request_observed);
-    assert!(result.warnings.iter().any(|w| w
-        .detail
-        .contains("main document network request was not observed")));
+    assert!(result.warnings.iter().any(|w| {
+        w.detail
+            .contains("main document network request was not observed")
+    }));
 }
 
 #[tokio::test]
@@ -637,11 +638,13 @@ async fn observation_contains_agent_action_fields() {
         .expect("button node");
     assert_eq!(button["visible"], true);
     assert!(button["bbox"]["width"].as_f64().unwrap_or(0.0) > 0.0);
-    assert!(button["actions"]
-        .as_array()
-        .expect("actions")
-        .iter()
-        .any(|a| a.as_str() == Some("click")));
+    assert!(
+        button["actions"]
+            .as_array()
+            .expect("actions")
+            .iter()
+            .any(|a| a.as_str() == Some("click"))
+    );
     assert_eq!(button["selector_hint"].as_str(), Some("#go"));
     assert_eq!(button["selector_hint_unique"], true);
     let input = nodes
@@ -656,11 +659,13 @@ async fn observation_contains_agent_action_fields() {
         .find(|n| n["role"].as_str() == Some("iframe"))
         .expect("iframe node");
     let frame_ref = iframe["frame_ref"].as_str().expect("frame_ref");
-    assert!(obs["frames"]
-        .as_array()
-        .expect("frames")
-        .iter()
-        .any(|frame| frame["frame_id"].as_str() == Some(frame_ref)));
+    assert!(
+        obs["frames"]
+            .as_array()
+            .expect("frames")
+            .iter()
+            .any(|frame| frame["frame_id"].as_str() == Some(frame_ref))
+    );
 
     let role_for_selector = |selector: &str| {
         nodes
@@ -678,11 +683,13 @@ async fn observation_contains_agent_action_fields() {
         .find(|n| n["selector_hint"].as_str() == Some("#click-div"))
         .expect("cursor pointer div");
     assert_eq!(cursor_div["role"].as_str(), Some("div"));
-    assert!(cursor_div["actions"]
-        .as_array()
-        .expect("actions")
-        .iter()
-        .any(|a| a.as_str() == Some("click")));
+    assert!(
+        cursor_div["actions"]
+            .as_array()
+            .expect("actions")
+            .iter()
+            .any(|a| a.as_str() == Some("click"))
+    );
 }
 
 #[tokio::test]
@@ -1031,18 +1038,24 @@ async fn wait_auto_reports_pending_xhr_without_hanging() {
     );
     assert_eq!(result.trace.wait_mode.as_deref(), Some("auto"));
     assert_eq!(result.trace.network_quiet, Some(false));
-    assert!(result
-        .warnings
-        .iter()
-        .any(|w| { w.code == agent_first_http::shared::error::ErrorCode::ReadinessTimeout }));
-    assert!(result
-        .warnings
-        .iter()
-        .any(|w| { w.code == agent_first_http::shared::error::ErrorCode::NetworkNotIdle }));
-    assert!(result
-        .warnings
-        .iter()
-        .any(|w| { w.code == agent_first_http::shared::error::ErrorCode::PendingXhrAtCapture }));
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|w| { w.code == agent_first_http::shared::error::ErrorCode::ReadinessTimeout })
+    );
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|w| { w.code == agent_first_http::shared::error::ErrorCode::NetworkNotIdle })
+    );
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|w| { w.code == agent_first_http::shared::error::ErrorCode::PendingXhrAtCapture })
+    );
 
     let network: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(result.network_file.as_ref().expect("network_file"))

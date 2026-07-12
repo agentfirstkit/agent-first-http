@@ -149,9 +149,7 @@ impl std::fmt::Display for ErrorCode {
 
 /// The structured error every `afhttp` failure path produces.
 ///
-/// Serializes as `{"code":"error","error_code":"<snake>","error":"...","retryable":bool}`
-/// when wrapped by the protocol envelope; the envelope adds the outer `code`
-/// discriminator. `Error` itself only carries the inner fields.
+/// CLI output converts this error into an AFDATA protocol-v1 `error` event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Error {
     pub error_code: ErrorCode,

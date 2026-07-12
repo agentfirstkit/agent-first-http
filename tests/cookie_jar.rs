@@ -15,8 +15,8 @@
 
 mod support;
 
-use agent_first_http::sdk::fetch::RenderMode;
 use agent_first_http::sdk::Client;
+use agent_first_http::sdk::fetch::RenderMode;
 use agent_first_http::shared::artifacts::Artifact;
 
 #[tokio::test]

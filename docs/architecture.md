@@ -102,8 +102,9 @@ These hold across every command (the per-flag reference is generated into
   control requests. Driver commands fall back to `AFHTTP_TOKEN_SECRET` when the
   flag is omitted; the explicit flag wins. Human takeover URLs never embed this
   long-lived token; they carry a short-lived `handoff` capability instead.
-- Every command prints exactly one JSON object on stdout: success carries `code`;
-  failure carries `error_code`, `error`, and `retryable`.
+- Every command prints exactly one AFDATA protocol-v1 JSON event on stdout:
+  success is `kind: "result"` with command `code` inside `result`; failure is
+  `kind: "error"` with `error.code`, `error.message`, and `error.retryable`.
 
 ### `afhttp host`
 
@@ -429,7 +430,7 @@ Sites that specifically block all Chromium-family browsers (rare but real) requi
 
 ## 11. Error Codes
 
-All errors carry `error_code` (stable enum), `error` (human-readable detail), and `retryable` (bool). Agents match on `error_code` only — the `error` string is for human logs and may change between versions.
+All error events carry `error.code` (stable enum), `error.message` (human-readable detail), and `error.retryable` (bool). Agents match on `error.code` only — the message is for human logs and may change between versions.
 
 Three categories:
 

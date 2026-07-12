@@ -37,19 +37,18 @@ pub async fn handler(
     State(state): State<AppState>,
 ) -> axum::response::Response {
     let _ = q.token;
-    if let Some(name) = q.profile.as_deref() {
-        if let Err(e) = state.ensure_profile(name).await {
-            return (
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                axum::Json(serde_json::json!({
-                    "code": "error",
-                    "error_code": e.error_code,
-                    "error": format!("profile switch to {name:?} failed: {}", e.detail),
-                    "retryable": false,
-                })),
-            )
-                .into_response();
-        }
+    if let Some(name) = q.profile.as_deref()
+        && let Err(e) = state.ensure_profile(name).await
+    {
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(crate::shared::afdata::error_value(
+                e.error_code.as_str(),
+                &format!("profile switch to {name:?} failed: {}", e.detail),
+                false,
+            )),
+        )
+            .into_response();
     }
     let entry = state.get_profile();
     let backend = match entry {
@@ -57,12 +56,11 @@ pub async fn handler(
         None => {
             return (
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                axum::Json(serde_json::json!({
-                    "code": "error",
-                    "error_code": "cdp_unavailable",
-                    "error": "no browser backend is connected yet",
-                    "retryable": true,
-                })),
+                axum::Json(crate::shared::afdata::error_value(
+                    "cdp_unavailable",
+                    "no browser backend is connected yet",
+                    true,
+                )),
             )
                 .into_response();
         }

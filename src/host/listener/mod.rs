@@ -15,12 +15,12 @@ use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
-use axum::extract::State;
-use axum::http::{header, HeaderMap, StatusCode, Uri};
-use axum::middleware::{self, Next};
-use axum::response::{IntoResponse, Json, Response};
 use axum::Extension;
 use axum::Router;
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode, Uri, header};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Json, Response};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex as AsyncMutex;
@@ -367,15 +367,13 @@ async fn serve_unix(app: Router, path: std::path::PathBuf) -> Result<(), Error> 
 }
 
 fn emit_host_ready(listen: &str) {
-    use std::io::Write;
     let payload = serde_json::json!({
-        "code": "host_ready",
         "listen": listen,
         "version": env!("CARGO_PKG_VERSION"),
     });
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
-    let _ = writeln!(handle, "{}", agent_first_data::output_json(&payload));
+    let _ = crate::shared::afdata::emit(&mut handle, "host_ready", &payload);
 }
 
 /// `--listen` target. `Tcp` works everywhere; `Unix` is `cfg(unix)` only.
@@ -450,26 +448,24 @@ async fn takeover_handoff_handler(
     if !state.takeover_enabled || state.takeover.is_none() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({
-                "code": "error",
-                "error_code": "backend_unsupported",
-                "error": "display takeover is not enabled",
-                "retryable": false,
-            })),
+            Json(crate::shared::afdata::error_value(
+                "backend_unsupported",
+                "display takeover is not enabled",
+                false,
+            )),
         )
             .into_response();
     }
 
     let ttl_s = body.ttl_s.unwrap_or(TAKEOVER_HANDOFF_DEFAULT_TTL_S);
     if !(TAKEOVER_HANDOFF_MIN_TTL_S..=TAKEOVER_HANDOFF_MAX_TTL_S).contains(&ttl_s) {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-            "code": "error",
-            "error_code": "invalid_argument",
-            "error": format!(
+        return (StatusCode::BAD_REQUEST, Json(crate::shared::afdata::error_value(
+            "invalid_argument",
+            &format!(
                 "takeover handoff ttl_s must be {TAKEOVER_HANDOFF_MIN_TTL_S}-{TAKEOVER_HANDOFF_MAX_TTL_S}, got {ttl_s}"
             ),
-            "retryable": false,
-        })))
+            false,
+        )))
         .into_response();
     }
 
@@ -477,25 +473,29 @@ async fn takeover_handoff_handler(
     let mut takeover_url = match takeover_panel_url_from_request(&headers, &uri) {
         Ok(url) => url,
         Err(err) => {
-            let body = serde_json::json!({
-                "code": "error",
-                "error_code": err.error_code.as_str(),
-                "error": err.detail,
-                "retryable": err.retryable,
-            });
+            let body = crate::shared::afdata::error_value(
+                err.error_code.as_str(),
+                &err.detail,
+                err.retryable,
+            );
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response();
         }
     };
     takeover_url
         .query_pairs_mut()
         .append_pair("handoff", &token);
-    Json(HandoffResponse {
+    let response = HandoffResponse {
         takeover_url: takeover_url.to_string(),
         takeover_url_expires_at_rfc3339: humantime::format_rfc3339_seconds(entry.expires_at_system)
             .to_string(),
         takeover_url_ttl_s: ttl_s,
         takeover_url_scope: entry.scope,
-    })
+    };
+    let value = serde_json::to_value(response).unwrap_or_else(|_| serde_json::json!({}));
+    Json(crate::shared::afdata::result_value(
+        "takeover_handoff",
+        value,
+    ))
     .into_response()
 }
 
@@ -665,13 +665,13 @@ async fn token_middleware(
     }
 
     if is_takeover_display_path(&path) {
-        if let Some(t) = bearer_token(&request) {
-            if constant_time_eq(t.as_bytes(), expected.as_bytes()) {
-                request.extensions_mut().insert(AuthInfo {
-                    authenticated: true,
-                });
-                return next.run(request).await;
-            }
+        if let Some(t) = bearer_token(&request)
+            && constant_time_eq(t.as_bytes(), expected.as_bytes())
+        {
+            request.extensions_mut().insert(AuthInfo {
+                authenticated: true,
+            });
+            return next.run(request).await;
         }
         if let Some(handoff) = state.takeover_handoff_auth(&request) {
             request.extensions_mut().insert(AuthInfo {
@@ -780,12 +780,11 @@ fn unauthorized() -> Response {
                 .unwrap_or_else(|_| header::HeaderValue::from_static(""))
         }),
     );
-    let body = serde_json::json!({
-        "code": "error",
-        "error_code": "invalid_argument",
-        "error": "missing or invalid bearer token",
-        "retryable": false,
-    });
+    let body = crate::shared::afdata::error_value(
+        "invalid_argument",
+        "missing or invalid bearer token",
+        false,
+    );
     (StatusCode::UNAUTHORIZED, headers, Json(body)).into_response()
 }
 
@@ -800,12 +799,14 @@ async fn health_handler(
         .map(|Extension(info)| info.authenticated)
         .unwrap_or(false);
     let payload = self::health::build(&state, authenticated).await;
-    Json(payload).into_response()
+    let value = serde_json::to_value(payload).unwrap_or_else(|_| serde_json::json!({}));
+    Json(crate::shared::afdata::result_value("health", value)).into_response()
 }
 
 async fn capabilities_handler(State(state): State<AppState>) -> Response {
     let payload = self::capabilities::build(&state);
-    Json(payload).into_response()
+    let value = serde_json::to_value(payload).unwrap_or_else(|_| serde_json::json!({}));
+    Json(crate::shared::afdata::result_value("capabilities", value)).into_response()
 }
 
 /// Public test helper. Used by tests/health_capabilities.rs.

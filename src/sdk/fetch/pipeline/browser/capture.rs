@@ -159,10 +159,10 @@ pub(super) async fn capture_outer_html(
     session_id: &str,
     deadline: &FetchDeadline,
 ) -> Result<String, Error> {
-    if let Ok(html) = capture_outer_html_via_runtime(conn, session_id, deadline).await {
-        if !html.is_empty() {
-            return Ok(html);
-        }
+    if let Ok(html) = capture_outer_html_via_runtime(conn, session_id, deadline).await
+        && !html.is_empty()
+    {
+        return Ok(html);
     }
     let dom_outer = async {
         let doc = cdp_send(

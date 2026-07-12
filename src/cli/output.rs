@@ -7,12 +7,12 @@ use std::io::Write;
 use crate::shared::error::Error;
 
 /// Emit a payload to stdout as one line of JSON. Wraps
-/// `shared::envelope::emit` and is the single seam through which CLI
+/// `shared::afdata::emit` and is the single seam through which CLI
 /// subcommands produce output.
 pub fn emit<T: Serialize>(code: &str, payload: &T) -> Result<(), Error> {
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
-    crate::shared::envelope::emit(&mut handle, code, payload)?;
+    crate::shared::afdata::emit(&mut handle, code, payload)?;
     handle.flush().ok();
     Ok(())
 }
@@ -22,7 +22,7 @@ pub fn emit<T: Serialize>(code: &str, payload: &T) -> Result<(), Error> {
 pub fn emit_unredacted<T: Serialize>(code: &str, payload: &T) -> Result<(), Error> {
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
-    crate::shared::envelope::emit_unredacted(&mut handle, code, payload)?;
+    crate::shared::afdata::emit_unredacted(&mut handle, code, payload)?;
     handle.flush().ok();
     Ok(())
 }

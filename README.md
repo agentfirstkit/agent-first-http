@@ -29,10 +29,10 @@ Give afhttp a URL; it writes the page to disk and prints one line of JSON saying
 
 ```bash
 $ afhttp fetch https://example.com
-{"code":"fetch","request_url":"https://example.com","status":200,"final_url":"https://example.com/","body_file":"/tmp/afhttp-out/<id>/body.html"}
+{"kind":"result","result":{"code":"fetch","request_url":"https://example.com","status":200,"final_url":"https://example.com/","body_file":"/tmp/afhttp-out/<id>/body.html"},"trace":{}}
 ```
 
-That is the whole job: **hand it a URL, get the page back as files an agent can read** — never a terminal blob to scrape, and every failure a stable `error_code` rather than a guess.
+That is the whole job: **hand it a URL, get the page back as files an agent can read** — never a terminal blob to scrape. CLI output follows AFDATA protocol v1: command data is in `result`; failures use `kind: "error"` with stable `error.code` values rather than guesses.
 
 By default afhttp sends a **plain HTTP request**, returns the raw `body_file`,
 and only starts a **real browser** when the page actually needs one (`--render
@@ -44,19 +44,23 @@ and console logs — each a flat `*_file` field on the same JSON, never nested:
 
 ```json
 {
-  "code": "fetch",
-  "request_url": "https://example.com",
-  "status": 200,
-  "final_url": "https://example.com/",
-  "body_file": "/tmp/afhttp-out/<id>/body.html",
-  "content_file": "/tmp/afhttp-out/<id>/content.md",
-  "content_json_file": "/tmp/afhttp-out/<id>/content.json",
-  "rendered_html_file": "/tmp/afhttp-out/<id>/rendered.html",
-  "text_file": "/tmp/afhttp-out/<id>/text.txt",
-  "screenshot_file": "/tmp/afhttp-out/<id>/page.png",
-  "network_file": "/tmp/afhttp-out/<id>/network.json",
-  "console_file": "/tmp/afhttp-out/<id>/console.json",
-  "observation_file": "/tmp/afhttp-out/<id>/observation.json"
+  "kind": "result",
+  "result": {
+    "code": "fetch",
+    "request_url": "https://example.com",
+    "status": 200,
+    "final_url": "https://example.com/",
+    "body_file": "/tmp/afhttp-out/<id>/body.html",
+    "content_file": "/tmp/afhttp-out/<id>/content.md",
+    "content_json_file": "/tmp/afhttp-out/<id>/content.json",
+    "rendered_html_file": "/tmp/afhttp-out/<id>/rendered.html",
+    "text_file": "/tmp/afhttp-out/<id>/text.txt",
+    "screenshot_file": "/tmp/afhttp-out/<id>/page.png",
+    "network_file": "/tmp/afhttp-out/<id>/network.json",
+    "console_file": "/tmp/afhttp-out/<id>/console.json",
+    "observation_file": "/tmp/afhttp-out/<id>/observation.json"
+  },
+  "trace": {}
 }
 ```
 
@@ -155,7 +159,7 @@ To remove it, run `afhttp skill uninstall`.
 - [Design Principles](docs/design.md) — codebase-wide conventions
 - [CLI Reference](docs/cli.md) — flag-by-flag reference for the `afhttp` binary
 - [Protocol Reference](docs/reference.md) — output schemas for fetch, cdp, health, capabilities, and profile results
-- [Testing](docs/testing.md) — test strategy and coverage gates
+- [Testing](docs/testing.md) — test strategy and gates
 
 ## License
 

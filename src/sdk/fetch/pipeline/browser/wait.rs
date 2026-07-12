@@ -320,10 +320,9 @@ async fn wait_for_load(
         deadline,
     )
     .await
+        && r["result"]["value"].as_str() == Some("complete")
     {
-        if r["result"]["value"].as_str() == Some("complete") {
-            return Ok(());
-        }
+        return Ok(());
     }
     let event_wait = async {
         conn.wait_event(timeout, |ev| {
@@ -347,10 +346,9 @@ async fn wait_for_load(
                 deadline,
             )
             .await
+                && r["result"]["value"].as_str() == Some("complete")
             {
-                if r["result"]["value"].as_str() == Some("complete") {
-                    return Ok::<(), Error>(());
-                }
+                return Ok::<(), Error>(());
             }
             sleep_until_or_deadline(deadline_at, Duration::from_millis(50)).await;
         }

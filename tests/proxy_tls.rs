@@ -22,11 +22,11 @@ mod support;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_first_http::sdk::fetch::RenderMode;
 use agent_first_http::sdk::Client;
+use agent_first_http::sdk::fetch::RenderMode;
 use agent_first_http::shared::artifacts::Artifact;
-use axum::extract::State;
 use axum::Router;
+use axum::extract::State;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 

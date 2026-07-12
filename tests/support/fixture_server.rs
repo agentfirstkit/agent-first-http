@@ -5,10 +5,10 @@
 use std::net::SocketAddr;
 
 use axum::{
-    http::{header, HeaderMap, StatusCode},
+    Router,
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::get,
-    Router,
 };
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;

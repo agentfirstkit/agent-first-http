@@ -29,12 +29,8 @@ struct ProfileEnvelope {
 
 pub async fn handler(State(state): State<AppState>) -> Response {
     let Some(entry) = state.get_profile() else {
-        let body = serde_json::json!({
-            "code": "error",
-            "error_code": "internal_error",
-            "error": "profile not yet resolved",
-            "retryable": true,
-        });
+        let body =
+            crate::shared::afdata::error_value("internal_error", "profile not yet resolved", true);
         return (StatusCode::SERVICE_UNAVAILABLE, Json(body)).into_response();
     };
     let payload = ProfileEnvelope {
@@ -50,5 +46,6 @@ pub async fn handler(State(state): State<AppState>) -> Response {
             locked: entry.kind == "persistent",
         },
     };
-    Json(payload).into_response()
+    let value = serde_json::to_value(payload).unwrap_or_else(|_| serde_json::json!({}));
+    Json(crate::shared::afdata::result_value("profile", value)).into_response()
 }

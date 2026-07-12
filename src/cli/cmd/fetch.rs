@@ -9,7 +9,7 @@ use clap::ValueEnum;
 use crate::cli::cmd::argenums::{BrowserArg, RenderArg};
 use crate::cli::output;
 use crate::sdk::fetch::{
-    FetchCookie, NetworkBodies, RenderMode, Wait, DEFAULT_NETWORK_BODY_MAX_BYTES,
+    DEFAULT_NETWORK_BODY_MAX_BYTES, FetchCookie, NetworkBodies, RenderMode, Wait,
 };
 use crate::sdk::{Client, InlineConfig};
 use crate::shared::artifacts::Artifact;
@@ -245,7 +245,7 @@ pub async fn run(args: Args) -> Result<(), Error> {
         Err(FetchRunError::Plain(err)) => {
             let stdout = std::io::stdout();
             let mut handle = stdout.lock();
-            let _ = crate::shared::envelope::emit_error(&mut handle, &err);
+            let _ = crate::shared::afdata::emit_error(&mut handle, &err);
             Err(err)
         }
         Err(FetchRunError::Emitted(err)) => Err(err),
@@ -376,31 +376,47 @@ async fn run_inner(mut args: Args) -> Result<(), FetchRunError> {
 
     match builder.send_detailed().await {
         Ok(mut result) => {
-            if takeover && result.next_action.is_some() {
-                if let Some(endpoint) = takeover_endpoint.as_deref() {
-                    let mut handoff_client = Client::connect(endpoint)?;
-                    if let Some(token) = takeover_token.as_deref() {
-                        handoff_client = handoff_client.with_token(token);
-                    }
-                    let tab_id = result.tab_id.as_ref().map(|t| t.as_str().to_string());
-                    let handoff = handoff_client
-                        .takeover_handoff(None, tab_id.as_deref())
-                        .await?;
-                    result.attach_takeover_with_context(
-                        handoff.takeover_url,
-                        Some(handoff.takeover_url_expires_at_rfc3339),
-                        Some(handoff.takeover_url_ttl_s),
-                        Some(handoff.takeover_url_scope),
-                        recommended_endpoint,
-                        explicit_profile.as_deref(),
-                    );
+            if takeover
+                && result.next_action.is_some()
+                && let Some(endpoint) = takeover_endpoint.as_deref()
+            {
+                let mut handoff_client = Client::connect(endpoint)?;
+                if let Some(token) = takeover_token.as_deref() {
+                    handoff_client = handoff_client.with_token(token);
                 }
+                let tab_id = result.tab_id.as_ref().map(|t| t.as_str().to_string());
+                let handoff = handoff_client
+                    .takeover_handoff(None, tab_id.as_deref())
+                    .await?;
+                result.attach_takeover_with_context(
+                    handoff.takeover_url,
+                    Some(handoff.takeover_url_expires_at_rfc3339),
+                    Some(handoff.takeover_url_ttl_s),
+                    Some(handoff.takeover_url_scope),
+                    recommended_endpoint,
+                    explicit_profile.as_deref(),
+                );
             }
             Ok(output::emit("fetch", &result)?)
         }
         Err(err) => {
-            output::emit("error", &err)?;
-            Err(FetchRunError::Emitted(err.into_error()))
+            let trace = serde_json::to_value(&err.trace).map_err(|e| {
+                Error::new(
+                    ErrorCode::InternalError,
+                    format!("serialize fetch error trace: {e}"),
+                )
+            })?;
+            let err = err.into_error();
+            let stdout = std::io::stdout();
+            let mut handle = stdout.lock();
+            crate::shared::afdata::emit_error_with(
+                &mut handle,
+                err.error_code.as_str(),
+                &err.detail,
+                serde_json::json!({"retryable": err.retryable}),
+                trace,
+            )?;
+            Err(FetchRunError::Emitted(err))
         }
     }
 }

@@ -24,7 +24,7 @@ use agent_first_http::host::bootstrap::{
     TakeoverProviderKind,
 };
 use agent_first_http::host::browser::BrowserHandle;
-use agent_first_http::host::listener::{router_for_tests, test_state, AppState};
+use agent_first_http::host::listener::{AppState, router_for_tests, test_state};
 use agent_first_http::shared::error::ErrorCode;
 use axum::extract::ws::{Message, WebSocketUpgrade};
 use axum::http::{HeaderMap, Uri};
@@ -106,9 +106,17 @@ async fn takeover_handoff_url(base: &str, token: &str) -> String {
         .json::<serde_json::Value>()
         .await
         .expect("handoff json");
-    let url = body["takeover_url"].as_str().expect("takeover_url");
+    agent_first_data::validate_protocol_event(&body, true).expect("strict AFDATA event");
+    let url = body["result"]["takeover_url"]
+        .as_str()
+        .expect("takeover_url");
     assert!(url.contains("handoff="), "{body}");
-    assert!(body["takeover_url_ttl_s"].as_u64().unwrap_or_default() > 0);
+    assert!(
+        body["result"]["takeover_url_ttl_s"]
+            .as_u64()
+            .unwrap_or_default()
+            > 0
+    );
     url.to_string()
 }
 
@@ -135,7 +143,8 @@ async fn takeover_handoff_is_unavailable_without_display_provider() {
         .expect("send");
     assert_eq!(resp.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
     let body = resp.json::<serde_json::Value>().await.expect("json");
-    assert_eq!(body["error_code"], "backend_unsupported");
+    agent_first_data::validate_protocol_event(&body, true).expect("strict AFDATA event");
+    assert_eq!(body["error"]["code"], "backend_unsupported");
 }
 
 #[tokio::test]
@@ -329,7 +338,9 @@ async fn kasmvnc_process_launches_when_binary_available() {
         println!("(skipping: no KasmVNC Xvnc binary; set AFHTTP_TEST_KASMVNC_BIN)");
         return;
     };
-    std::env::set_var("AFHTTP_KASMVNC_BIN", bin);
+    // SAFETY: this ignored hardware integration test is run in isolation, so
+    // no other thread reads or mutates the process environment concurrently.
+    unsafe { std::env::set_var("AFHTTP_KASMVNC_BIN", bin) };
     let handle = agent_first_http::host::takeover::launch_kasmvnc_provider()
         .await
         .expect("launch kasmvnc");

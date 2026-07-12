@@ -79,20 +79,20 @@ pub async fn capture(
     };
 
     // Check size cap.
-    if let Ok(json) = serde_json::to_string(&snapshot) {
-        if json.len() > SIZE_CAP_BYTES {
-            snapshot.local_storage = serde_json::Value::Null;
-            snapshot.session_storage = serde_json::Value::Null;
-            snapshot.indexed_db_names = Vec::new();
-            snapshot.truncated = Some(TruncationNote {
-                reason: format!(
-                    "serialized size {} bytes exceeded cap {}; values omitted",
-                    json.len(),
-                    SIZE_CAP_BYTES
-                ),
-                cap_bytes: SIZE_CAP_BYTES,
-            });
-        }
+    if let Ok(json) = serde_json::to_string(&snapshot)
+        && json.len() > SIZE_CAP_BYTES
+    {
+        snapshot.local_storage = serde_json::Value::Null;
+        snapshot.session_storage = serde_json::Value::Null;
+        snapshot.indexed_db_names = Vec::new();
+        snapshot.truncated = Some(TruncationNote {
+            reason: format!(
+                "serialized size {} bytes exceeded cap {}; values omitted",
+                json.len(),
+                SIZE_CAP_BYTES
+            ),
+            cap_bytes: SIZE_CAP_BYTES,
+        });
     }
 
     Ok(snapshot)

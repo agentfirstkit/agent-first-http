@@ -16,7 +16,7 @@
 mod support;
 
 use agent_first_http::host::bootstrap::HealthPublic;
-use agent_first_http::host::listener::{router_for_tests, test_state, AppState};
+use agent_first_http::host::listener::{AppState, router_for_tests, test_state};
 
 #[cfg(unix)]
 async fn spawn_unix_listener(state: AppState, sock: std::path::PathBuf) {
@@ -106,8 +106,8 @@ async fn unix_listener_serves_health_over_uds() {
     let body_start = text.find("\r\n\r\n").expect("header/body split") + 4;
     let body = &text[body_start..];
     let v: serde_json::Value = serde_json::from_str(body).expect("body json");
-    assert_eq!(v["code"], "health");
-    assert_eq!(v["status"], "starting");
+    assert_eq!(v["result"]["code"], "health");
+    assert_eq!(v["result"]["status"], "starting");
 }
 
 #[cfg(unix)]
@@ -128,7 +128,7 @@ async fn sdk_client_serves_health_over_uds() {
 
 #[test]
 fn parse_listen_accepts_tcp_and_rejects_invalid_unix() {
-    use agent_first_http::host::listener::{parse_listen, ListenAddr};
+    use agent_first_http::host::listener::{ListenAddr, parse_listen};
 
     let r = parse_listen("tcp:127.0.0.1:0").expect("tcp parses");
     match r {

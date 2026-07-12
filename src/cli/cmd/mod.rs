@@ -20,7 +20,7 @@ mod tests {
 
     use axum::routing::get;
     use futures::{SinkExt, StreamExt};
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use tokio::net::{TcpListener, TcpStream};
     use tokio_tungstenite::tungstenite::Message;
 
@@ -37,33 +37,39 @@ mod tests {
             .route(
                 "/health",
                 get(|| async {
-                    axum::Json(json!({
-                        "code": "health",
-                        "status": "ok",
-                        "version": env!("CARGO_PKG_VERSION"),
-                        "uptime_s": 1,
-                        "tabs_active": 2,
-                        "capabilities_url": "/capabilities",
-                    }))
+                    axum::Json(crate::shared::afdata::result_value(
+                        "health",
+                        json!({
+                            "code": "health",
+                            "status": "ok",
+                            "version": env!("CARGO_PKG_VERSION"),
+                            "uptime_s": 1,
+                            "tabs_active": 2,
+                            "capabilities_url": "/capabilities",
+                        }),
+                    ))
                 }),
             )
             .route(
                 "/capabilities",
                 get(|| async {
-                    axum::Json(json!({
-                        "code": "capabilities",
-                        "backend": {"family": "test", "version": "1"},
-                        "artifacts": {
-                            "body": {"supported": true},
-                            "network": {"supported": true, "body_capture": ["xhr"]},
-                            "screenshot": {"supported": false}
-                        },
-                        "wait_modes": ["auto", "load"],
-                        "takeover": {"supported": false, "backend_capable": false},
-                        "profile": {"persistent": true, "ephemeral": true},
-                        "features": {},
-                        "limits": {}
-                    }))
+                    axum::Json(crate::shared::afdata::result_value(
+                        "capabilities",
+                        json!({
+                            "code": "capabilities",
+                            "backend": {"family": "test", "version": "1"},
+                            "artifacts": {
+                                "body": {"supported": true},
+                                "network": {"supported": true, "body_capture": ["xhr"]},
+                                "screenshot": {"supported": false}
+                            },
+                            "wait_modes": ["auto", "load"],
+                            "takeover": {"supported": false, "backend_capable": false},
+                            "profile": {"persistent": true, "ephemeral": true},
+                            "features": {},
+                            "limits": {}
+                        }),
+                    ))
                 }),
             );
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

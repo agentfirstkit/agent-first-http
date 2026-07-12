@@ -4,9 +4,9 @@ use std::time::Duration;
 use tokio::process::Command;
 
 use super::{
-    apply_subprocess_env, ensure_download_dir, new_stderr_ring, pick_ephemeral_port,
-    profile_launch::resolve_profile_dir, resolve_browser_bin, stderr_tail_summary,
-    wait_for_tcp_ready, BackendKeepalive, BrowserHandle,
+    BackendKeepalive, BrowserHandle, apply_subprocess_env, ensure_download_dir, new_stderr_ring,
+    pick_ephemeral_port, profile_launch::resolve_profile_dir, resolve_browser_bin,
+    stderr_tail_summary, wait_for_tcp_ready,
 };
 use crate::host::bootstrap::{HostArgs, ProfileChoice};
 use crate::shared::error::{Error, ErrorCode};

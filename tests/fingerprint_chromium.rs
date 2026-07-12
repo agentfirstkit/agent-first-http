@@ -29,8 +29,8 @@ use agent_first_http::host::bootstrap::{
     BrowserChoice, DisplayMode, HealthPublic, HostArgs, ProfileChoice, Takeover,
 };
 use agent_first_http::host::{browser, listener::router_for_tests, listener::test_state};
-use agent_first_http::sdk::fetch::{RenderMode, Wait};
 use agent_first_http::sdk::Client;
+use agent_first_http::sdk::fetch::{RenderMode, Wait};
 use agent_first_http::shared::artifacts::Artifact;
 use tokio::net::TcpListener;
 

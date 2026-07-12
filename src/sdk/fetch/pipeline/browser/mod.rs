@@ -11,6 +11,7 @@ use url::Url;
 
 use crate::sdk::cdp::{session, ws_client::Connection};
 use crate::sdk::endpoint::Endpoint;
+use crate::sdk::fetch::FetchBuilder;
 use crate::sdk::fetch::artifacts::{
     body as body_artifact,
     collectors::{ConsoleCollector, NetworkCollector},
@@ -23,18 +24,17 @@ use crate::sdk::fetch::page_classification;
 use crate::sdk::fetch::result::{FetchResult, RenderDecision, Warning};
 use crate::sdk::fetch::wait::Wait;
 use crate::sdk::fetch::writer;
-use crate::sdk::fetch::FetchBuilder;
 use crate::shared::artifacts::{Artifact, ArtifactPaths};
 use crate::shared::error::{Error, ErrorCode};
 use crate::shared::ids::{RequestId, TabId};
 use crate::shared::time::duration_ms;
 
+use super::NetworkBodies;
 use super::cookie_jar_resolve::sync_browser_cookies_to_jar;
 use super::request_opts::{
-    cookie_is_expired, effective_cookie_secure, parse_cookie_url, prepare_cookie,
-    validate_cookie_scope, PreparedCookie, PreparedRequestOptions,
+    PreparedCookie, PreparedRequestOptions, cookie_is_expired, effective_cookie_secure,
+    parse_cookie_url, prepare_cookie, validate_cookie_scope,
 };
-use super::NetworkBodies;
 
 mod capture;
 mod download;
@@ -43,17 +43,18 @@ mod network_bodies;
 mod wait;
 
 use capture::{
-    capture_content, capture_inner_text, capture_location, capture_outer_html,
+    PageSnapshot, capture_content, capture_inner_text, capture_location, capture_outer_html,
     capture_page_snapshot, capture_response_body, capture_screenshot,
-    navigation_status_from_performance, PageSnapshot,
+    navigation_status_from_performance,
 };
 use download::{
-    configure_download_capture, finish_download_navigation, navigate_has_download_flag,
-    navigation_became_download, snapshot_download_dir, wait_for_download_start, DownloadNavigation,
+    DownloadNavigation, configure_download_capture, finish_download_navigation,
+    navigate_has_download_flag, navigation_became_download, snapshot_download_dir,
+    wait_for_download_start,
 };
 use navigate::navigate_with_method;
-use network_bodies::{capture_network_bodies, NetworkBodyCapture};
-use wait::{wait_for_condition, WaitContext, WaitTuning};
+use network_bodies::{NetworkBodyCapture, capture_network_bodies};
+use wait::{WaitContext, WaitTuning, wait_for_condition};
 
 pub(super) fn reject_http_only_evaluate(
     request_options: &PreparedRequestOptions,
@@ -128,18 +129,17 @@ pub(super) async fn browser_path(
         ));
     }
 
-    if let Some(jar_path) = &builder.cookie_jar.path {
-        if let Ok(url) = Url::parse(&builder.url) {
-            if let Ok(jar) = crate::sdk::profile::cookie_jar::CookieJar::load(jar_path) {
-                let mut prepared = Vec::new();
-                for c in jar.applicable_cookies(&url) {
-                    if let Ok(p) = prepare_cookie(&c, "cookie_jar") {
-                        prepared.push(p);
-                    }
-                }
-                request_options.merge_jar_cookies(prepared);
+    if let Some(jar_path) = &builder.cookie_jar.path
+        && let Ok(url) = Url::parse(&builder.url)
+        && let Ok(jar) = crate::sdk::profile::cookie_jar::CookieJar::load(jar_path)
+    {
+        let mut prepared = Vec::new();
+        for c in jar.applicable_cookies(&url) {
+            if let Ok(p) = prepare_cookie(&c, "cookie_jar") {
+                prepared.push(p);
             }
         }
+        request_options.merge_jar_cookies(prepared);
     }
 
     let conn = deadline
@@ -295,12 +295,12 @@ pub(super) async fn browser_path(
         })
         .await;
     }
-    if let Some(err) = navigate.get("errorText").and_then(|v| v.as_str()) {
-        if !err.is_empty() {
-            let code = classify_navigate_error(err);
-            finish_target(&conn, &target_id, &session_id, close_target_after_fetch).await;
-            return Err(Error::new(code, format!("Page.navigate errorText: {err}")));
-        }
+    if let Some(err) = navigate.get("errorText").and_then(|v| v.as_str())
+        && !err.is_empty()
+    {
+        let code = classify_navigate_error(err);
+        finish_target(&conn, &target_id, &session_id, close_target_after_fetch).await;
+        return Err(Error::new(code, format!("Page.navigate errorText: {err}")));
     }
 
     if let Err(e) = deadline
@@ -357,18 +357,17 @@ pub(super) async fn browser_path(
     };
     let nav_duration = nav_start.elapsed();
 
-    if request_options.has_evaluate_after_wait() {
-        if let Err(e) = deadline
+    if request_options.has_evaluate_after_wait()
+        && let Err(e) = deadline
             .run_result(
                 "evaluate_after_wait",
                 ErrorCode::NavigationTimeout,
                 evaluate_after_wait(&conn, &session_id, &request_options, deadline),
             )
             .await
-        {
-            finish_target(&conn, &target_id, &session_id, close_target_after_fetch).await;
-            return Err(e);
-        }
+    {
+        finish_target(&conn, &target_id, &session_id, close_target_after_fetch).await;
+        return Err(e);
     }
 
     let mut warnings: Vec<Warning> = Vec::new();
@@ -409,10 +408,10 @@ pub(super) async fn browser_path(
     let page_snapshot = capture_page_snapshot(&conn, &session_id, deadline)
         .await
         .ok();
-    if let Some(snapshot) = page_snapshot.as_ref() {
-        if !snapshot.url.is_empty() {
-            result.final_url = snapshot.url.clone();
-        }
+    if let Some(snapshot) = page_snapshot.as_ref()
+        && !snapshot.url.is_empty()
+    {
+        result.final_url = snapshot.url.clone();
     }
     if let Err(e) = validate_navigation_capture(
         &builder.url,
@@ -424,19 +423,19 @@ pub(super) async fn browser_path(
         finish_target(&conn, &target_id, &session_id, close_target_after_fetch).await;
         return Err(e);
     }
-    if let Some(snapshot) = page_snapshot.as_ref() {
-        if let Some(classification) = page_classification::classify(
+    if let Some(snapshot) = page_snapshot.as_ref()
+        && let Some(classification) = page_classification::classify(
             Some(&snapshot.html),
             Some(&snapshot.text),
             Some(&snapshot.title),
-        ) {
-            result.set_page_kind(classification.kind);
-            warnings.push(Warning {
-                artifact: Artifact::RenderedHtml,
-                code: classification.code,
-                detail: classification.detail,
-            });
-        }
+        )
+    {
+        result.set_page_kind(classification.kind);
+        warnings.push(Warning {
+            artifact: Artifact::RenderedHtml,
+            code: classification.code,
+            detail: classification.detail,
+        });
     }
     if let Some(main) = main_entry.as_ref() {
         if let Some(status) = main.status {
@@ -456,11 +455,10 @@ pub(super) async fn browser_path(
             detail: "main document network request was not observed".into(),
         });
     }
-    if result.status == 0 {
-        if let Some(status) = navigation_status_from_performance(&conn, &session_id, deadline).await
-        {
-            result.status = status;
-        }
+    if result.status == 0
+        && let Some(status) = navigation_status_from_performance(&conn, &session_id, deadline).await
+    {
+        result.status = status;
     }
 
     if builder.want.contains(&Artifact::RenderedHtml) {
@@ -631,15 +629,16 @@ pub(super) async fn browser_path(
         }
     }
 
-    if builder.want.contains(&Artifact::Body) && builder.want.contains(&Artifact::Network) {
-        if let (Some(main), Some(path)) = (
+    if builder.want.contains(&Artifact::Body)
+        && builder.want.contains(&Artifact::Network)
+        && let (Some(main), Some(path)) = (
             main_entry.as_ref(),
             result.artifact_file(Artifact::Body).cloned(),
-        ) {
-            network_collector
-                .set_body_file(&main.request_id, path)
-                .await;
-        }
+        )
+    {
+        network_collector
+            .set_body_file(&main.request_id, path)
+            .await;
     }
 
     if builder.want.contains(&Artifact::Observation) {
@@ -809,21 +808,20 @@ pub(super) async fn browser_path(
         let _ = network_collector.finish().await;
     }
 
-    if let Some(jar_path) = &builder.cookie_jar.path {
-        if let Err(e) = deadline
+    if let Some(jar_path) = &builder.cookie_jar.path
+        && let Err(e) = deadline
             .run_result(
                 "sync_cookie_jar",
                 ErrorCode::NavigationTimeout,
                 sync_browser_cookies_to_jar(&conn, &session_id, &result.final_url, jar_path),
             )
             .await
-        {
-            warnings.push(Warning {
-                artifact: Artifact::Network,
-                code: e.error_code,
-                detail: format!("cookie jar sync: {}", e.detail),
-            });
-        }
+    {
+        warnings.push(Warning {
+            artifact: Artifact::Network,
+            code: e.error_code,
+            detail: format!("cookie jar sync: {}", e.detail),
+        });
     }
 
     if close_target_after_fetch {
@@ -1035,10 +1033,11 @@ async fn wait_for_navigation_commit(
     let timeout = deadline.bounded_remaining("wait_navigation_commit", Duration::from_secs(3))?;
     let wait_deadline = Instant::now() + timeout;
     while Instant::now() < wait_deadline {
-        if let Ok(Some(current)) = capture_location(conn, session_id, deadline).await {
-            if !urls_same_ignoring_fragment(&current, initial_url) && current != "about:blank" {
-                return Ok(());
-            }
+        if let Ok(Some(current)) = capture_location(conn, session_id, deadline).await
+            && !urls_same_ignoring_fragment(&current, initial_url)
+            && current != "about:blank"
+        {
+            return Ok(());
         }
         sleep_until_or_deadline(wait_deadline, Duration::from_millis(50)).await;
     }

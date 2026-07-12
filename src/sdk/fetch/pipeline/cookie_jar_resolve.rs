@@ -175,15 +175,15 @@ fn cdp_cookie_to_set_cookie(entry: &serde_json::Value) -> Option<cookie::Cookie<
     let name = entry.get("name")?.as_str()?.to_string();
     let value = entry.get("value")?.as_str()?.to_string();
     let mut b = cookie::Cookie::build((name, value));
-    if let Some(d) = entry.get("domain").and_then(|v| v.as_str()) {
-        if !d.is_empty() {
-            b = b.domain(d.to_string());
-        }
+    if let Some(d) = entry.get("domain").and_then(|v| v.as_str())
+        && !d.is_empty()
+    {
+        b = b.domain(d.to_string());
     }
-    if let Some(p) = entry.get("path").and_then(|v| v.as_str()) {
-        if !p.is_empty() {
-            b = b.path(p.to_string());
-        }
+    if let Some(p) = entry.get("path").and_then(|v| v.as_str())
+        && !p.is_empty()
+    {
+        b = b.path(p.to_string());
     }
     if entry
         .get("secure")
@@ -199,12 +199,11 @@ fn cdp_cookie_to_set_cookie(entry: &serde_json::Value) -> Option<cookie::Cookie<
     {
         b = b.http_only(true);
     }
-    if let Some(expires_sec) = entry.get("expires").and_then(|v| v.as_f64()) {
-        if expires_sec > 0.0 {
-            if let Ok(dt) = cookie::time::OffsetDateTime::from_unix_timestamp(expires_sec as i64) {
-                b = b.expires(cookie::Expiration::DateTime(dt));
-            }
-        }
+    if let Some(expires_sec) = entry.get("expires").and_then(|v| v.as_f64())
+        && expires_sec > 0.0
+        && let Ok(dt) = cookie::time::OffsetDateTime::from_unix_timestamp(expires_sec as i64)
+    {
+        b = b.expires(cookie::Expiration::DateTime(dt));
     }
     Some(b.build())
 }

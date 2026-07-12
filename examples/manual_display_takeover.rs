@@ -47,10 +47,10 @@
 use std::time::Duration;
 
 use agent_first_http::host::bootstrap::{
-    install_rustls_provider, BrowserChoice, DisplayMode, HealthPublic, HostArgs, ProfileChoice,
-    Takeover, TakeoverProviderKind,
+    BrowserChoice, DisplayMode, HealthPublic, HostArgs, ProfileChoice, Takeover,
+    TakeoverProviderKind, install_rustls_provider,
 };
-use agent_first_http::host::listener::{build_router, AppState};
+use agent_first_http::host::listener::{AppState, build_router};
 use agent_first_http::sdk::Client;
 use agent_first_http::shared::ids::TabId;
 use serde_json::json;
@@ -137,10 +137,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(b) = positionals.first() {
         browser_arg = b.clone();
     }
-    if let Some(p) = positionals.get(1) {
-        if p != "-" && !p.is_empty() {
-            profile_arg = Some(p.clone());
-        }
+    if let Some(p) = positionals.get(1)
+        && p != "-"
+        && !p.is_empty()
+    {
+        profile_arg = Some(p.clone());
     }
     let browser = match browser_arg.as_str() {
         "auto" => BrowserChoice::Auto,
@@ -308,24 +309,24 @@ async fn poll_loop(client: &Client, tab: &TabId) {
             .await
         {
             Ok(v) => {
-                if let Some(s) = v["result"]["value"].as_str() {
-                    if let Ok(obj) = serde_json::from_str::<serde_json::Value>(s) {
-                        let value = obj["value"].as_str().unwrap_or("").to_string();
-                        let keys = obj["keys"].as_array().cloned().unwrap_or_default();
-                        let comps = obj["comps"].as_array().cloned().unwrap_or_default();
-                        for k in keys.iter().skip(last_keys) {
-                            println!("[{}] keydown {}", now(), k.as_str().unwrap_or(""));
-                        }
-                        for c in comps.iter().skip(last_comps) {
-                            println!("[{}] ime     {}", now(), c.as_str().unwrap_or(""));
-                        }
-                        if value != last_value {
-                            println!("[{}] value = {value:?}", now());
-                            last_value = value;
-                        }
-                        last_keys = keys.len();
-                        last_comps = comps.len();
+                if let Some(s) = v["result"]["value"].as_str()
+                    && let Ok(obj) = serde_json::from_str::<serde_json::Value>(s)
+                {
+                    let value = obj["value"].as_str().unwrap_or("").to_string();
+                    let keys = obj["keys"].as_array().cloned().unwrap_or_default();
+                    let comps = obj["comps"].as_array().cloned().unwrap_or_default();
+                    for k in keys.iter().skip(last_keys) {
+                        println!("[{}] keydown {}", now(), k.as_str().unwrap_or(""));
                     }
+                    for c in comps.iter().skip(last_comps) {
+                        println!("[{}] ime     {}", now(), c.as_str().unwrap_or(""));
+                    }
+                    if value != last_value {
+                        println!("[{}] value = {value:?}", now());
+                        last_value = value;
+                    }
+                    last_keys = keys.len();
+                    last_comps = comps.len();
                 }
             }
             Err(e) => eprintln!("(poll error: {e})"),
@@ -352,18 +353,18 @@ async fn url_poll_loop(client: &Client, tab: &TabId) {
             .await
         {
             Ok(v) => {
-                if let Some(s) = v["result"]["value"].as_str() {
-                    if let Ok(obj) = serde_json::from_str::<serde_json::Value>(s) {
-                        let line = format!(
-                            "{:>11} {:?}  ←  {}",
-                            obj["r"].as_str().unwrap_or(""),
-                            obj["t"].as_str().unwrap_or(""),
-                            obj["u"].as_str().unwrap_or("")
-                        );
-                        if line != last {
-                            println!("[{}] {line}", now());
-                            last = line;
-                        }
+                if let Some(s) = v["result"]["value"].as_str()
+                    && let Ok(obj) = serde_json::from_str::<serde_json::Value>(s)
+                {
+                    let line = format!(
+                        "{:>11} {:?}  ←  {}",
+                        obj["r"].as_str().unwrap_or(""),
+                        obj["t"].as_str().unwrap_or(""),
+                        obj["u"].as_str().unwrap_or("")
+                    );
+                    if line != last {
+                        println!("[{}] {line}", now());
+                        last = line;
                     }
                 }
             }

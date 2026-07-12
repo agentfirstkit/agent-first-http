@@ -519,9 +519,10 @@ mod tests {
                 .into_owned(),
             &make_url("https://example.com/"),
         );
-        assert!(jar
-            .applicable_cookies(&make_url("http://example.com/"))
-            .is_empty());
+        assert!(
+            jar.applicable_cookies(&make_url("http://example.com/"))
+                .is_empty()
+        );
         assert_eq!(
             jar.applicable_cookies(&make_url("https://example.com/"))
                 .len(),
