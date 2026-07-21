@@ -1,7 +1,6 @@
 ---
 name: agent-first-http
 description: "MUST use for a concrete URL or previously mentioned site/URL when the user wants to read, inspect, verify, open, visit, or directly access it. Do not web-search that URL first. If afhttp detects a bot wall/security challenge, switch to `afhttp fetch --takeover`; do not answer from search results."
-disable-model-invocation: true
 allowed-tools: Bash, Read
 ---
 

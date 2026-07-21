@@ -54,8 +54,8 @@ fn emit_inner<W: Write, T: Serialize>(
         RedactionMode::Default => agent_first_data::OutputOptions::default(),
         RedactionMode::None => agent_first_data::OutputOptions {
             redaction: agent_first_data::Redactor::new()
-                .policy(agent_first_data::RedactionPolicy::RedactionNone),
-            style: agent_first_data::OutputStyle::Raw,
+                .policy(agent_first_data::RedactionPolicy::Off),
+            style: agent_first_data::PlainStyle::Raw,
         },
     };
     let mut emitter = agent_first_data::CliEmitter::with_options(
@@ -168,10 +168,7 @@ pub fn result_value(code: &str, mut payload: serde_json::Value) -> serde_json::V
         }
         _ => serde_json::json!({"code": code, "value": payload}),
     };
-    agent_first_data::json_result(payload)
-        .build()
-        .map(Into::into)
-        .unwrap_or_else(|_| serde_json::json!({}))
+    agent_first_data::json_result(payload).build().into()
 }
 
 pub fn decode_result<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, Error> {

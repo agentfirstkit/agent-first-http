@@ -16,11 +16,11 @@ set -euo pipefail
 
 # Pinned versions for direct-download backends — bump these (and re-verify both
 # images build) together. Apt-backed Brave tracks Brave's stable repository.
-CHROME_FOR_TESTING_VERSION="150.0.7871.115"
+CHROME_FOR_TESTING_VERSION="151.0.7922.34"
 FINGERPRINT_CHROMIUM_VERSION="148.0.7778.215"
-CAMOUFOX_RELEASE="v150.0.2-beta.25"
-CAMOUFOX_X86_BUILD="150.0.2-alpha.26"
-CAMOUFOX_ARM_BUILD="150.0.2-alpha.25"
+CAMOUFOX_RELEASE="v152.0.4-beta.28"
+CAMOUFOX_X86_BUILD="152.0.4-beta.28"
+CAMOUFOX_ARM_BUILD="152.0.4-beta.28"
 GO_VERSION="1.26.5"
 KASMVNC_VERSION="1.4.0"
 

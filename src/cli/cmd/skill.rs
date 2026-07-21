@@ -52,9 +52,10 @@ impl From<SkillScopeArg> for SkillScope {
 /// The embedded skill this binary installs.
 const SPEC: SkillSpec = SkillSpec {
     name: "agent-first-http",
-    source: include_str!("../../../skills/agent-first-http.md"),
+    source: include_str!("../../../skills/agent-first-http/SKILL.md"),
     title: "Agent-First HTTP",
     marker_slug: "afhttp",
+    assets: &[],
 };
 
 #[derive(ClapArgs, Debug)]

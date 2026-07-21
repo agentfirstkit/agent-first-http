@@ -136,5 +136,5 @@ All output passes through the protocol writer, which guarantees single-line JSON
 ## Cross-References
 
 - [Architecture](architecture.md) — concrete roles, CLI surface, SDK, profile model, artifacts, health/capabilities endpoints, error codes.
-- [Overview](overview.md) — the user-facing introduction.
+- [README](../README.md) — the user-facing introduction and full guide.
 - [Testing](testing.md) — test strategy and gates.

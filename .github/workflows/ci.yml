@@ -25,9 +25,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: fmt
+      - name: Install afdata skill validator
+        run: cargo install agent-first-data --locked --features skill
+      - name: Validate Agent Skill and fmt
         working-directory: kit/spores/agent-first-http
-        run: cargo fmt --all --check
+        run: |
+          afdata skill validate skills/agent-first-http
+          cargo fmt --all --check
       - name: build --all-features
         working-directory: kit/spores/agent-first-http
         run: cargo build --all-features

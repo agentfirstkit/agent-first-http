@@ -92,15 +92,22 @@ fn run_blocking() -> ExitCode {
 
 /// Render version and return an exit code, or `None` to continue normal parsing.
 fn maybe_render_version() -> Option<ExitCode> {
+    use clap::CommandFactory;
     use std::io::Write;
 
     let raw: Vec<String> = std::env::args().collect();
     let mut handle = std::io::stdout();
+    let build = match env!("GIT_SHA") {
+        "unknown" => None,
+        sha => Some(sha),
+    };
     match agent_first_data::cli_handle_version_or_continue(
         &raw,
+        &args::Cli::command(),
         "afhttp",
+        Some(env!("DISPLAY_NAME")),
         env!("CARGO_PKG_VERSION"),
-        &agent_first_data::VersionConfig::conventional_default().with_protocol_v1(),
+        build,
     ) {
         Ok(Some(version)) => {
             let _ = write!(handle, "{version}");
@@ -128,7 +135,7 @@ fn maybe_render_help() -> Option<ExitCode> {
     match agent_first_data::cli_handle_help_or_continue(
         &raw,
         &args::Cli::command(),
-        &agent_first_data::HelpConfig::human_cli_default().with_protocol_v1(),
+        &agent_first_data::HelpConfig::human_cli_default(),
     ) {
         Ok(Some(help)) => {
             let _ = write!(handle, "{help}");

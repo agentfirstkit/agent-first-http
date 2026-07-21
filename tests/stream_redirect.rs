@@ -29,8 +29,15 @@ fn stdout_file_redirects_version_output() {
     assert!(output.stderr.is_empty(), "stderr = {:?}", output.stderr);
 
     let redirected_stdout = fs::read_to_string(&stdout_file).expect("read stdout file");
-    assert!(redirected_stdout.contains("afhttp"));
-    assert!(redirected_stdout.contains(env!("CARGO_PKG_VERSION")));
+    // Bare `--version` is a protocol-v1 event by default now, not conventional
+    // `<name> <version>` text — this is also the regression case for the
+    // pre-parser mis-stopping at a preceding --stdout-file/--stderr-file value.
+    let parsed: serde_json::Value =
+        serde_json::from_str(redirected_stdout.trim()).expect("version output must be JSON");
+    assert_eq!(parsed["kind"], "result");
+    assert_eq!(parsed["result"]["code"], "version");
+    assert_eq!(parsed["result"]["name"], "afhttp");
+    assert_eq!(parsed["result"]["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(
         fs::read_to_string(&stderr_file).expect("read stderr file"),
         ""
