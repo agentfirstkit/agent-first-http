@@ -20,6 +20,11 @@ afhttp fetch --help
 afhttp container --help
 ```
 
+Bare help is a compact AFDATA JSON result. Start at the root, then request only
+the relevant command; use `--recursive` only when a full-tree index is actually
+needed. Add `--output plain` for conventional human help or `--output markdown`
+for the long-form documentation view.
+
 ## Fetch A Page
 
 Start with a structured fetch:
@@ -97,7 +102,8 @@ If no host is running, start one:
 afhttp container install
 ```
 
-Open a persistent tab and give/open the returned `next_action.takeover_url`.
+Open a persistent tab and give/open the returned
+`next_action.takeover_url_secret`.
 The URL is a short-lived handoff; tell the user its expiry if
 `next_action.takeover_url_expires_at_rfc3339` is present. The standard local
 `afhttp-host` endpoint and token are discovered automatically:
@@ -133,9 +139,9 @@ eTLD+1), so logins and cookies don't leak across sites; pass
 warmed profile already reaches the target it returns the content directly (no
 `next_action`); use that instead of bothering the user. If it returns
 `next_action.kind: "human_takeover"`, give/open the complete
-`next_action.takeover_url` (it normally expires after about 15 minutes), ask the
-user to complete or confirm the visible browser state, then stop and wait. Only
-after the user explicitly confirms should you run
+`next_action.takeover_url_secret` (it normally expires after about 15 minutes),
+ask the user to complete or confirm the visible browser state, then stop and
+wait. Only after the user explicitly confirms should you run
 `next_action.recommended_command` (a re-fetch of the same `--tab`).
 
 If takeover still fails, report that the target page could not be verified and

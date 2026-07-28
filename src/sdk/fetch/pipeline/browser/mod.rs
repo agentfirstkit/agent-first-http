@@ -1068,7 +1068,8 @@ fn validate_navigation_capture(
             && !urls_same_ignoring_fragment(request_url, initial);
         let conflicts_with_main = main_entry
             .map(|entry| {
-                !entry.url.is_empty() && !urls_same_ignoring_fragment(final_url, &entry.url)
+                !entry.request_url.is_empty()
+                    && !urls_same_ignoring_fragment(final_url, &entry.request_url)
             })
             .unwrap_or(false);
         if stayed_on_initial && (main_entry.is_none() || conflicts_with_main) {

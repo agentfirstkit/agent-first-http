@@ -101,10 +101,11 @@ These hold across every command (the per-flag reference is generated into
 - `--token-secret` is sent as `Authorization: Bearer <token>` for HTTP
   control requests. Driver commands fall back to `AFHTTP_TOKEN_SECRET` when the
   flag is omitted; the explicit flag wins. Human takeover URLs never embed this
-  long-lived token; they carry a short-lived `handoff` capability instead.
-- Every command prints exactly one AFDATA protocol-v1 JSON event on stdout:
-  success is `kind: "result"` with command `code` inside `result`; failure is
-  `kind: "error"` with `error.code`, `error.message`, and `error.retryable`.
+  long-lived token; they carry a short-lived `handoff_secret` capability
+  instead.
+- Every command emits exactly one AFDATA protocol-v1 JSON event. With the
+  default `--output-to split`, success goes to stdout and failure goes to
+  stderr. `--output-to stdout|stderr` selects a unified ordered event stream.
 
 ### `afhttp host`
 
@@ -169,17 +170,17 @@ afhttp fetch <url>
   --timeout-ms <ms>
 ```
 
-Output: one JSON object on stdout. Successful fetches include `status`, `final_url`, `tab_id`, top-level `*_file` artifact paths, `trace` (render decision, escalation reason, wait/readiness signals, phase timings, cookie-jar path/warnings, sensitive-capture flags), and `warnings` (for non-fatal artifact failures). Fetch execution failures use the standard error envelope plus the same `trace` shape. `--no-network-redact`, `--capture-ws`, and `--capture-sse` can expose tokens or PII in artifacts and are reflected in `trace.sensitive_capture`.
+Output: one JSON event on the selected output stream. Successful fetches include `status`, `final_url`, `tab_id`, top-level `*_file` artifact paths, `trace` (render decision, escalation reason, wait/readiness signals, phase timings, cookie-jar path/warnings, sensitive-capture flags), and `warnings` (for non-fatal artifact failures). Fetch execution failures use the standard error envelope plus the same `trace` shape. `--no-network-redact`, `--capture-ws`, and `--capture-sse` can expose tokens or PII in artifacts and are reflected in `trace.sensitive_capture`.
 
 Custom request options are applied before acquisition, not silently ignored. On the HTTP fast path, headers, user-agent, and applicable cookies are attached to the per-request `reqwest` request. Secure cookies are skipped for `http://` URLs rather than failing the fetch, and host-only cookies match only the exact origin host. On the browser path, ordinary headers use `Network.setExtraHTTPHeaders`, user-agent uses `Network.setUserAgentOverride`, and cookies are installed through CDP before `Page.navigate`.
 
 `--evaluate-after-wait` executes JavaScript after the configured wait condition and before artifact capture. It only works when the final path is browser-backed; it does not by itself trigger `--render auto` escalation.
 
-`--takeover` is the human-takeover entry point. It requires a running takeover-ready host and a browser render (`--render auto` or `always`, never `none`). When `--endpoint-url` / `AFHTTP_ENDPOINT_URL` is omitted, the driver auto-discovers the standard local `afhttp-host` container and reads its token; it does not auto-create containers. It opens or reuses a persistent tab (`--tab`) and navigates it. If `--profile` is omitted, it switches the host to the URL's registrable-domain profile (e.g. `contabo.com`) before opening the tab. If the warmed profile already reaches the target, it returns the captured content with no `next_action`. Otherwise it leaves the tab open and returns `next_action` with `kind: "human_takeover"`, a complete short-lived `takeover_url` (the real-display URL a human opens to clear a login/captcha/2FA wall), its expiry metadata, and a `recommended_command` that re-fetches the same `--tab` once the human is past the wall.
+`--takeover` is the human-takeover entry point. It requires a running takeover-ready host and a browser render (`--render auto` or `always`, never `none`). When `--endpoint-url` / `AFHTTP_ENDPOINT_URL` is omitted, the driver auto-discovers the standard local `afhttp-host` container and reads its token; it does not auto-create containers. It opens or reuses a persistent tab (`--tab`) and navigates it. If `--profile` is omitted, it switches the host to the URL's registrable-domain profile (e.g. `contabo.com`) before opening the tab. If the warmed profile already reaches the target, it returns the captured content with no `next_action`. Otherwise it leaves the tab open and returns `next_action` with `kind: "human_takeover"`, a complete short-lived `takeover_url_secret` (the real-display capability URL a human opens to clear a login/captcha/2FA wall), its expiry metadata, and a `recommended_command` that re-fetches the same `--tab` once the human is past the wall.
 
 ### Other endpoint commands
 
-`afhttp cdp`, `afhttp upload`, and `afhttp tabs` are raw CDP/target-management helpers. They require `--endpoint-url` and do not introduce Playwright-style semantic action wrappers. `afhttp panel`, `afhttp health`, and `afhttp capabilities` are thin HTTP helpers over `/takeover/handoff`, `/health`, and `/capabilities`; panel output is a short-lived takeover URL with `handoff=...`, not the host token.
+`afhttp cdp`, `afhttp upload`, and `afhttp tabs` are raw CDP/target-management helpers. They require `--endpoint-url` and do not introduce Playwright-style semantic action wrappers. `afhttp panel`, `afhttp health`, and `afhttp capabilities` are thin HTTP helpers over `/takeover/handoff`, `/health`, and `/capabilities`; panel output contains a short-lived `takeover_url_secret` with `handoff_secret=...`, not the host token.
 
 ### Local commands
 
@@ -333,11 +334,11 @@ Each artifact can fail independently of the overall fetch. A missing screenshot 
 
 ```json
 {
-  "schema_version": 1,
-  "url": "https://example.com/dashboard",
+  "schema_version": 2,
+  "page_url": "https://example.com/dashboard",
   "title": "Dashboard",
   "viewport": {"width": 1280, "height": 720, "device_scale_factor": 1},
-  "frames": [{"frame_id": "main", "url": "https://example.com/dashboard"}],
+  "frames": [{"frame_id": "main", "frame_url": "https://example.com/dashboard"}],
   "nodes": [
     {
       "ref": "obs-17",
@@ -393,7 +394,7 @@ which payload is important.
 
 Human takeover lets a person drive the *same* browser the agent is using — for a manual login, 2FA, captcha, or any step the agent cannot complete on its own. The single takeover surface is **real-display takeover**: when `afhttp host` is launched with `--takeover-provider <provider>` (currently only `kasmvnc`), afhttp starts that display provider, runs the browser headful on its X display, and reverse-proxies the provider's web client through the authenticated listener at `/takeover/panel`. The container shipped by `afhttp container install` is takeover-ready by default (Brave + KasmVNC + an ephemeral initial profile + 2g `/dev/shm`).
 
-The driver-side entry point is `afhttp fetch <url> --takeover` against such a host (see §5). It opens or reuses a persistent tab, and either returns the content directly (if the warmed profile already reaches the target) or hands back a `takeover_url` and a `recommended_command` re-fetch for the same tab. The human opens the `takeover_url` in a local browser and drives the real display; the agent re-fetches once the wall is cleared.
+The driver-side entry point is `afhttp fetch <url> --takeover` against such a host (see §5). It opens or reuses a persistent tab, and either returns the content directly (if the warmed profile already reaches the target) or hands back a `takeover_url_secret` and a `recommended_command` re-fetch for the same tab. The human opens the `takeover_url_secret` in a local browser and drives the real display; the agent re-fetches once the wall is cleared.
 
 **Risk-control honesty.** Real-display takeover drives a real X display through KasmVNC, so the human's pointer/keyboard input reaches the browser as native OS input events rather than synthesized CDP events. This is the strongest takeover fidelity afhttp offers (full input realism, IME/CJK input, real handedness/timing), but it does **not** by itself bypass captcha reputation systems or the headless/browser fingerprint surface. When real-display takeover still fails, the likely remaining causes are IP/network reputation, account state, or site policy — not the takeover surface. Takeover uses the host's active profile; by default `fetch --takeover` switches to a persistent per-site profile derived from the URL. KasmVNC stays an external GPLv2 process located on `PATH`; afhttp does not link or bundle it.
 

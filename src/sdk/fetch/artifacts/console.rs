@@ -9,6 +9,8 @@ use crate::sdk::fetch::writer;
 use crate::shared::artifacts::{Artifact, ArtifactPaths};
 use crate::shared::error::{Error, ErrorCode};
 
+pub const CONSOLE_SCHEMA_VERSION: u32 = 2;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConsoleLog {
     pub schema_version: u32,
@@ -18,10 +20,12 @@ pub struct ConsoleLog {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConsoleEvent {
     pub level: ConsoleLevel,
-    pub timestamp_ms: f64,
+    #[serde(alias = "timestamp_ms")]
+    pub timestamp_epoch_ms: f64,
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
+    #[serde(alias = "url")]
+    pub source_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub line_number: Option<u32>,
 }

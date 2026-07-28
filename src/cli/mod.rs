@@ -8,10 +8,15 @@ use std::process::ExitCode;
 
 use crate::shared::error::Error;
 
-/// Binary entry point. Always returns `ExitCode::SUCCESS` on a structured
-/// response (success *or* error); the response itself carries the
-/// success/failure shape on stdout.
+/// Binary entry point. Successful structured responses exit zero; structured
+/// errors carry their stable AFDATA shape on the selected output route and
+/// exit nonzero.
 pub fn run() -> ExitCode {
+    if let Err(err) = crate::shared::afdata::install_output_to(std::env::args()) {
+        let _ = crate::shared::afdata::emit_process_error(&err);
+        return ExitCode::from(2);
+    }
+
     let _stream_redirect =
         match agent_first_data::stream_redirect::install_from_raw_args(std::env::args()) {
             Ok(redirect) => redirect,
@@ -27,14 +32,9 @@ pub fn run() -> ExitCode {
     // with "no rustls crypto provider is configured".
     crate::host::bootstrap::install_rustls_provider();
 
-    // Version/help are rendered without spinning up the async runtime so
-    // machine-readable requests do not fall through to clap's plain text exits.
-    if let Some(code) = maybe_render_version() {
-        return code;
-    }
-    // Help is rendered without spinning up the async runtime so
-    // `--help --recursive --output markdown` can feed generated docs.
-    if let Some(code) = maybe_render_help() {
+    // Version and progressively scoped help are rendered without spinning up
+    // the async runtime, and share one machine-readable discovery path.
+    if let Some(code) = maybe_render_version_or_help() {
         return code;
     }
     // The fetch/host pipeline polls a deeply nested future chain (inline host
@@ -64,6 +64,13 @@ pub fn run() -> ExitCode {
 /// Build the tokio runtime and drive the dispatched command to completion.
 /// Runs on a dedicated large-stack thread spawned by `run`.
 fn run_blocking() -> ExitCode {
+    let parsed = match args::parse() {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            emit_cli_error(&err);
+            return ExitCode::from(2);
+        }
+    };
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_stack_size(16 * 1024 * 1024)
@@ -75,82 +82,52 @@ fn run_blocking() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let exit = rt.block_on(async {
-        match args::parse() {
-            Ok(parsed) => dispatch(parsed).await,
-            Err(err) => {
-                emit_cli_error(&err);
-                Err(err)
-            }
-        }
-    });
+    let exit = rt.block_on(dispatch(parsed));
     match exit {
         Ok(()) => ExitCode::SUCCESS,
         Err(_) => ExitCode::from(1),
     }
 }
 
-/// Render version and return an exit code, or `None` to continue normal parsing.
-fn maybe_render_version() -> Option<ExitCode> {
+/// Render version/help and return an exit code, or `None` to continue parsing.
+fn maybe_render_version_or_help() -> Option<ExitCode> {
     use clap::CommandFactory;
-    use std::io::Write;
 
     let raw: Vec<String> = std::env::args().collect();
-    let mut handle = std::io::stdout();
     let build = match env!("GIT_SHA") {
         "unknown" => None,
         sha => Some(sha),
     };
-    match agent_first_data::cli_handle_version_or_continue(
+    match agent_first_data::cli_handle_version_or_help_or_continue(
         &raw,
         &args::Cli::command(),
+        &help_config(),
         "afhttp",
         Some(env!("DISPLAY_NAME")),
         env!("CARGO_PKG_VERSION"),
         build,
     ) {
-        Ok(Some(version)) => {
-            let _ = write!(handle, "{version}");
-            Some(ExitCode::SUCCESS)
-        }
+        Ok(Some(output)) => match crate::shared::afdata::write_process_result(&output) {
+            Ok(()) => Some(ExitCode::SUCCESS),
+            Err(_) => Some(ExitCode::from(4)),
+        },
         Ok(None) => None,
         Err(err) => {
             let err = Error::new(
                 crate::shared::error::ErrorCode::InvalidArgument,
                 err.to_string(),
             );
-            let _ = crate::shared::afdata::emit_error(&mut handle, &err);
+            let _ = crate::shared::afdata::emit_process_error(&err);
             Some(ExitCode::from(2))
         }
     }
 }
 
-/// Render help and return an exit code, or `None` to continue normal parsing.
-fn maybe_render_help() -> Option<ExitCode> {
-    use clap::CommandFactory;
-    use std::io::Write;
-
-    let raw: Vec<String> = std::env::args().collect();
-    let mut handle = std::io::stdout();
-    match agent_first_data::cli_handle_help_or_continue(
-        &raw,
-        &args::Cli::command(),
-        &agent_first_data::HelpConfig::human_cli_default(),
-    ) {
-        Ok(Some(help)) => {
-            let _ = write!(handle, "{help}");
-            Some(ExitCode::SUCCESS)
-        }
-        Ok(None) => None,
-        Err(err) => {
-            let err = Error::new(
-                crate::shared::error::ErrorCode::InvalidArgument,
-                err.to_string(),
-            );
-            let _ = crate::shared::afdata::emit_error(&mut handle, &err);
-            Some(ExitCode::from(2))
-        }
-    }
+fn help_config() -> agent_first_data::HelpConfig {
+    // afhttp intentionally has no business `--output` flag: every command
+    // emits protocol JSON. Help therefore uses JSON as its caller fallback,
+    // while an explicit help-only `--output plain|yaml|markdown` still wins.
+    agent_first_data::HelpConfig::output_aware_with_fallback(agent_first_data::HelpFormat::Json)
 }
 
 async fn dispatch(parsed: args::Parsed) -> Result<(), Error> {
@@ -182,16 +159,143 @@ async fn dispatch(parsed: args::Parsed) -> Result<(), Error> {
 }
 
 fn emit_cli_error(err: &Error) {
-    let stdout = std::io::stdout();
-    let mut handle = stdout.lock();
-    let _ = crate::shared::afdata::emit_error(&mut handle, err);
+    let _ = crate::shared::afdata::emit_process_error(err);
 }
 
 fn emit_bootstrap_error(msg: &str) {
-    // Fallback path used before the runtime exists. Stays on stdout to
-    // match the AFDATA protocol channel rule (clippy bans stderr usage).
-    let stdout = std::io::stdout();
-    let mut handle = stdout.lock();
     let err = Error::new(crate::shared::error::ErrorCode::InternalError, msg);
-    let _ = crate::shared::afdata::emit_error(&mut handle, &err);
+    let _ = crate::shared::afdata::emit_process_error(&err);
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+    use serde_json::Value;
+
+    use super::*;
+
+    fn render_discovery(raw: &[&str]) -> String {
+        let raw = raw.iter().map(ToString::to_string).collect::<Vec<_>>();
+        agent_first_data::cli_handle_version_or_help_or_continue(
+            &raw,
+            &args::Cli::command(),
+            &help_config(),
+            "afhttp",
+            Some(env!("DISPLAY_NAME")),
+            env!("CARGO_PKG_VERSION"),
+            None,
+        )
+        .expect("valid discovery request")
+        .expect("discovery request should render")
+    }
+
+    fn count_help_surface(command: &Value) -> (usize, usize) {
+        let mut commands = 1;
+        let mut arguments = command["arguments"].as_array().map_or(0, Vec::len);
+        if let Some(subcommands) = command["subcommands"].as_array() {
+            for subcommand in subcommands {
+                let (subcommand_count, argument_count) = count_help_surface(subcommand);
+                commands += subcommand_count;
+                arguments += argument_count;
+            }
+        }
+        (commands, arguments)
+    }
+
+    #[test]
+    fn bare_help_uses_fixed_json_contract() {
+        let rendered = render_discovery(&["afhttp", "--help"]);
+        let event: Value = serde_json::from_str(&rendered).expect("bare help must be JSON");
+        let help = &event["result"]["help"];
+        assert_eq!(event["kind"], "result");
+        assert_eq!(event["result"]["code"], "help");
+        assert_eq!(help["scope"], "one_level");
+        assert_eq!(help["command_path"], "afhttp");
+        assert!(
+            help["arguments"]
+                .as_array()
+                .expect("root arguments")
+                .iter()
+                .filter(|argument| {
+                    matches!(
+                        argument["name"].as_str(),
+                        Some("--stdout-file" | "--stderr-file")
+                    )
+                })
+                .all(|argument| argument["global"] == true),
+            "stream redirect arguments must be marked global: {help}"
+        );
+        assert!(
+            help["subcommands"]
+                .as_array()
+                .expect("root subcommands")
+                .iter()
+                .all(|command| command["name"] != "help"),
+            "the clap help pseudo-command must not be advertised: {help}"
+        );
+    }
+
+    #[test]
+    fn fetch_help_is_scoped_and_keeps_details_progressive() {
+        let rendered = render_discovery(&["afhttp", "fetch", "--help"]);
+        let event: Value = serde_json::from_str(&rendered).expect("scoped help must be JSON");
+        let help = &event["result"]["help"];
+        assert_eq!(help["command_path"], "afhttp fetch");
+        assert_eq!(
+            help["inherited_arguments_from"],
+            serde_json::json!(["afhttp"])
+        );
+        assert!(
+            help["arguments"]
+                .as_array()
+                .expect("fetch arguments")
+                .iter()
+                .all(|argument| {
+                    !matches!(
+                        argument["name"].as_str(),
+                        Some("--stdout-file" | "--stderr-file")
+                    )
+                }),
+            "scoped structured help must not repeat inherited globals: {help}"
+        );
+        let takeover_help = help["arguments"]
+            .as_array()
+            .expect("fetch arguments")
+            .iter()
+            .find(|argument| argument["name"] == "--takeover")
+            .and_then(|argument| argument["help"].as_str())
+            .expect("--takeover help");
+        assert_eq!(
+            takeover_help,
+            "Escalate captcha, login, or 2FA walls to human takeover"
+        );
+        assert!(
+            !rendered.contains("next_action"),
+            "compact structured help eagerly exposed long-form detail"
+        );
+
+        let plain = render_discovery(&["afhttp", "fetch", "--help", "--output", "plain"]);
+        assert!(plain.contains("Usage: afhttp fetch"));
+        assert!(plain.contains("--stdout-file"));
+
+        let markdown = render_discovery(&["afhttp", "fetch", "--help", "--output", "markdown"]);
+        assert!(
+            markdown.contains("next_action"),
+            "Markdown export must retain the long-form takeover detail"
+        );
+    }
+
+    #[test]
+    fn recursive_help_stays_within_structural_budget() {
+        let rendered = render_discovery(&["afhttp", "--help", "--recursive", "--output", "json"]);
+        let event: Value = serde_json::from_str(&rendered).expect("recursive help must be JSON");
+        let help = &event["result"]["help"];
+        let (commands, arguments) = count_help_surface(help);
+        let budget = 512 + commands * 160 + arguments * 120;
+        assert!(
+            rendered.len() < budget,
+            "recursive help exceeded its payload budget: {} >= {budget}",
+            rendered.len()
+        );
+    }
 }

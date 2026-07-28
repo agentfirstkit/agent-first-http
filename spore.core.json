@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-http",
   "name": "Agent-First HTTP",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "Give your AI agent its own private browser — so it reads the real page, past logins and bot walls, without ever touching yours.",
@@ -13,17 +13,20 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Emit afhttp --version as an AFDATA protocol-v1 JSON event (name, display_name, version, build) via a clap-introspecting pre-parser instead of plain version text.",
-    "Stamp the build commit SHA into the version's build field via build.rs, falling back to \"unknown\" for crates.io tarball builds with no reachable git.",
-    "Migrate to agent-first-data 0.22 and its L1-L8 API (redaction policy, output style, infallible event builders), absorbing the retired agent-first-config crate.",
-    "Bump pinned browser backends to chrome-for-testing 151 and camoufox 152 beta.",
-    "Move the embedded skill to the skills/agent-first-http/SKILL.md layout and add Hermes as a skill install target alongside Codex, Claude Code, and opencode.",
-    "Rewrite the README into the canonical user guide with a coverage map, host/driver roles, worked examples, Rust SDK usage, and cross-spore collaboration notes, retiring docs/overview.md."
+    "Unify CLI discovery: version and help share one pre-parser, bare --help returns a compact AFDATA JSON result scoped to a single command level, --recursive expands the full tree, and --output plain|yaml|markdown selects human or documentation views",
+    "Stop advertising clap's help pseudo-subcommand and return a structured invalid_argument error when a command is missing, instead of dumping plain-text usage",
+    "Rewrite every flag's help into a short summary plus a detail paragraph so compact structured help stays small while plain and markdown output keep the full caveats",
+    "Add a global --output-to split|stdout|stderr; the default split sends results to stdout and errors to stderr, while stdout and stderr collapse all events onto one ordered stream",
+    "Rename the human-takeover capability to takeover_url_secret with a handoff_secret query parameter, redacted by default and revealed only by the explicit panel, fetch --takeover, and handoff results",
+    "Redact credential-bearing URLs across all tool-originated output: userinfo passwords and token-shaped query parameters in every *_url field, network.json request URLs, console source URLs, observation page and frame URLs, storage URLs, and the host's recent-requests ring",
+    "Bump every artifact to schema_version 2 with self-describing field names: observation page_url and frame_url, network request_url with monotonic timing fields, console timestamp_epoch_ms and source_url, storage page_url, and host_ready listen_address",
+    "Raise the agent-first-data floor to 0.26.1 and refresh pinned dependencies including base64 0.23 and chrome-for-testing 151.0.7922.47",
+    "Mount the spore alone at /workspace in the Docker test harness with an optional sibling agent-first-data mount, so the gate no longer assumes a monorepo layout"
   ],
   "bonds": [
     {
       "relation": "depends_on",
-      "uri": "cmn://agentfirstkit.com/b3.eDai9QqMqX9gR8Fayep7D2HiWCtLd4EW8o8UtwDgCaQ",
+      "uri": "cmn://agentfirstkit.com/b3.3JvaoXaDbsCT6z16jtvCD1oGrPZEsEXGn6g1CWqKCpJF",
       "id": "agent-first-data",
       "reason": "All request/response fields use Agent-First Data suffix conventions, and runtime protocol/log events are emitted on stdout only"
     }

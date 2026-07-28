@@ -1,5 +1,6 @@
 //! Deep network capture (`network.json`). Aggregated from CDP `Network.*`
-//! events. Headers are redacted by default per [`crate::shared::redact`].
+//! events. Headers and credential-bearing URL components are redacted by
+//! default per [`crate::shared::redact`].
 //! This module defines the on-wire schema and the redaction helper used by tests.
 
 use std::collections::BTreeMap;
@@ -11,6 +12,8 @@ use crate::sdk::fetch::writer;
 use crate::shared::artifacts::{Artifact, ArtifactPaths};
 use crate::shared::error::{Error, ErrorCode};
 use crate::shared::redact;
+
+pub const NETWORK_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkLog {
@@ -55,7 +58,8 @@ pub struct NetworkEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub loader_id: Option<String>,
     pub resource_type: String,
-    pub url: String,
+    #[serde(alias = "url")]
+    pub request_url: String,
     pub method: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub initiator: Option<serde_json::Value>,
@@ -79,9 +83,11 @@ pub struct NetworkEntry {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NetworkTiming {
-    pub start_ms: u64,
+    #[serde(alias = "start_ms")]
+    pub start_monotonic_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub end_ms: Option<u64>,
+    #[serde(alias = "end_ms")]
+    pub end_monotonic_ms: Option<u64>,
 }
 
 pub async fn write(paths: &ArtifactPaths, log: &NetworkLog) -> Result<PathBuf, Error> {
@@ -106,6 +112,17 @@ pub fn redact_headers(map: &mut BTreeMap<String, String>, enabled: bool) {
         if redact::should_redact(name) {
             *value = redact::REDACTED_VALUE.to_string();
         }
+    }
+}
+
+/// Apply the default URL redaction policy used by `network.json`. Pass
+/// `enabled = false` only for the explicit `--no-network-redact` opt-out.
+#[must_use]
+pub fn redact_request_url(url: &str, enabled: bool) -> String {
+    if enabled {
+        redact::redact_url(url)
+    } else {
+        url.to_string()
     }
 }
 
@@ -137,5 +154,15 @@ mod tests {
         map.insert("Authorization".to_string(), "Bearer xyz".to_string());
         redact_headers(&mut map, false);
         assert_eq!(map["Authorization"], "Bearer xyz");
+    }
+
+    #[test]
+    fn request_url_redaction_honors_explicit_opt_out() {
+        let url = "https://user:pass@example.test/?token=abc&safe=ok";
+        assert_eq!(
+            redact_request_url(url, true),
+            "https://user:***@example.test/?token=***&safe=ok"
+        );
+        assert_eq!(redact_request_url(url, false), url);
     }
 }

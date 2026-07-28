@@ -21,7 +21,6 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPORE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-SPORES_DIR="$(cd "$SPORE_DIR/.." && pwd)"
 IMAGE_TAG="${AFHTTP_DOCKER_IMAGE:-afhttp-test:local}"
 
 # Reuse run-in-docker.sh's image-build logic so we never duplicate it.
@@ -38,11 +37,16 @@ fi
 DOCKER_FLAGS+=(-e CARGO_HOME=/cargo-home -e CARGO_TARGET_DIR=/cargo-target)
 # Forward the host port so a Mac browser can hit the in-container listener.
 DOCKER_FLAGS+=(-p 127.0.0.1:9222:9222)
+AFDATA_MOUNT=()
+if [ -d "$SPORE_DIR/../agent-first-data" ]; then
+  AFDATA_MOUNT=(-v "$SPORE_DIR/../agent-first-data:/agent-first-data")
+fi
 
 exec docker run "${DOCKER_FLAGS[@]}" \
-  -v "$SPORES_DIR:/spores" \
+  -v "$SPORE_DIR:/workspace" \
+  "${AFDATA_MOUNT[@]}" \
   -v afhttp-cargo-home:/cargo-home \
   -v afhttp-cargo-target:/cargo-target \
-  -w /spores/agent-first-http \
+  -w /workspace \
   "$IMAGE_TAG" \
   cargo run --features host --example manual_display_takeover -- "$@"

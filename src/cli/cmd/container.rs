@@ -44,6 +44,7 @@ pub struct Args {
 }
 
 #[derive(Subcommand, Debug)]
+#[command(disable_help_subcommand = true)]
 pub enum ContainerSub {
     /// Build the host image if missing and run the container; print the client command.
     Install(InstallArgs),
@@ -73,32 +74,40 @@ pub struct InstallArgs {
     /// Host CDP port, published on 127.0.0.1.
     #[arg(long, default_value_t = 9222)]
     pub port: u16,
-    /// Initial logical profile name inside the container. Defaults to `-`
-    /// (ephemeral); persistent profiles are scoped by backend.
+    /// Initial profile name inside the container.
+    ///
+    /// Defaults to `-` (ephemeral); persistent profiles are scoped by backend.
     #[arg(long)]
     pub profile: Option<String>,
     /// Chromium /dev/shm size. Defaults to `1g`, or `2g` when takeover is on.
     #[arg(long = "shm-size")]
     pub shm_size: Option<String>,
-    /// Real-display takeover provider for the built host. A provider name
-    /// (default `kasmvnc`) builds a Brave + KasmVNC takeover-ready host with an
-    /// ephemeral initial profile and 2g /dev/shm; `off` builds a lean headless host.
+    /// Real-display takeover provider for the built host.
+    ///
+    /// The default `kasmvnc` builds a Brave + KasmVNC takeover-ready host with
+    /// an ephemeral initial profile and 2g /dev/shm; `off` builds a lean
+    /// headless host.
     #[arg(long = "takeover-provider", default_value = "kasmvnc")]
     pub takeover_provider: TakeoverProviderArg,
-    /// Extra component to build into the image (repeatable). Browser backends:
-    /// chrome-headless-shell, lightpanda, fingerprint-chromium, camoufox, brave.
-    /// Plus the takeover provider: kasmvnc.
+    /// Extra image component to build (repeatable).
+    ///
+    /// Browser backends: chrome-headless-shell, lightpanda,
+    /// fingerprint-chromium, camoufox, brave. Takeover provider: kasmvnc.
     #[arg(long = "with", value_name = "COMPONENT")]
     pub with: Vec<String>,
     /// Rebuild the image even if it already exists.
     #[arg(long)]
     pub rebuild: bool,
-    /// Build the full image from a source checkout (container/docker/Dockerfile)
-    /// instead of downloading the prebuilt release. Needs the source tree.
+    /// Build the image from a source checkout.
+    ///
+    /// Uses container/docker/Dockerfile instead of downloading the prebuilt
+    /// release and therefore needs the source tree.
     #[arg(long = "from-source")]
     pub from_source: bool,
-    /// Source checkout to build from with --from-source (default: current dir,
-    /// then the checkout this afhttp binary was built from).
+    /// Source checkout used by --from-source.
+    ///
+    /// Defaults to the current directory, then the checkout from which this
+    /// afhttp binary was built.
     #[arg(long, value_name = "DIR")]
     pub context: Option<String>,
     /// Extra args passed through to `afhttp host` inside the container.

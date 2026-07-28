@@ -82,9 +82,21 @@ Every error event carries `error.code` (machine-readable, stable enum), `error.m
 
 ### Secrets are redacted in tool-originated output
 
-Configuration echo, log lines, and trace output go through `agent_first_data::output_json_with()` with the `_secret` suffix redaction policy. Fields named `*_secret` (e.g. `key_pem_secret`) are replaced with `"[redacted]"` in stdout. Server response data (response bodies, headers) passes through unmodified — redaction does not apply to the `body` artifact.
+Configuration echo, log lines, trace output, and CLI envelopes go through an
+AFDATA `CliEmitter` configured with the `_secret` suffix policy. Fields named
+`*_secret` (for example `key_pem_secret`) are redacted before serialization.
+The short-lived `takeover_url_secret` is the narrow exception: it is restored
+only for an explicit takeover or panel result so a human can use it. Server
+response data (response bodies and page payloads) passes through unmodified;
+redaction does not rewrite the `body` artifact.
 
-Network logs are different: they are a tool-originated capture of both browser requests and server responses, and can contain cookies, bearer tokens, and `Set-Cookie`. `network.json` redacts credential-bearing headers by default. Agents that need byte-for-byte traffic capture must opt out explicitly with `--no-network-redact`, which can expose tokens and PII. `--capture-ws` and `--capture-sse` have the same risk for frame/event payloads.
+Network logs are different: they are a tool-originated capture of both browser
+requests and server responses, and can contain cookies, bearer tokens,
+credential-bearing URL query parameters, and `Set-Cookie`. `network.json`
+redacts credential-bearing headers, URL userinfo, and known secret query
+parameters by default. Agents that need byte-for-byte traffic capture must opt
+out explicitly with `--no-network-redact`, which can expose tokens and PII.
+`--capture-ws` and `--capture-sse` have the same risk for frame/event payloads.
 
 ### Agent-First Data field naming
 
@@ -111,9 +123,16 @@ CLI flag names correspond to JSON field names with hyphens replacing underscores
 
 Boolean flags are bare presence toggles, never `on|off` values. A behavior that is on by default is turned off with a `--no-x` flag (`--no-cookie-jar`, `--no-network-redact`, `--no-health`); a behavior that is off by default is turned on with a bare `--x` flag (`--tls-insecure`, `--capture-ws`).
 
-### Output is always single-line JSON
+### Output is single-line JSON with explicit routing
 
-CLI mode has no `--output` flag and no alternate rendering. Every command prints exactly one AFDATA protocol-v1 JSON event on stdout via `agent_first_data::output_json_with()` with `_secret` redaction: `{"kind":"result","result":{"code":"fetch",...},"trace":{}}` on success or `{"kind":"error","error":{"code":...,"message":...},"trace":{}}` on failure. Page bytes and captured data go to artifact files referenced by `*_file` fields inside `result`.
+CLI mode has no `--output` flag and no alternate rendering. Every command emits
+exactly one AFDATA protocol-v1 JSON event with `_secret` redaction:
+`{"kind":"result","result":{"code":"fetch",...},"trace":{}}` on success or
+`{"kind":"error","error":{"code":...,"message":...},"trace":{}}` on failure.
+The default `--output-to split` sends results to stdout and errors to stderr;
+`--output-to stdout` or `--output-to stderr` collapses all event kinds onto one
+ordered stream. Page bytes and captured data go to artifact files referenced by
+`*_file` fields inside `result`.
 
 ### No `unwrap` / `expect` / `panic` in the crate
 
@@ -131,7 +150,9 @@ Every error case is handled explicitly: propagated as a structured `error` to th
 
 ### `print_stdout` / `print_stderr` are denied at crate level
 
-All output passes through the protocol writer, which guarantees single-line JSON on stdout. Direct `println!` / `eprintln!` would bypass redaction and structure. The lint enforces this.
+All output passes through the protocol writer, which guarantees single-line
+JSON and the selected output routing. Direct `println!` / `eprintln!` would
+bypass redaction and structure. The lint enforces this.
 
 ## Cross-References
 

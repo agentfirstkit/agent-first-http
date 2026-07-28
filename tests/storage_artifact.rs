@@ -88,7 +88,7 @@ async fn storage_artifact_captures_local_session_and_indexeddb() {
     let storage_path = result.storage_file.as_ref().expect("storage_file present");
     let snap = read_json(storage_path);
 
-    assert_eq!(snap["schema_version"], 1);
+    assert_eq!(snap["schema_version"], 2);
     assert_eq!(
         snap["local_storage"]["ls_key"].as_str(),
         Some("ls_value"),

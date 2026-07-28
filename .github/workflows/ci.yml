@@ -5,7 +5,7 @@ on:
   push:
     branches: [main]
 
-# afhttp depends on a sibling crate at ../agent-first-data/rust via a
+# afhttp depends on a sibling crate at ../agent-first-data via a
 # Cargo path override (see .cargo/config.toml). CI checks out both repos
 # in the layout the override expects.
 

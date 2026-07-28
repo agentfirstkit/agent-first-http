@@ -14,6 +14,7 @@ pub struct Args {
 }
 
 #[derive(Subcommand, Debug)]
+#[command(disable_help_subcommand = true)]
 pub enum TabsSub {
     /// List currently-attached CDP targets.
     List(EndpointArgs),

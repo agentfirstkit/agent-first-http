@@ -21,7 +21,7 @@ pub struct Args {
 
 #[derive(Serialize)]
 struct PanelResult {
-    takeover_url: String,
+    takeover_url_secret: String,
     takeover_url_expires_at_rfc3339: String,
     takeover_url_ttl_s: u64,
     takeover_url_scope: String,
@@ -32,7 +32,7 @@ struct PanelResult {
 
 pub async fn run(args: Args) -> Result<(), Error> {
     let result = build_result(&args.endpoint, args.token.as_deref()).await?;
-    output::emit("panel", &result)
+    output::emit_revealing_takeover("panel", &result)
 }
 
 async fn build_result(endpoint: &str, token: Option<&str>) -> Result<PanelResult, Error> {
@@ -55,13 +55,13 @@ async fn build_result(endpoint: &str, token: Option<&str>) -> Result<PanelResult
         }
         Err(e) => {
             warnings.push(format!(
-                "could not read host capabilities; returning the takeover_url anyway: {}",
+                "could not read host capabilities; returning the takeover_url_secret anyway: {}",
                 e.detail
             ));
         }
     }
     Ok(PanelResult {
-        takeover_url: handoff.takeover_url,
+        takeover_url_secret: handoff.takeover_url_secret,
         takeover_url_expires_at_rfc3339: handoff.takeover_url_expires_at_rfc3339,
         takeover_url_ttl_s: handoff.takeover_url_ttl_s,
         takeover_url_scope: handoff.takeover_url_scope,
@@ -75,9 +75,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn panel_result_exposes_takeover_url_only() {
+    fn panel_result_exposes_takeover_url_secret_only() {
         let value = serde_json::to_value(PanelResult {
-            takeover_url: "http://localhost:9222/takeover/panel?handoff=h".into(),
+            takeover_url_secret: "http://localhost:9222/takeover/panel?handoff_secret=h".into(),
             takeover_url_expires_at_rfc3339: "2026-06-11T00:00:00Z".into(),
             takeover_url_ttl_s: 900,
             takeover_url_scope: "takeover".into(),
@@ -89,7 +89,12 @@ mod tests {
         assert!(value.get("display_url").is_none());
         assert!(value.get("panel_url").is_none());
         assert!(value.get("token_secret").is_none());
-        assert!(value["takeover_url"].as_str().unwrap().contains("handoff="));
+        assert!(
+            value["takeover_url_secret"]
+                .as_str()
+                .unwrap()
+                .contains("handoff_secret=")
+        );
         assert!(value.get("provider").is_some());
     }
 }

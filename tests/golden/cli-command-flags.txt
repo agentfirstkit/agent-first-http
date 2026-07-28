@@ -1,4 +1,5 @@
 command Agent-First HTTP
+  arg output_to --output-to
   arg stdout_file --stdout-file
   arg stderr_file --stderr-file
   command fetch

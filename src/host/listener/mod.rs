@@ -209,7 +209,7 @@ struct HandoffRequest {
 
 #[derive(Debug, Serialize)]
 struct HandoffResponse {
-    takeover_url: String,
+    takeover_url_secret: String,
     takeover_url_expires_at_rfc3339: String,
     takeover_url_ttl_s: u64,
     takeover_url_scope: &'static str,
@@ -368,12 +368,10 @@ async fn serve_unix(app: Router, path: std::path::PathBuf) -> Result<(), Error> 
 
 fn emit_host_ready(listen: &str) {
     let payload = serde_json::json!({
-        "listen": listen,
+        "listen_address": listen,
         "version": env!("CARGO_PKG_VERSION"),
     });
-    let stdout = std::io::stdout();
-    let mut handle = stdout.lock();
-    let _ = crate::shared::afdata::emit(&mut handle, "host_ready", &payload);
+    let _ = crate::shared::afdata::emit_process("host_ready", &payload);
 }
 
 /// `--listen` target. `Tcp` works everywhere; `Unix` is `cfg(unix)` only.
@@ -483,16 +481,16 @@ async fn takeover_handoff_handler(
     };
     takeover_url
         .query_pairs_mut()
-        .append_pair("handoff", &token);
+        .append_pair("handoff_secret", &token);
     let response = HandoffResponse {
-        takeover_url: takeover_url.to_string(),
+        takeover_url_secret: takeover_url.to_string(),
         takeover_url_expires_at_rfc3339: humantime::format_rfc3339_seconds(entry.expires_at_system)
             .to_string(),
         takeover_url_ttl_s: ttl_s,
         takeover_url_scope: entry.scope,
     };
     let value = serde_json::to_value(response).unwrap_or_else(|_| serde_json::json!({}));
-    Json(crate::shared::afdata::result_value(
+    Json(crate::shared::afdata::result_value_revealing_takeover(
         "takeover_handoff",
         value,
     ))
@@ -630,7 +628,8 @@ async fn shutdown_signal() {
 /// Bearer-token middleware. `--health-public=minimal` allows GET /health
 /// through without a token (returning the reduced payload); everything else
 /// requires `Authorization: Bearer <token>` or `?token_secret=<token>` when a
-/// token was configured. Takeover display URLs use short-lived `handoff=...`
+/// token was configured. Takeover display URLs use short-lived
+/// `handoff_secret=...`
 /// capabilities instead of embedding the long-lived host token.
 async fn token_middleware(
     State(state): State<AppState>,
@@ -728,7 +727,7 @@ fn query_token(req: &axum::extract::Request) -> Option<String> {
 fn query_handoff(req: &axum::extract::Request) -> Option<String> {
     let q = req.uri().query()?;
     url::form_urlencoded::parse(q.as_bytes())
-        .find(|(key, _)| key == "handoff")
+        .find(|(key, _)| key == "handoff_secret" || key == "handoff")
         .map(|(_, value)| value.into_owned())
 }
 

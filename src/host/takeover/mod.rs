@@ -387,6 +387,7 @@ async fn proxy_kasmvnc(
             if pair.is_empty()
                 || pair.starts_with("path=")
                 || pair.starts_with("resize=")
+                || pair.starts_with("handoff_secret=")
                 || pair.starts_with("handoff=")
             {
                 continue;
@@ -587,7 +588,11 @@ fn display_upstream_path_and_query(uri: &Uri) -> String {
     };
     let filtered: Vec<&str> = query
         .split('&')
-        .filter(|pair| !pair.starts_with("handoff=") && !pair.starts_with("token_secret="))
+        .filter(|pair| {
+            !pair.starts_with("handoff_secret=")
+                && !pair.starts_with("handoff=")
+                && !pair.starts_with("token_secret=")
+        })
         .collect();
     if filtered.is_empty() {
         path

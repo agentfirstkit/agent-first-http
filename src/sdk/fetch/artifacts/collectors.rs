@@ -34,7 +34,7 @@ fn default_entry() -> NetworkEntry {
         frame_id: None,
         loader_id: None,
         resource_type: "Other".into(),
-        url: String::new(),
+        request_url: String::new(),
         method: "GET".into(),
         initiator: None,
         status: None,
@@ -45,8 +45,8 @@ fn default_entry() -> NetworkEntry {
         request_post_data_size_bytes: None,
         body_file: None,
         timing: NetworkTiming {
-            start_ms: 0,
-            end_ms: None,
+            start_monotonic_ms: 0,
+            end_monotonic_ms: None,
         },
         failure: None,
         hints: BTreeMap::new(),
@@ -234,7 +234,7 @@ impl NetworkCollector {
         entries.sort_by(|a, b| a.request_id.cmp(&b.request_id));
         let summary = summarize_entries(&entries, self.redact_headers);
         NetworkLog {
-            schema_version: 1,
+            schema_version: super::network::NETWORK_SCHEMA_VERSION,
             main_request_id: guard.main_request_id.clone(),
             entries,
             summary,
@@ -285,11 +285,13 @@ fn handle_event(
                 .unwrap_or(0.0);
             let request = &ev.params["request"];
             let initiator = ev.params.get("initiator").cloned();
-            let url = request
+            let request_url = request
                 .get("url")
                 .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+                .map(|url| {
+                    crate::sdk::fetch::artifacts::network::redact_request_url(url, redact_headers)
+                })
+                .unwrap_or_default();
             let method = request
                 .get("method")
                 .and_then(|v| v.as_str())
@@ -329,11 +331,11 @@ fn handle_event(
             entry.frame_id = frame_id;
             entry.loader_id = loader_id;
             entry.resource_type = resource_type;
-            entry.url = url;
+            entry.request_url = request_url;
             entry.method = method;
             entry.initiator = initiator;
             entry.request_headers = request_headers;
-            entry.timing.start_ms = (timestamp * 1000.0) as u64;
+            entry.timing.start_monotonic_ms = (timestamp * 1000.0) as u64;
             // Mechanical JSON hint on request body.
             if let Some(post) = request.get("postData").and_then(|v| v.as_str()) {
                 entry.request_post_data_present = true;
@@ -413,7 +415,7 @@ fn handle_event(
                 .unwrap_or(0.0);
             let encoded = ev.params.get("encodedDataLength").and_then(|v| v.as_u64());
             if let Some(s) = inner.slots.get_mut(&req_id) {
-                s.entry.timing.end_ms = Some((timestamp * 1000.0) as u64);
+                s.entry.timing.end_monotonic_ms = Some((timestamp * 1000.0) as u64);
                 s.entry.state = NetworkEntryState::Finished;
                 if let Some(n) = encoded {
                     s.entry
@@ -555,7 +557,7 @@ impl ConsoleCollector {
         self.task.abort();
         let events = std::mem::take(&mut *self.inner.lock().await);
         ConsoleLog {
-            schema_version: 1,
+            schema_version: super::console::CONSOLE_SCHEMA_VERSION,
             events,
         }
     }
@@ -578,7 +580,7 @@ fn handle_ws_event(inner: &mut NetworkInner, ev: &crate::sdk::cdp::ws_client::Cd
                 "opcode": response.get("opcode").and_then(|v| v.as_u64()).unwrap_or(1),
                 "mask": response.get("mask").and_then(|v| v.as_bool()).unwrap_or(false),
                 "payload": response.get("payloadData").and_then(|v| v.as_str()).unwrap_or(""),
-                "timestamp_ms": now_ms,
+                "timestamp_epoch_ms": now_ms,
             });
             inner.ws_frames.entry(req_id).or_default().push(frame);
         }
@@ -593,7 +595,7 @@ fn handle_ws_event(inner: &mut NetworkInner, ev: &crate::sdk::cdp::ws_client::Cd
                 "opcode": response.get("opcode").and_then(|v| v.as_u64()).unwrap_or(1),
                 "mask": response.get("mask").and_then(|v| v.as_bool()).unwrap_or(false),
                 "payload": response.get("payloadData").and_then(|v| v.as_str()).unwrap_or(""),
-                "timestamp_ms": now_ms,
+                "timestamp_epoch_ms": now_ms,
             });
             inner.ws_frames.entry(req_id).or_default().push(frame);
         }
@@ -610,7 +612,7 @@ fn handle_ws_event(inner: &mut NetworkInner, ev: &crate::sdk::cdp::ws_client::Cd
             let frame = serde_json::json!({
                 "type": "error",
                 "error": error,
-                "timestamp_ms": now_ms,
+                "timestamp_epoch_ms": now_ms,
             });
             inner.ws_frames.entry(req_id).or_default().push(frame);
         }
@@ -630,7 +632,7 @@ fn handle_sse_event(inner: &mut NetworkInner, ev: &crate::sdk::cdp::ws_client::C
         "event_name": ev.params.get("eventName").and_then(|v| v.as_str()).unwrap_or(""),
         "data": ev.params.get("data").and_then(|v| v.as_str()).unwrap_or(""),
         "event_id": ev.params.get("eventId").and_then(|v| v.as_str()).unwrap_or(""),
-        "timestamp_ms": ev.params.get("timestamp")
+        "timestamp_monotonic_ms": ev.params.get("timestamp")
             .and_then(|v| v.as_f64())
             .map(|t| (t * 1000.0) as u64)
             .unwrap_or(0),
@@ -653,7 +655,7 @@ fn map_console_event(ev: &crate::sdk::cdp::ws_client::CdpEvent) -> Option<Consol
                 "error" => ConsoleLevel::Error,
                 _ => ConsoleLevel::Log,
             };
-            let timestamp_ms = ev
+            let timestamp_epoch_ms = ev
                 .params
                 .get("timestamp")
                 .and_then(|v| v.as_f64())
@@ -662,9 +664,9 @@ fn map_console_event(ev: &crate::sdk::cdp::ws_client::CdpEvent) -> Option<Consol
             let (url, line_number) = stack_frame_origin(ev.params.get("stackTrace"));
             Some(ConsoleEvent {
                 level,
-                timestamp_ms,
+                timestamp_epoch_ms,
                 text,
-                url,
+                source_url: url.map(|url| redact::redact_url(&url)),
                 line_number,
             })
         }
@@ -681,7 +683,7 @@ fn map_console_event(ev: &crate::sdk::cdp::ws_client::CdpEvent) -> Option<Consol
                         .map(str::to_string)
                 })
                 .unwrap_or_else(|| "exception".to_string());
-            let timestamp_ms = ev
+            let timestamp_epoch_ms = ev
                 .params
                 .get("timestamp")
                 .and_then(|v| v.as_f64())
@@ -696,9 +698,9 @@ fn map_console_event(ev: &crate::sdk::cdp::ws_client::CdpEvent) -> Option<Consol
                 .map(|n| n as u32);
             Some(ConsoleEvent {
                 level: ConsoleLevel::Exception,
-                timestamp_ms,
+                timestamp_epoch_ms,
                 text,
-                url,
+                source_url: url.map(|url| redact::redact_url(&url)),
                 line_number,
             })
         }

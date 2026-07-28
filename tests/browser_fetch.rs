@@ -356,7 +356,7 @@ async fn render_always_applies_request_overrides_and_evaluate_hook() {
         .iter()
         .find(|entry| {
             entry["resource_type"] == "Document"
-                && entry["url"]
+                && entry["request_url"]
                     .as_str()
                     .is_some_and(|u| u.ends_with("/identity.html"))
         })
@@ -758,7 +758,7 @@ async fn observation_pierces_shadow_and_same_origin_iframes_only() {
     let same_frame_ref = same_iframe["frame_ref"].as_str().expect("same frame ref");
     assert!(frames.iter().any(|frame| {
         frame["frame_id"].as_str() == Some(same_frame_ref)
-            && frame["url"]
+            && frame["frame_url"]
                 .as_str()
                 .is_some_and(|url| url.ends_with("/frame-inner.html"))
     }));
@@ -783,7 +783,7 @@ async fn observation_pierces_shadow_and_same_origin_iframes_only() {
     let cross_frame_ref = cross_iframe["frame_ref"].as_str().expect("cross frame ref");
     assert!(frames.iter().any(|frame| {
         frame["frame_id"].as_str() == Some(cross_frame_ref)
-            && frame["url"]
+            && frame["frame_url"]
                 .as_str()
                 .is_some_and(|url| url == cross_url.as_str())
     }));
@@ -973,7 +973,7 @@ async fn wait_auto_captures_delayed_xhr_text_and_trace_signals() {
     let delayed = entries
         .iter()
         .find(|entry| {
-            entry["url"]
+            entry["request_url"]
                 .as_str()
                 .is_some_and(|url| url.ends_with("/delayed-data.json"))
         })
@@ -1074,7 +1074,7 @@ async fn wait_auto_reports_pending_xhr_without_hanging() {
         .expect("entries")
         .iter()
         .find(|entry| {
-            entry["url"]
+            entry["request_url"]
                 .as_str()
                 .is_some_and(|url| url.ends_with("/never.json"))
         })

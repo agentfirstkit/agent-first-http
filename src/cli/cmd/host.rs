@@ -17,7 +17,8 @@ pub struct Args {
     /// Listener address: `tcp:host:port` or `unix:/path/to.sock`.
     #[arg(long, help_heading = "Listener")]
     pub listen: String,
-    /// Initial logical profile name, or `-` for an ephemeral profile.
+    /// Initial profile name, or `-` for an ephemeral profile.
+    ///
     /// Persistent profiles are stored under
     /// $XDG_DATA_HOME/afhttp/profiles/<backend>/<name>. A host serves one
     /// active profile at a time but can switch at runtime when a client passes
@@ -27,19 +28,21 @@ pub struct Args {
     /// Display mode. Omit when `--takeover-provider` should imply headful.
     #[arg(long, help_heading = "Display & takeover")]
     pub display: Option<DisplayArg>,
-    /// Real-display takeover provider: `off` serves no takeover surface; a
-    /// provider name (currently `kasmvnc`) serves a real-display takeover at
-    /// /takeover/panel for hard sites (captcha, IME, flaky CDP input —
-    /// implies headful).
+    /// Real-display takeover provider: off or kasmvnc.
+    ///
+    /// `off` serves no takeover surface; `kasmvnc` serves a real-display
+    /// takeover at /takeover/panel for captcha, IME, or flaky CDP input and
+    /// implies headful mode.
     #[arg(
         long = "takeover-provider",
         default_value = "off",
         help_heading = "Display & takeover"
     )]
     pub takeover_provider: TakeoverProviderArg,
-    /// Takeover-provider image quality hint, 0-100 percent (default 100 = crispest).
-    /// The KasmVNC provider maps this to 0-9 quality tiers; lower trades
-    /// clarity for bandwidth. Adjustable live in the display panel too.
+    /// Takeover image quality hint, from 0 to 100 percent.
+    ///
+    /// The default 100 is crispest. KasmVNC maps this to 0-9 quality tiers;
+    /// lower values trade clarity for bandwidth and can be adjusted live.
     #[arg(
         long = "takeover-quality-percent",
         default_value_t = 100,
@@ -61,30 +64,30 @@ pub struct Args {
     /// Make /health public with minimal payload.
     #[arg(long, default_value = "off", help_heading = "Diagnostics")]
     pub health_public: HealthPublicArg,
-    /// Propagate an environment variable into the browser subprocess.
-    /// Repeatable. The host scrubs all other ambient env (`HTTP_PROXY`,
-    /// `XDG_*`, `BROWSER`, locale, etc.) so a browsing environment can
-    /// never silently honor configuration the agent did not request.
-    /// Use the form `NAME=VALUE`.
+    /// Set a browser subprocess environment variable (repeatable).
+    ///
+    /// The host scrubs all other ambient variables (`HTTP_PROXY`, `XDG_*`,
+    /// `BROWSER`, locale, etc.) so browsing never silently honors unrequested
+    /// configuration. Use `NAME=VALUE`.
     #[arg(
         long = "engine-env",
         value_name = "NAME=VALUE",
         help_heading = "Browser"
     )]
     pub engine_envs: Vec<String>,
-    /// Append a raw flag to the backend subprocess command line.
-    /// Repeatable. Use for backend-specific surfaces the host doesn't
-    /// model first-class — for example
-    /// `--browser-arg --fingerprint-brand=Chrome` to override
-    /// fingerprint-chromium's brand string. Chromium honors last-wins
-    /// for duplicate flags, so an explicit entry overrides any
-    /// default the host applied.
+    /// Append a raw browser backend flag (repeatable).
+    ///
+    /// Use for backend-specific surfaces not modeled first-class. For example,
+    /// `--browser-arg --fingerprint-brand=Chrome` overrides
+    /// fingerprint-chromium's brand string. Chromium uses the last duplicate
+    /// flag, so an explicit entry overrides a host default.
     #[arg(long = "browser-arg", value_name = "FLAG", help_heading = "Browser")]
     pub browser_args: Vec<String>,
-    /// Explicit upstream proxy URL. The host never inherits
-    /// `HTTP_PROXY`/`HTTPS_PROXY` from the environment — this is the
-    /// only way to route browser traffic. Example:
-    /// `http://user:pass@proxy.local:8080` or `socks5://10.0.0.5:1080`.
+    /// Explicit upstream browser proxy URL.
+    ///
+    /// The host never inherits ambient `HTTP_PROXY`/`HTTPS_PROXY`; this is the
+    /// only proxy route. For example, `http://user:pass@proxy.local:8080` or
+    /// `socks5://10.0.0.5:1080`.
     #[arg(long = "proxy-url", help_heading = "Browser")]
     pub proxy: Option<String>,
     /// Enable /recent-requests with a bounded ring of N entries. 0 = off.

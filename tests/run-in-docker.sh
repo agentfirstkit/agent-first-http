@@ -3,7 +3,7 @@
 #
 # All cargo invocations for this spore go through this script so the host never
 # needs Rust system deps, chromium, or chromiumoxide native libraries installed.
-# Source is bind-mounted into /work, and the cargo registry + build target dirs
+# Source is bind-mounted into /workspace, and the cargo registry + build target dirs
 # live in named volumes (afhttp-cargo-home, afhttp-cargo-target) so successive
 # runs share compilation caches.
 #
@@ -22,7 +22,6 @@ export DOCKER_BUILDKIT=1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPORE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-SPORES_DIR="$(cd "$SPORE_DIR/.." && pwd)"
 IMAGE_TAG="${AFHTTP_DOCKER_IMAGE:-afhttp-test:local}"
 
 if ! command -v docker >/dev/null 2>&1; then
@@ -64,11 +63,16 @@ DOCKER_FLAGS+=(-e CARGO_HOME=/cargo-home -e CARGO_TARGET_DIR=/cargo-target)
 if [ -n "${AFHTTP_DOCKER_USER:-}" ]; then
   DOCKER_FLAGS+=(--user "$AFHTTP_DOCKER_USER")
 fi
+AFDATA_MOUNT=()
+if [ -d "$SPORE_DIR/../agent-first-data" ]; then
+  AFDATA_MOUNT=(-v "$SPORE_DIR/../agent-first-data:/agent-first-data")
+fi
 
 exec docker run "${DOCKER_FLAGS[@]}" \
-  -v "$SPORES_DIR:/spores" \
+  -v "$SPORE_DIR:/workspace" \
+  "${AFDATA_MOUNT[@]}" \
   -v afhttp-cargo-home:/cargo-home \
   -v afhttp-cargo-target:/cargo-target \
-  -w /spores/agent-first-http \
+  -w /workspace \
   "$IMAGE_TAG" \
   "$@"

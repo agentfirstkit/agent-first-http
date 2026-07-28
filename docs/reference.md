@@ -2,7 +2,12 @@
 
 > Reflects the v0.6.0 implementation. [architecture.md](architecture.md) is the canonical contract; this file documents the on-wire JSON shapes the CLI and SDK actually emit. Coverage of the ten artifact tokens and 11 CLI commands matches `src/shared/`, `src/sdk/`, and `src/host/`.
 
-All command outputs are AFDATA protocol-v1 JSON events on stdout unless otherwise stated. Successes are `{"kind":"result","result":...,"trace":{}}`; artifact files are referenced by absolute `*_file` paths inside `result`. Failures are `{"kind":"error","error":...,"trace":{}}`.
+All command outputs are AFDATA protocol-v1 JSON events. With the default
+`--output-to split`, successes go to stdout and failures go to stderr;
+`--output-to stdout|stderr` selects one ordered event stream. Successes are
+`{"kind":"result","result":...,"trace":{}}`; artifact files are referenced by
+absolute `*_file` paths inside `result`. Failures are
+`{"kind":"error","error":...,"trace":{}}`.
 
 Every failure `error` payload carries the standard fields below. `afhttp fetch`
 execution failures also include `trace`; parse/configuration failures from
@@ -113,7 +118,7 @@ reaches the target, the result carries the usual artifacts and no `next_action`.
 | Field | Description |
 | --- | --- |
 | `kind` | Currently `"human_takeover"`. |
-| `takeover_url` | Complete short-lived takeover display URL with `handoff=...` for a human to open in a local browser. |
+| `takeover_url_secret` | Complete short-lived takeover display capability URL with `handoff_secret=...` for a human to open in a local browser. It is intentionally revealed only in explicit takeover/panel results. |
 | `takeover_url_expires_at_rfc3339` | Expiry time for the handoff URL. Default TTL is 900 seconds. |
 | `takeover_url_ttl_s` | Handoff TTL in seconds. |
 | `takeover_url_scope` | Scope for the capability; currently `takeover`, valid only under `/takeover/*`. |
@@ -126,7 +131,7 @@ reaches the target, the result carries the usual artifacts and no `next_action`.
   "tab_id": "page-7",
   "next_action": {
     "kind": "human_takeover",
-    "takeover_url": "http://host.mesh.internal:9222/takeover/panel?handoff=…",
+    "takeover_url_secret": "http://host.mesh.internal:9222/takeover/panel?handoff_secret=…",
     "takeover_url_expires_at_rfc3339": "2026-06-11T08:15:00Z",
     "takeover_url_ttl_s": 900,
     "takeover_url_scope": "takeover",
@@ -206,20 +211,21 @@ Full-page PNG. Missing screenshots produce a warning, usually `backend_unsupport
 
 ### `console_file`
 
-JSON array of console/runtime events:
+JSON object with `schema_version: 2` and an `events` array:
 
 ```json
-[
-  {
-    "timestamp_ms": 123,
-    "level": "warning",
-    "type": "log",
-    "text": "deprecated API",
-    "url": "https://example.com/app.js",
-    "line": 10,
-    "column": 5
-  }
-]
+{
+  "schema_version": 2,
+  "events": [
+    {
+      "timestamp_epoch_ms": 123,
+      "level": "warn",
+      "text": "deprecated API",
+      "source_url": "https://example.com/app.js",
+      "line_number": 10
+    }
+  ]
+}
 ```
 
 ### `observation_file`
@@ -238,10 +244,10 @@ Top-level fields:
 | Field | Description |
 | --- | --- |
 | `schema_version` | Observation schema version. |
-| `url` | Page URL at capture time. |
+| `page_url` | Page URL at capture time. Credential-bearing URL components are redacted. |
 | `title` | Document title. |
 | `viewport` | Width, height, device scale factor. |
-| `frames` | Frame list with ids and urls. |
+| `frames` | Frame list with `frame_id` and `frame_url`. |
 | `nodes` | Interactive and meaningful visible accessibility/DOM nodes. |
 | `forms` | Mechanical form ownership and control refs. |
 | `focused_ref` | `ref` of focused node, if any. |
@@ -278,7 +284,7 @@ Deep network artifact. Top-level shape:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "main_request_id": "req-1",
   "entries": [],
   "summary": {
@@ -305,15 +311,22 @@ Each `entries[]` item may include:
 | `frame_id` / `loader_id` | CDP frame/loader ids when known. |
 | `resource_type` | `Document`, `XHR`, `Fetch`, `Script`, `Stylesheet`, `Image`, etc. |
 | `initiator` | CDP initiator type and stack when available. |
-| `request` | Method, URL, headers, post-data metadata, and timing. |
-| `response` | Status, status text, URL, headers, mime type, protocol, remote address, sizes, and timing. |
-| `cache` | Cache/service-worker flags. |
+| `request_url` | Request URL. URL userinfo and known secret query parameters are redacted by default. |
+| `method` | HTTP request method. |
+| `status` / `mime_type` | Response status and MIME type when a response was observed. |
+| `request_headers` / `response_headers` | Captured headers, with credential-bearing values redacted by default. |
+| `request_post_data_present` / `request_post_data_size_bytes` | Presence and size metadata; request bodies are not copied into the entry. |
+| `timing.start_monotonic_ms` / `timing.end_monotonic_ms` | Monotonic offsets for ordering and elapsed-time calculations. They are not wall-clock timestamps. |
 | `failure` | Failure text and cancellation status when the resource failed. |
 | `body_file` | Optional captured response body path under `network-bodies/`. |
-| `body_base64_file` | Optional captured binary body path when bytes are not UTF-8. |
-| `payload_hints` | Mechanical hints such as `json_valid`, `json_top_level_type`, `graphql_operation_name`, `graphql_operation_type`. |
+| `hints` | Mechanical payload hints such as JSON and GraphQL metadata. |
 
-Sensitive request/response headers are redacted by default in `network.json`: `cookie`, `authorization`, `proxy-authorization`, `set-cookie`, and token/secret-like header names. `--no-network-redact` disables this for trusted local debugging and may write raw tokens, cookies, and PII into `network.json`; `trace.sensitive_capture` records that opt-in.
+Sensitive request/response headers and credential-bearing URL components are
+redacted by default in `network.json`: cookies, authorization values,
+token/secret-like header names, URL userinfo, and known secret query
+parameters. `--no-network-redact` disables this for trusted local debugging and
+may write raw tokens, cookies, and PII into `network.json`;
+`trace.sensitive_capture` records that opt-in.
 
 Network body capture modes:
 

@@ -107,10 +107,10 @@ async fn takeover_handoff_url(base: &str, token: &str) -> String {
         .await
         .expect("handoff json");
     agent_first_data::validate_protocol_event(&body, true).expect("strict AFDATA event");
-    let url = body["result"]["takeover_url"]
+    let url = body["result"]["takeover_url_secret"]
         .as_str()
-        .expect("takeover_url");
-    assert!(url.contains("handoff="), "{body}");
+        .expect("takeover_url_secret");
+    assert!(url.contains("handoff_secret="), "{body}");
     assert!(
         body["result"]["takeover_url_ttl_s"]
             .as_u64()
@@ -180,7 +180,10 @@ async fn display_proxy_rewrites_paths_strips_auth_and_accepts_takeover_cookie() 
         location.contains("&max_video_resolution_x="),
         "missing quality params: {location}"
     );
-    assert!(!location.contains("handoff="), "handoff leaked: {location}");
+    assert!(
+        !location.contains("handoff_secret=") && !location.contains("handoff="),
+        "handoff capability leaked: {location}"
+    );
     let cookie = redirected
         .headers()
         .get(reqwest::header::SET_COOKIE)
@@ -208,11 +211,13 @@ async fn display_proxy_rewrites_paths_strips_auth_and_accepts_takeover_cookie() 
     let handoff = url::Url::parse(&takeover_url)
         .expect("parse takeover URL")
         .query_pairs()
-        .find(|(k, _)| k == "handoff")
+        .find(|(k, _)| k == "handoff_secret")
         .map(|(_, v)| v.into_owned())
         .expect("handoff query");
     let stripped_query = reqwest::Client::new()
-        .get(format!("{base}/takeover/panel/echo?handoff={handoff}&x=2"))
+        .get(format!(
+            "{base}/takeover/panel/echo?handoff_secret={handoff}&x=2"
+        ))
         .send()
         .await
         .expect("query auth")
@@ -242,11 +247,11 @@ async fn display_proxy_forwards_websocket_upgrades_behind_token() {
     let handoff = url::Url::parse(&takeover_url)
         .expect("parse takeover URL")
         .query_pairs()
-        .find(|(k, _)| k == "handoff")
+        .find(|(k, _)| k == "handoff_secret")
         .map(|(_, v)| v.into_owned())
         .expect("handoff query");
     let ws_url = base.replacen("http://", "ws://", 1).to_string()
-        + &format!("/takeover/panel/ws?handoff={handoff}");
+        + &format!("/takeover/panel/ws?handoff_secret={handoff}");
 
     let (mut socket, _resp) = tokio_tungstenite::connect_async(&ws_url)
         .await

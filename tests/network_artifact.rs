@@ -96,7 +96,12 @@ async fn network_artifact_captures_multiple_entries() {
     // Document entry
     let doc = entries
         .iter()
-        .find(|e| e["url"].as_str().unwrap_or("").ends_with("/xhr.html"))
+        .find(|e| {
+            e["request_url"]
+                .as_str()
+                .unwrap_or("")
+                .ends_with("/xhr.html")
+        })
         .expect("document entry present");
     assert_eq!(doc["status"], 200);
     let doc_mime = doc["mime_type"].as_str().unwrap_or("");
@@ -105,7 +110,12 @@ async fn network_artifact_captures_multiple_entries() {
     // XHR entry
     let xhr = entries
         .iter()
-        .find(|e| e["url"].as_str().unwrap_or("").ends_with("/data.json"))
+        .find(|e| {
+            e["request_url"]
+                .as_str()
+                .unwrap_or("")
+                .ends_with("/data.json")
+        })
         .expect("data.json entry present");
     let xhr_type = xhr["resource_type"].as_str().unwrap_or("");
     assert!(
@@ -185,7 +195,12 @@ async fn network_bodies_xhr_captures_xhr_payload_only() {
     // Exactly one body file should exist: the data.json XHR.
     let xhr = entries
         .iter()
-        .find(|e| e["url"].as_str().unwrap_or("").ends_with("/data.json"))
+        .find(|e| {
+            e["request_url"]
+                .as_str()
+                .unwrap_or("")
+                .ends_with("/data.json")
+        })
         .expect("xhr entry");
     let body_file = xhr["body_file"]
         .as_str()
@@ -199,7 +214,12 @@ async fn network_bodies_xhr_captures_xhr_payload_only() {
     // Document should NOT have a body_file under xhr mode.
     let doc = entries
         .iter()
-        .find(|e| e["url"].as_str().unwrap_or("").ends_with("/xhr.html"))
+        .find(|e| {
+            e["request_url"]
+                .as_str()
+                .unwrap_or("")
+                .ends_with("/xhr.html")
+        })
         .expect("doc entry");
     assert!(
         doc["body_file"].is_null() || doc.get("body_file").is_none(),
@@ -232,7 +252,12 @@ async fn network_bodies_all_captures_document_too() {
     let entries = log["entries"].as_array().expect("entries array");
     let doc = entries
         .iter()
-        .find(|e| e["url"].as_str().unwrap_or("").ends_with("/xhr.html"))
+        .find(|e| {
+            e["request_url"]
+                .as_str()
+                .unwrap_or("")
+                .ends_with("/xhr.html")
+        })
         .expect("doc entry");
     let body_file = doc["body_file"]
         .as_str()
@@ -299,7 +324,7 @@ async fn console_artifact_captures_log_and_exception() {
 
     let console_file = result.console_file.as_ref().expect("console_file");
     let log = read_log(console_file);
-    assert_eq!(log["schema_version"], 1);
+    assert_eq!(log["schema_version"], 2);
     let events = log["events"].as_array().expect("events");
     let mut saw_log = false;
     let mut saw_exception = false;

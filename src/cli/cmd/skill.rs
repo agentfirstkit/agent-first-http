@@ -65,6 +65,7 @@ pub struct Args {
 }
 
 #[derive(Subcommand, Debug)]
+#[command(disable_help_subcommand = true)]
 pub enum SkillSub {
     /// Show whether the skill is installed, valid, and up to date.
     Status(TargetArgs),

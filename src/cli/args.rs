@@ -14,8 +14,21 @@ pub const DISPLAY_NAME: &str = env!("DISPLAY_NAME");
     version,
     about = env!("CARGO_PKG_DESCRIPTION"),
     long_about = concat!(env!("DISPLAY_NAME"), " - ", env!("CARGO_PKG_DESCRIPTION")),
+    disable_help_subcommand = true,
 )]
 pub struct Cli {
+    /// Where protocol events go: split (default), stdout, or stderr.
+    ///
+    /// `split` sends successful results to stdout and diagnostics/errors to
+    /// stderr. `stdout` and `stderr` keep every event on one ordered stream.
+    #[arg(
+        long = "output-to",
+        global = true,
+        default_value = "split",
+        value_parser = ["split", "stdout", "stderr"]
+    )]
+    pub output_to: String,
+
     /// Redirect stdout bytes to this file.
     #[arg(long = "stdout-file", value_name = "PATH", global = true)]
     pub stdout_file: Option<String>,
@@ -29,8 +42,15 @@ pub struct Cli {
 }
 
 #[derive(Subcommand, Debug)]
+#[command(disable_help_subcommand = true)]
 pub enum Command {
     /// Fetch a URL.
+    #[command(
+        long_about = "Use `--takeover` to keep a persistent tab open when a captcha, login, or \
+                      2FA wall needs a human. The result returns the short-lived takeover URL in \
+                      `next_action.takeover_url_secret` together with a command that re-fetches \
+                      the same tab."
+    )]
     Fetch(Box<crate::cli::cmd::fetch::Args>),
     /// Run the browser host.
     Host(crate::cli::cmd::host::Args),
@@ -61,24 +81,26 @@ pub struct Parsed {
 pub fn parse() -> Result<Parsed, Error> {
     let cli = Cli::try_parse().map_err(|e| {
         use clap::error::ErrorKind;
-        // `--version` and per-subcommand `--help` arrive here as clap "errors";
-        // render them to stdout and exit success rather than turning them into
-        // an invalid_argument envelope. (Top-level `--help --output ...`
-        // are handled earlier in `cli::run`.)
-        if matches!(
-            e.kind(),
-            ErrorKind::DisplayHelp
-                | ErrorKind::DisplayVersion
-                | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
-        ) {
+        // Lifecycle fallback only: the afdata pre-handler normally consumes
+        // every supported version/help request before clap runs.
+        if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
             let _ = e.print();
             std::process::exit(0);
+        }
+        if matches!(
+            e.kind(),
+            ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand | ErrorKind::MissingSubcommand
+        ) {
+            return Error::new(
+                ErrorCode::InvalidArgument,
+                "a command is required; try: afhttp --help",
+            );
         }
         // clap's error type already includes usage; surface as
         // invalid_argument so machine consumers can branch.
         Error::new(ErrorCode::InvalidArgument, e.to_string())
     })?;
-    let _stream_redirect_args = (&cli.stdout_file, &cli.stderr_file);
+    let _stream_redirect_args = (&cli.stdout_file, &cli.stderr_file, &cli.output_to);
     Ok(Parsed {
         command: cli.command,
     })

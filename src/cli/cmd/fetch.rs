@@ -48,16 +48,20 @@ impl std::fmt::Display for NetworkBodiesArg {
 pub struct Args {
     /// URL to fetch.
     pub url: String,
-    /// CDP endpoint of a running host. Omit to spawn an inline ephemeral host
-    /// for ordinary browser fetches; with --takeover, omission discovers the
-    /// standard local `afhttp-host`. Falls back to `AFHTTP_ENDPOINT_URL`.
+    /// CDP endpoint of a running host.
+    ///
+    /// Omit to spawn an inline ephemeral host for ordinary browser fetches;
+    /// with --takeover, omission discovers the standard local `afhttp-host`.
+    /// Falls back to `AFHTTP_ENDPOINT_URL`.
     #[arg(
         long = "endpoint-url",
         env = "AFHTTP_ENDPOINT_URL",
         help_heading = "Connection"
     )]
     pub endpoint: Option<String>,
-    /// Bearer token, if the host was started with `--token-secret`.
+    /// Bearer token for a protected host.
+    ///
+    /// Use when the host was started with `--token-secret`.
     /// Falls back to `AFHTTP_TOKEN_SECRET`.
     #[arg(
         long = "token-secret",
@@ -65,25 +69,32 @@ pub struct Args {
         help_heading = "Connection"
     )]
     pub token: Option<String>,
-    /// Browser backend for the inline host. Ignored when --endpoint-url is set
-    /// (the host owns its browser).
+    /// Browser backend for the inline host.
+    ///
+    /// Ignored when --endpoint-url is set because the host owns its browser.
     #[arg(long, default_value = "auto", help_heading = "Inline host")]
     pub browser: BrowserArg,
-    /// Browser binary path for the inline host, for when auto-discovery can't
-    /// find one. Ignored when --endpoint-url is set.
+    /// Browser binary path for the inline host.
+    ///
+    /// Use when auto-discovery cannot find one. Ignored when --endpoint-url is
+    /// set.
     #[arg(
         long = "browser-bin",
         value_name = "PATH",
         help_heading = "Inline host"
     )]
     pub browser_bin: Option<PathBuf>,
-    /// Render strategy: none (HTTP fast path, no browser), auto (HTTP first,
-    /// escalate to the browser on failure), or always (browser only).
+    /// Render strategy: none, auto, or always.
+    ///
+    /// `none` uses the HTTP fast path without a browser, `auto` starts with
+    /// HTTP and escalates on failure, and `always` uses the browser only.
     #[arg(long, default_value = "auto", help_heading = "Rendering")]
     pub render: RenderArg,
-    /// Tab target: "new" allocates a temporary target and closes it after
-    /// fetch; a CDP target id reuses that target and leaves it open (the same
-    /// id `afhttp cdp`/`upload`/`tabs` accept).
+    /// Browser tab target: new or an existing CDP target ID.
+    ///
+    /// `new` allocates a temporary target and closes it after fetch; an ID
+    /// reuses that target and leaves it open (the same ID accepted by
+    /// `afhttp cdp`, `upload`, and `tabs`).
     #[arg(
         long,
         default_value = "new",
@@ -91,27 +102,33 @@ pub struct Args {
         help_heading = "Session"
     )]
     pub tab: String,
-    /// Escalate to human takeover when a wall (captcha/login/2FA) is hit: keep
-    /// a persistent tab open and return its short-lived takeover URL in
+    /// Escalate captcha, login, or 2FA walls to human takeover.
+    ///
+    /// Keeps a persistent tab open and returns its short-lived takeover URL in
     /// `next_action`, plus a re-fetch command for the same tab once the human
     /// clears the wall. Uses `--endpoint-url` / `AFHTTP_ENDPOINT_URL` when set;
     /// otherwise discovers the standard local `afhttp-host` container (build
     /// one with `afhttp container install`).
     #[arg(long, help_heading = "Session")]
     pub takeover: bool,
-    /// Host profile to use for this fetch. Switches the host's active profile
-    /// if it differs (per-domain isolation), relaunching its browser. With
-    /// `--takeover` and no `--profile`, the profile defaults to the URL's
-    /// registrable domain (eTLD+1). Requires a host via `--endpoint-url`, or
-    /// the standard local takeover host discovered by `--takeover`.
+    /// Host profile to use for this fetch.
+    ///
+    /// Switches the host's active profile if it differs (per-domain
+    /// isolation), relaunching its browser. With `--takeover` and no
+    /// `--profile`, the profile defaults to the URL's registrable domain
+    /// (eTLD+1). Requires a host via `--endpoint-url`, or the standard local
+    /// takeover host discovered by `--takeover`.
     #[arg(long, help_heading = "Session")]
     pub profile: Option<String>,
-    /// Readiness signal before capture on the browser path:
-    /// auto | load | idle | selector:<css> | selector-visible:<css> | ms:<n>.
+    /// Readiness signal before browser capture.
+    ///
+    /// Values: auto | load | idle | selector:<css> |
+    /// selector-visible:<css> | ms:<n>.
     #[arg(long, default_value = "auto", help_heading = "Rendering")]
     pub wait: String,
-    /// Add a request header (repeatable). Format: `Name:value` (a space after
-    /// the colon is allowed).
+    /// Add a request header (repeatable).
+    ///
+    /// Format: `Name:value` (a space after the colon is allowed).
     #[arg(long = "header", value_name = "NAME:VALUE", help_heading = "Request")]
     pub headers: Vec<String>,
     /// Add a request cookie (repeatable). Format: `name=value`.
@@ -120,35 +137,42 @@ pub struct Args {
     /// Override the User-Agent header for this fetch.
     #[arg(long, help_heading = "Request")]
     pub user_agent: Option<String>,
-    /// JavaScript to evaluate after the wait condition resolves (repeatable).
+    /// Evaluate JavaScript after readiness (repeatable).
+    ///
     /// Runs in page context before artifacts are captured.
     #[arg(long, value_name = "JS", help_heading = "Rendering")]
     pub evaluate_after_wait: Vec<String>,
-    /// Artifacts to capture, comma-separated. Default: body on the HTTP fast
-    /// path; browser default artifacts when rendering is used. `content` is the
-    /// agent-oriented composed page view (content.md); `content_json` its
-    /// structured form with link/action candidates. `storage` is opt-in
-    /// (sensitive: localStorage/IndexedDB).
+    /// Artifacts to capture, comma-separated.
+    ///
+    /// Defaults to body on the HTTP fast path and browser-default artifacts
+    /// when rendering. `content` is the agent-oriented composed page view
+    /// (content.md); `content_json` is its structured form with link/action
+    /// candidates. `storage` is opt-in and sensitive (localStorage/IndexedDB).
     #[arg(long, value_delimiter = ',', help_heading = "Rendering")]
     pub want: Vec<String>,
     /// HTTP method. Common values: POST, PUT, PATCH, DELETE.
     #[arg(long, default_value = "GET", help_heading = "Request")]
     pub method: String,
-    /// Request body as a string. Prefix with `@` to read from a file path
-    /// (e.g. `--data @payload.json`). Mutually exclusive with `--form`.
+    /// Request body as a string or `@FILE`.
+    ///
+    /// Prefix with `@` to read from a file path (for example,
+    /// `--data @payload.json`). Mutually exclusive with `--form`.
     #[arg(long, value_name = "STRING|@FILE", help_heading = "Request")]
     pub data: Option<String>,
-    /// Add a form field (repeatable). Sends body as
-    /// `application/x-www-form-urlencoded`. Mutually exclusive with `--data`.
-    /// Format: `name=value`.
+    /// Add a URL-encoded form field (repeatable).
+    ///
+    /// Sends `application/x-www-form-urlencoded`, uses `name=value`, and is
+    /// mutually exclusive with `--data`.
     #[arg(long = "form", value_name = "NAME=VALUE", help_heading = "Request")]
     pub form: Vec<String>,
-    /// Capture response bodies for network requests: off, xhr (XHR/fetch
-    /// only), or all.
+    /// Capture network response bodies: off, xhr, or all.
+    ///
+    /// `xhr` captures XHR/fetch only.
     #[arg(long, default_value_t = NetworkBodiesArg::Off, help_heading = "Network capture")]
     pub network_bodies: NetworkBodiesArg,
-    /// Per-body cap for each captured network sub-request body, in bytes (see
-    /// `--max-response-bytes` for the main HTTP-path response body).
+    /// Per-body byte cap for captured network sub-requests.
+    ///
+    /// See `--max-response-bytes` for the main HTTP-path response body.
     #[arg(long, default_value_t = DEFAULT_NETWORK_BODY_MAX_BYTES, help_heading = "Network capture")]
     pub network_body_max_bytes: u64,
     /// Network quiet window used by --wait auto, in milliseconds.
@@ -160,64 +184,69 @@ pub struct Args {
     /// Low visible-text byte threshold for --wait auto quality warnings only.
     #[arg(long, default_value_t = 32, help_heading = "Readiness tuning")]
     pub readiness_min_text_bytes: u64,
-    /// Disable redaction of sensitive values in network.json (redacted by
-    /// default). Writes raw Authorization/Cookie headers and token-bearing
-    /// query params to the artifact — only for trusted local debugging.
+    /// Disable sensitive-value redaction in network.json.
+    ///
+    /// Writes raw Authorization/Cookie headers and token-bearing query
+    /// parameters to the artifact. Use only for trusted local debugging.
     #[arg(long, help_heading = "Network capture")]
     pub no_network_redact: bool,
-    /// Directory to write artifacts into. Defaults to `afhttp-out` under the
-    /// system temporary directory. Files persist there for inspection.
+    /// Directory in which to write artifacts.
+    ///
+    /// Defaults to `afhttp-out` under the system temporary directory. Files
+    /// persist there for inspection.
     #[arg(long, help_heading = "Output")]
     pub out: Option<PathBuf>,
-    /// Override the cookie-jar path. The default — derived from the host's
-    /// `GET /profile` — places the jar at `<profile-dir>/cookies.jar.json`.
-    /// This override is rejected with `invalid_argument` if it does not
-    /// match the host's profile path; the flag exists for tests and
-    /// forensic tooling, not production sessions. Honors
-    /// `AFHTTP_COOKIE_JAR` when omitted (same validation applies).
+    /// Override the profile cookie-jar path.
+    ///
+    /// The default, derived from the host's `GET /profile`, is
+    /// `<profile-dir>/cookies.jar.json`. A mismatch with the host profile is
+    /// rejected with `invalid_argument`; this flag is for tests and forensic
+    /// tooling, not production sessions. Honors `AFHTTP_COOKIE_JAR` when
+    /// omitted (same validation applies).
     #[arg(long, help_heading = "Cookies")]
     pub cookie_jar: Option<PathBuf>,
-    /// Opt out of cookie-jar persistence for this fetch. No cookies are
-    /// replayed from the jar and no `Set-Cookie` responses are merged
-    /// back.
+    /// Disable cookie-jar replay and persistence for this fetch.
+    ///
+    /// No cookies are replayed and no `Set-Cookie` responses are merged back.
     #[arg(long, help_heading = "Cookies")]
     pub no_cookie_jar: bool,
-    /// Upper bound on the browser-path wait for the main document network
-    /// event, in milliseconds. Raise for slow networks or low-end machines.
+    /// Maximum wait for the browser's main-document event, in milliseconds.
+    ///
+    /// Raise for slow networks or low-end machines.
     #[arg(long, default_value_t = 500, help_heading = "Readiness tuning")]
     pub observe_main_wait_ms: u64,
-    /// Upper bound on the main HTTP-path response body, in bytes (see
-    /// `--network-body-max-bytes` for captured network sub-request bodies).
-    /// Default 1 GiB (`1073741824`). `0` disables the cap entirely. When the
-    /// cap is hit, the fetch returns successfully with a
-    /// `network_body_truncated` warning and the prefix bytes that
-    /// were collected.
+    /// Maximum main HTTP-path response body size in bytes.
+    ///
+    /// See `--network-body-max-bytes` for captured sub-requests. The default is
+    /// 1 GiB (`1073741824`); `0` disables the cap. Hitting the cap returns the
+    /// collected prefix successfully with a `network_body_truncated` warning.
     #[arg(long, default_value_t = 1_073_741_824, help_heading = "HTTP transport")]
     pub max_response_bytes: u64,
-    /// Number of additional attempts after the first. Retries fire
-    /// only when the error has `retryable: true` (e.g.
-    /// `host_unreachable`, `cdp_timeout`); non-retryable failures
-    /// (`tls_error`, `wait_selector_unmatched`, etc.) short-circuit.
-    /// Default 0 = single attempt.
+    /// Number of retry attempts after the first.
+    ///
+    /// Retries run only for `retryable: true` errors such as
+    /// `host_unreachable` or `cdp_timeout`; non-retryable failures such as
+    /// `tls_error` short-circuit. The default `0` means one total attempt.
     #[arg(long, default_value_t = 0, help_heading = "Retry")]
     pub retry: u32,
     /// Fixed delay between retries, in milliseconds.
     #[arg(long, default_value_t = 250, help_heading = "Retry")]
     pub backoff_ms: u64,
-    /// Per-fetch upstream HTTP/HTTPS proxy for the HTTP fast path.
-    /// The SDK never honors `HTTP_PROXY` from the environment; this
-    /// flag is the only way to route an HTTP-path fetch through one.
-    /// Format: `http://user:pass@host:port` or `socks5://host:port`.
+    /// Upstream proxy for this fetch's HTTP fast path.
+    ///
+    /// The SDK never honors ambient `HTTP_PROXY`; this flag is the only proxy
+    /// route. Use `http://user:pass@host:port` or `socks5://host:port`.
     #[arg(long = "proxy-url", help_heading = "HTTP transport")]
     pub proxy: Option<String>,
-    /// Path to a PEM file containing extra root CAs to trust for
-    /// this fetch's HTTP path. Useful for self-signed staging or
-    /// corporate MITM CAs.
+    /// PEM file with extra root CAs for the HTTP path.
+    ///
+    /// Useful for self-signed staging or corporate MITM CAs.
     #[arg(long, help_heading = "HTTP transport")]
     pub ca_cert: Option<PathBuf>,
-    /// Disable TLS certificate verification for this fetch's HTTP
-    /// path. Dangerous; leaves the connection open to MITM. Use only
-    /// against known-self-signed environments.
+    /// Disable TLS certificate verification on the HTTP path.
+    ///
+    /// Dangerous: leaves the connection open to MITM. Use only against a
+    /// known self-signed environment.
     #[arg(long, help_heading = "HTTP transport")]
     pub tls_insecure: bool,
     /// Overall fetch timeout, in milliseconds. Applies to both the HTTP fast
@@ -228,13 +257,16 @@ pub struct Args {
         help_heading = "HTTP transport"
     )]
     pub timeout_ms: u64,
-    /// Capture WebSocket frame payloads to network-bodies/<id>.frames.jsonl.
-    /// Frames may carry bearer tokens, session IDs, and message content —
-    /// treat the artifact as sensitive.
+    /// Capture WebSocket frame payloads.
+    ///
+    /// Writes network-bodies/<id>.frames.jsonl. Frames may carry bearer
+    /// tokens, session IDs, and message content; treat it as sensitive.
     #[arg(long, help_heading = "Network capture")]
     pub capture_ws: bool,
-    /// Capture SSE event payloads to network-bodies/<id>.frames.jsonl. Events
-    /// may carry PII; treat the artifact as sensitive.
+    /// Capture SSE event payloads.
+    ///
+    /// Writes network-bodies/<id>.frames.jsonl. Events may carry PII; treat it
+    /// as sensitive.
     #[arg(long, help_heading = "Network capture")]
     pub capture_sse: bool,
 }
@@ -243,9 +275,7 @@ pub async fn run(args: Args) -> Result<(), Error> {
     match run_inner(args).await {
         Ok(()) => Ok(()),
         Err(FetchRunError::Plain(err)) => {
-            let stdout = std::io::stdout();
-            let mut handle = stdout.lock();
-            let _ = crate::shared::afdata::emit_error(&mut handle, &err);
+            let _ = crate::shared::afdata::emit_process_error(&err);
             Err(err)
         }
         Err(FetchRunError::Emitted(err)) => Err(err),
@@ -389,7 +419,7 @@ async fn run_inner(mut args: Args) -> Result<(), FetchRunError> {
                     .takeover_handoff(None, tab_id.as_deref())
                     .await?;
                 result.attach_takeover_with_context(
-                    handoff.takeover_url,
+                    handoff.takeover_url_secret,
                     Some(handoff.takeover_url_expires_at_rfc3339),
                     Some(handoff.takeover_url_ttl_s),
                     Some(handoff.takeover_url_scope),
@@ -397,7 +427,11 @@ async fn run_inner(mut args: Args) -> Result<(), FetchRunError> {
                     explicit_profile.as_deref(),
                 );
             }
-            Ok(output::emit("fetch", &result)?)
+            if takeover {
+                Ok(output::emit_revealing_takeover("fetch", &result)?)
+            } else {
+                Ok(output::emit("fetch", &result)?)
+            }
         }
         Err(err) => {
             let trace = serde_json::to_value(&err.trace).map_err(|e| {
@@ -407,10 +441,7 @@ async fn run_inner(mut args: Args) -> Result<(), FetchRunError> {
                 )
             })?;
             let err = err.into_error();
-            let stdout = std::io::stdout();
-            let mut handle = stdout.lock();
-            crate::shared::afdata::emit_error_with(
-                &mut handle,
+            crate::shared::afdata::emit_process_error_with(
                 err.error_code.as_str(),
                 &err.detail,
                 serde_json::json!({"retryable": err.retryable}),

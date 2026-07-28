@@ -71,7 +71,9 @@ async fn subscribe_loop(ws_url: String, ring: RecentRequests) {
                 let record = serde_json::json!({
                     "type": "response",
                     "request_id": ev.params.get("requestId").and_then(|v| v.as_str()).unwrap_or(""),
-                    "url": ev.params.pointer("/response/url").and_then(|v| v.as_str()).unwrap_or(""),
+                    "response_url": crate::shared::redact::redact_url(
+                        ev.params.pointer("/response/url").and_then(|v| v.as_str()).unwrap_or("")
+                    ),
                     "status": ev.params.pointer("/response/status").and_then(|v| v.as_u64()).unwrap_or(0),
                     "mime_type": ev.params.pointer("/response/mimeType").and_then(|v| v.as_str()).unwrap_or(""),
                     "resource_type": ev.params.get("type").and_then(|v| v.as_str()).unwrap_or(""),
@@ -82,7 +84,9 @@ async fn subscribe_loop(ws_url: String, ring: RecentRequests) {
                 let record = serde_json::json!({
                     "type": "request",
                     "request_id": ev.params.get("requestId").and_then(|v| v.as_str()).unwrap_or(""),
-                    "url": ev.params.pointer("/request/url").and_then(|v| v.as_str()).unwrap_or(""),
+                    "request_url": crate::shared::redact::redact_url(
+                        ev.params.pointer("/request/url").and_then(|v| v.as_str()).unwrap_or("")
+                    ),
                     "method": ev.params.pointer("/request/method").and_then(|v| v.as_str()).unwrap_or("GET"),
                     "resource_type": ev.params.get("type").and_then(|v| v.as_str()).unwrap_or(""),
                 });

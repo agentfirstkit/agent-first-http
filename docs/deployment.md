@@ -119,12 +119,11 @@ container builder start --cpus 4 --memory 8g
 After that, from-source builds and runs fine under Apple `container`. (The prebuilt
 download path never compiles, so it is unaffected and needs no resizing.)
 
-Or drive the runtime CLI directly (Apple's `container` is docker-shaped, so the
-same Dockerfile builds under it with `--platform linux/arm64`):
+Or, from the repository root, drive the runtime CLI directly (Apple's
+`container` is docker-shaped, so the same Dockerfile builds under it with
+`--platform linux/arm64`):
 
 ```bash
-cd spores/agent-first-http
-
 # Build the host image (chromium only; build context is the spore root):
 docker build -t afhttp-host -f container/docker/Dockerfile .
 
@@ -212,7 +211,7 @@ endpoint is supplied, switches the host to the URL-derived persistent site
 profile (e.g. `contabo.com`), opens or reuses a persistent tab, and navigates it.
 If the warmed profile already reaches the target, it returns the content.
 Otherwise it returns a `next_action` with `kind: "human_takeover"`, a complete
-short-lived `takeover_url` a human opens to drive the real display, expiry
+short-lived `takeover_url_secret` a human opens to drive the real display, expiry
 metadata, and a `recommended_command` that re-fetches the same `--tab` once the
 wall is cleared. For remote/custom hosts, pass
 `--endpoint-url ws://<host>:9222 --token-secret "<token-secret>"`; the token is

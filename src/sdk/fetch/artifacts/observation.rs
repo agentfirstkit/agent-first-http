@@ -13,10 +13,13 @@ use crate::sdk::fetch::writer;
 use crate::shared::artifacts::{Artifact, ArtifactPaths};
 use crate::shared::error::{Error, ErrorCode};
 
+pub const OBSERVATION_SCHEMA_VERSION: u32 = 2;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Observation {
     pub schema_version: u32,
-    pub url: String,
+    #[serde(alias = "url")]
+    pub page_url: String,
     pub title: String,
     pub viewport: Viewport,
     pub frames: Vec<Frame>,
@@ -39,7 +42,8 @@ pub struct Viewport {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Frame {
     pub frame_id: String,
-    pub url: String,
+    #[serde(alias = "url")]
+    pub frame_url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,7 +164,7 @@ pub async fn capture(
     let mut forms: Vec<Form> = Vec::new();
     let mut frames: Vec<Frame> = vec![Frame {
         frame_id: "main".into(),
-        url: url.to_string(),
+        frame_url: crate::shared::redact::redact_url(url),
     }];
     let mut focused_ref: Option<String> = None;
     let mut truncated: Option<ObservationTruncation> = None;
@@ -180,7 +184,13 @@ pub async fn capture(
             serde_json::from_value::<Vec<Frame>>(v.get("frames").cloned().unwrap_or_default())
             && !parsed_frames.is_empty()
         {
-            frames = parsed_frames;
+            frames = parsed_frames
+                .into_iter()
+                .map(|mut frame| {
+                    frame.frame_url = crate::shared::redact::redact_url(&frame.frame_url);
+                    frame
+                })
+                .collect();
         }
         focused_ref = v
             .get("focused_ref")
@@ -194,8 +204,8 @@ pub async fn capture(
     }
 
     Ok(Observation {
-        schema_version: 1,
-        url: url.to_string(),
+        schema_version: OBSERVATION_SCHEMA_VERSION,
+        page_url: crate::shared::redact::redact_url(url),
         title,
         viewport,
         frames,
@@ -233,8 +243,8 @@ mod tests {
     #[test]
     fn schema_round_trips() {
         let obs = Observation {
-            schema_version: 1,
-            url: "https://example.com/".into(),
+            schema_version: OBSERVATION_SCHEMA_VERSION,
+            page_url: "https://example.com/".into(),
             title: "Example".into(),
             viewport: Viewport {
                 width: 1280,
@@ -243,7 +253,7 @@ mod tests {
             },
             frames: vec![Frame {
                 frame_id: "main".into(),
-                url: "https://example.com/".into(),
+                frame_url: "https://example.com/".into(),
             }],
             nodes: vec![Node {
                 r#ref: "obs-1".into(),

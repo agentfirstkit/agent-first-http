@@ -45,7 +45,7 @@ fn stdout_file_redirects_version_output() {
 }
 
 #[test]
-fn stdout_file_redirects_cli_error_json() {
+fn stderr_file_redirects_cli_error_json_in_split_mode() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let stdout_file = tempdir.path().join("afhttp.stdout");
     let stderr_file = tempdir.path().join("afhttp.stderr");
@@ -64,8 +64,8 @@ fn stdout_file_redirects_cli_error_json() {
     assert!(output.stderr.is_empty(), "stderr = {:?}", output.stderr);
 
     let redirected_stdout = fs::read_to_string(&stdout_file).expect("read stdout file");
-    assert!(redirected_stdout.contains("\"kind\":\"error\""));
-    assert!(redirected_stdout.contains("--not-a-real-afhttp-flag"));
+    assert_eq!(redirected_stdout, "");
     let redirected_stderr = fs::read_to_string(&stderr_file).expect("read stderr file");
-    assert_eq!(redirected_stderr, "");
+    assert!(redirected_stderr.contains("\"kind\":\"error\""));
+    assert!(redirected_stderr.contains("--not-a-real-afhttp-flag"));
 }

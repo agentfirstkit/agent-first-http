@@ -16,6 +16,7 @@ pub struct Args {
 }
 
 #[derive(Subcommand, Debug)]
+#[command(disable_help_subcommand = true)]
 pub enum ProfileSub {
     /// List on-disk profiles under the profiles root.
     List(ListArgs),
@@ -44,7 +45,9 @@ pub struct ListArgs {
 pub struct InfoArgs {
     /// Profile name.
     pub name: String,
-    /// Profile backend scope (for example chromium, brave, camoufox).
+    /// Filter by browser backend.
+    ///
+    /// For example: chromium, brave, or camoufox.
     /// Required when the same profile name exists under multiple backends.
     #[arg(long)]
     pub backend: Option<String>,
@@ -57,7 +60,9 @@ pub struct InfoArgs {
 pub struct DeleteArgs {
     /// Profile name to delete.
     pub name: String,
-    /// Profile backend scope (for example chromium, brave, camoufox).
+    /// Filter by browser backend.
+    ///
+    /// For example: chromium, brave, or camoufox.
     /// Required when the same profile name exists under multiple backends.
     #[arg(long)]
     pub backend: Option<String>,

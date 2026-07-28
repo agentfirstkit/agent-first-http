@@ -177,7 +177,8 @@ pub struct NextAction {
     /// `afhttp fetch --takeover` once it has prepared a persistent tab on a
     /// takeover-ready host; `None` for a bare fetch that only detected the wall.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub takeover_url: Option<String>,
+    #[serde(alias = "takeover_url")]
+    pub takeover_url_secret: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub takeover_url_expires_at_rfc3339: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -198,7 +199,7 @@ impl NextAction {
             kind: NextActionKind::HumanTakeover,
             recommended_command: format!("afhttp fetch {} --takeover", shell_quote(url)),
             target_content_verified: false,
-            takeover_url: None,
+            takeover_url_secret: None,
             takeover_url_expires_at_rfc3339: None,
             takeover_url_ttl_s: None,
             takeover_url_scope: None,
@@ -341,15 +342,15 @@ impl FetchResult {
     /// attach the human takeover URL and recommend re-fetching the same
     /// persistent tab once the human clears the wall. No-op when no wall was
     /// detected (no `next_action`).
-    pub fn attach_takeover(&mut self, takeover_url: String) {
-        self.attach_takeover_with_context(takeover_url, None, None, None, None, None);
+    pub fn attach_takeover(&mut self, takeover_url_secret: String) {
+        self.attach_takeover_with_context(takeover_url_secret, None, None, None, None, None);
     }
 
     /// Like [`Self::attach_takeover`], but also makes the recommended command
     /// self-contained for non-default hosts and explicitly shared profiles.
     pub fn attach_takeover_with_context(
         &mut self,
-        takeover_url: String,
+        takeover_url_secret: String,
         expires_at_rfc3339: Option<String>,
         ttl_s: Option<u64>,
         scope: Option<String>,
@@ -359,7 +360,7 @@ impl FetchResult {
         let url = self.request_url.clone();
         let tab = self.tab_id.as_ref().map(|t| t.as_str().to_string());
         if let Some(next) = self.next_action.as_mut() {
-            next.takeover_url = Some(takeover_url);
+            next.takeover_url_secret = Some(takeover_url_secret);
             next.takeover_url_expires_at_rfc3339 = expires_at_rfc3339;
             next.takeover_url_ttl_s = ttl_s;
             next.takeover_url_scope = scope;
@@ -505,7 +506,7 @@ mod tests {
         result.tab_id = Some(TabId::new("page 7"));
         result.set_page_kind(PageKind::BotWallDetected);
         result.attach_takeover_with_context(
-            "http://127.0.0.1:9222/takeover/panel?handoff=h".into(),
+            "http://127.0.0.1:9222/takeover/panel?handoff_secret=h".into(),
             Some("2026-06-11T00:00:00Z".into()),
             Some(900),
             Some("takeover".into()),
@@ -519,8 +520,8 @@ mod tests {
             "afhttp fetch https://example.com/login --takeover --tab 'page 7' --endpoint-url ws://127.0.0.1:9222 --profile 'work profile'"
         );
         assert_eq!(
-            next.takeover_url.as_deref(),
-            Some("http://127.0.0.1:9222/takeover/panel?handoff=h")
+            next.takeover_url_secret.as_deref(),
+            Some("http://127.0.0.1:9222/takeover/panel?handoff_secret=h")
         );
         assert_eq!(next.takeover_url_ttl_s, Some(900));
         assert_eq!(next.takeover_url_scope.as_deref(), Some("takeover"));

@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::sdk::cdp::ws_client::Connection;
 use crate::sdk::fetch::writer;
@@ -13,11 +13,13 @@ use crate::shared::error::{Error, ErrorCode};
 
 /// Hard cap on the serialized JSON size. Values are truncated if exceeded.
 const SIZE_CAP_BYTES: usize = 256 * 1024;
+pub const STORAGE_SCHEMA_VERSION: u32 = 2;
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct StorageSnapshot {
     pub schema_version: u32,
-    pub url: String,
+    #[serde(alias = "url")]
+    pub page_url: String,
     pub local_storage: serde_json::Value,
     pub session_storage: serde_json::Value,
     /// IndexedDB database names only (no full dump — size and privacy risk).
@@ -26,7 +28,7 @@ pub struct StorageSnapshot {
     pub truncated: Option<TruncationNote>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct TruncationNote {
     pub reason: String,
     pub cap_bytes: usize,
@@ -70,8 +72,8 @@ pub async fn capture(
     .unwrap_or_default();
 
     let mut snapshot = StorageSnapshot {
-        schema_version: 1,
-        url: url.to_string(),
+        schema_version: STORAGE_SCHEMA_VERSION,
+        page_url: crate::shared::redact::redact_url(url),
         local_storage: ls,
         session_storage: ss,
         indexed_db_names: idb_names,

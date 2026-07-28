@@ -610,7 +610,7 @@ async fn cli_fetch_error_envelope_includes_trace() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let body: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+    let body: serde_json::Value = serde_json::from_slice(&output.stderr).expect("json");
     assert_eq!(body["kind"], "error");
     agent_first_data::validate_protocol_event(&body, true).expect("protocol event");
     assert!(
@@ -645,7 +645,7 @@ async fn cli_fetch_rejects_legacy_timeout_flag() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let body: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
+    let body: serde_json::Value = serde_json::from_slice(&output.stderr).expect("json");
     assert_eq!(body["kind"], "error");
     agent_first_data::validate_protocol_event(&body, true).expect("protocol event");
     assert_eq!(body["error"]["code"], "invalid_argument");

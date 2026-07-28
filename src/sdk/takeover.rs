@@ -15,7 +15,8 @@ struct TakeoverHandoffRequest<'a> {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TakeoverHandoffResponse {
-    pub takeover_url: String,
+    #[serde(alias = "takeover_url")]
+    pub takeover_url_secret: String,
     pub takeover_url_expires_at_rfc3339: String,
     pub takeover_url_ttl_s: u64,
     pub takeover_url_scope: String,
@@ -48,7 +49,7 @@ impl Client {
             )
         })?;
         if !status.is_success() {
-            if let Ok(err) = serde_json::from_slice::<Error>(&bytes) {
+            if let Ok(err) = crate::shared::afdata::decode_error(&bytes) {
                 return Err(err);
             }
             return Err(Error::new(
@@ -59,11 +60,6 @@ impl Client {
                 ),
             ));
         }
-        serde_json::from_slice::<TakeoverHandoffResponse>(&bytes).map_err(|e| {
-            Error::new(
-                ErrorCode::InternalError,
-                format!("takeover_handoff: decode response: {e}"),
-            )
-        })
+        crate::shared::afdata::decode_result(&bytes)
     }
 }

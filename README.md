@@ -120,8 +120,10 @@ afhttp fetch "$URL" --takeover
 
 If the warmed profile already reaches the target, `fetch --takeover` just returns
 the page. Otherwise it keeps a persistent tab open and returns a `next_action`
-with `kind: "human_takeover"`, a `takeover_url` for a human to open, and a
-`recommended_command` that re-fetches the same `--tab` once the wall is cleared.
+with `kind: "human_takeover"`, a `takeover_url_secret` for a human to open, and
+a `recommended_command` that re-fetches the same `--tab` once the wall is
+cleared. The capability URL is intentionally revealed only in this explicit
+takeover result; other `_secret` fields remain redacted.
 `fetch --takeover` needs a running host (auto-discovered locally, or supplied
 with `--endpoint-url` / `AFHTTP_ENDPOINT_URL`) and a browser render
 (`--render auto` or `always`); it does not auto-create containers.
@@ -148,7 +150,7 @@ Unsupported per-artifact operations return per-artifact warnings (`backend_unsup
 
 ## Human takeover: a person drives the same browser when a step needs it
 
-When a fetch hits a login, captcha, or 2FA wall, `afhttp fetch <url> --takeover` keeps a persistent tab open on a takeover-ready host and hands back a complete short-lived `takeover_url` a human opens to drive the *same* browser the agent is using, via real-display takeover backed by KasmVNC. Once the human is past the wall, the agent re-fetches the same tab to continue. Without `--profile`, takeover switches to a persistent profile derived from the URL's registrable domain. The worked example below shows the full `next_action` payload.
+When a fetch hits a login, captcha, or 2FA wall, `afhttp fetch <url> --takeover` keeps a persistent tab open on a takeover-ready host and hands back a complete short-lived `takeover_url_secret` a human opens to drive the *same* browser the agent is using, via real-display takeover backed by KasmVNC. Once the human is past the wall, the agent re-fetches the same tab to continue. Without `--profile`, takeover switches to a persistent profile derived from the URL's registrable domain. The worked example below shows the full `next_action` payload.
 
 ## Worked examples
 
@@ -247,7 +249,7 @@ If the warmed profile already reaches the target, `fetch --takeover` just return
   "code": "fetch",
   "next_action": {
     "kind": "human_takeover",
-    "takeover_url": "http://host.mesh.internal:9222/takeover/panel?handoff=…",
+    "takeover_url_secret": "http://host.mesh.internal:9222/takeover/panel?handoff_secret=…",
     "takeover_url_expires_at_rfc3339": "2026-06-11T08:15:00Z",
     "takeover_url_ttl_s": 900,
     "takeover_url_scope": "takeover",
@@ -256,7 +258,7 @@ If the warmed profile already reaches the target, `fetch --takeover` just return
 }
 ```
 
-A human opens the `takeover_url` in a local browser and drives the real display (Brave on KasmVNC). Once they are past the wall, the agent runs the `recommended_command` to re-fetch the same tab and continue. The agent can stay CDP-attached the whole time. `afhttp panel --endpoint-url …` prints the same display URL directly. See [docs/architecture.md §9](docs/architecture.md) for the risk-control honest assessment.
+A human opens the `takeover_url_secret` in a local browser and drives the real display (Brave on KasmVNC). Once they are past the wall, the agent runs the `recommended_command` to re-fetch the same tab and continue. The agent can stay CDP-attached the whole time. `afhttp panel --endpoint-url …` returns the same short-lived capability in `takeover_url_secret`. See [docs/architecture.md §9](docs/architecture.md) for the risk-control honest assessment.
 
 ### Manage persistent profiles
 

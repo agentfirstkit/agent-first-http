@@ -30,7 +30,7 @@ ARG AFHTTP_BIN_FROM=builder
 FROM rust:bookworm AS builder
 WORKDIR /src
 # Only the crate inputs — NOT .cargo/ (its dev path override to
-# ../agent-first-data/rust is absent here, so agent-first-data resolves from
+# ../agent-first-data is absent here, so agent-first-data resolves from
 # crates.io per Cargo.lock).
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src/ src/

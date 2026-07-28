@@ -19,6 +19,30 @@ pub const ALWAYS_REDACTED: &[&str] = &[
 /// `x-shared-secret`, etc.
 pub const REDACTED_SUFFIXES: &[&str] = &["-token", "-secret"];
 
+/// Legacy/common URL query parameter names that carry credentials but cannot
+/// be renamed by afhttp because they belong to third-party sites.
+///
+/// AFDATA already redacts `_secret` query names. This compatibility list is
+/// deliberately exact and is applied only while parsing a single URL.
+pub const URL_SECRET_NAMES: &[&str] = &[
+    "access_token",
+    "api_key",
+    "auth",
+    "authorization",
+    "code",
+    "handoff",
+    "handoff_secret",
+    "id_token",
+    "key",
+    "password",
+    "passwd",
+    "session",
+    "sessionid",
+    "sig",
+    "signature",
+    "token",
+];
+
 /// Returns true if `header_name` should be redacted under the default
 /// policy. Case-insensitive.
 #[must_use]
@@ -34,6 +58,64 @@ pub fn should_redact(header_name: &str) -> bool {
 
 /// Sentinel string written in place of redacted values.
 pub const REDACTED_VALUE: &str = "[redacted]";
+
+/// AFDATA redactor configured for third-party HTTP URL compatibility names.
+///
+/// Keep this URL-only: AFDATA `secret_names` also match ordinary structured
+/// field names, where names such as the protocol's `code` field are public.
+#[must_use]
+fn url_redactor() -> agent_first_data::Redactor {
+    agent_first_data::Redactor::new().secret_names(URL_SECRET_NAMES.iter().copied())
+}
+
+/// Redact credentials from one URL, including userinfo and common third-party
+/// query parameter names.
+#[must_use]
+pub fn redact_url(url: &str) -> String {
+    url_redactor().url(url)
+}
+
+/// Redact third-party credential parameters only inside `_url`/`_URL` fields.
+///
+/// AFDATA deliberately uses one exact-name list for both structured fields and
+/// URL query parameters. Since afhttp does not own third-party parameter names,
+/// it applies that compatibility list to URL values first, then lets the
+/// default AFDATA redactor handle `_secret` fields at serialization time.
+#[must_use]
+pub fn redact_url_fields(value: &serde_json::Value) -> serde_json::Value {
+    let mut value = value.clone();
+    redact_url_fields_in_place(&mut value);
+    value
+}
+
+/// Apply afhttp's URL compatibility policy followed by standard AFDATA value
+/// redaction.
+#[must_use]
+pub fn redact_value(value: &serde_json::Value) -> serde_json::Value {
+    agent_first_data::Redactor::new().value(&redact_url_fields(value))
+}
+
+fn redact_url_fields_in_place(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            for (name, value) in fields {
+                if (name.ends_with("_url") || name.ends_with("_URL"))
+                    && let serde_json::Value::String(url) = value
+                {
+                    *url = redact_url(url);
+                } else {
+                    redact_url_fields_in_place(value);
+                }
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                redact_url_fields_in_place(value);
+            }
+        }
+        _ => {}
+    }
+}
 
 /// Mask the password component of every `scheme://user:pass@host` userinfo
 /// found in arbitrary text, leaving the rest byte-for-byte intact.
@@ -97,6 +179,31 @@ mod tests {
         for h in ["Content-Type", "User-Agent", "Accept", "X-Trace-Id"] {
             assert!(!should_redact(h), "{h}");
         }
+    }
+
+    #[test]
+    fn url_redaction_covers_userinfo_and_legacy_query_names() {
+        assert_eq!(
+            redact_url("https://user:pass@example.test/path?token=abc&safe=ok&next_secret=hidden"),
+            "https://user:***@example.test/path?token=***&safe=ok&next_secret=***"
+        );
+    }
+
+    #[test]
+    fn url_compatibility_names_do_not_redact_ordinary_fields() {
+        let redacted = redact_value(&serde_json::json!({
+            "code": "fetch",
+            "token": "public field",
+            "request_url": "https://example.test/?code=otp&token=bearer&safe=ok",
+            "token_secret": "private"
+        }));
+        assert_eq!(redacted["code"], "fetch");
+        assert_eq!(redacted["token"], "public field");
+        assert_eq!(
+            redacted["request_url"],
+            "https://example.test/?code=***&token=***&safe=ok"
+        );
+        assert_eq!(redacted["token_secret"], "***");
     }
 
     #[test]
