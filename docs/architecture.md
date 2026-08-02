@@ -87,7 +87,7 @@ The CLI has 11 commands and no stdin protocol. The command set is: `host`,
 ### Common conventions
 
 These hold across every command (the per-flag reference is generated into
-[cli.md](cli.md) from `afhttp --help --recursive --output markdown`):
+[cli.md](cli.md) from `afhttp --docs`, which renders the CLI registry itself):
 
 - Flags are long-form only; flag names map to JSON fields with hyphens for
   underscores (`--browser-bin` ↔ `browser_bin`). Boolean flags are bare presence
@@ -103,9 +103,19 @@ These hold across every command (the per-flag reference is generated into
   flag is omitted; the explicit flag wins. Human takeover URLs never embed this
   long-lived token; they carry a short-lived `handoff_secret` capability
   instead.
-- Every command emits exactly one AFDATA protocol-v1 JSON event. With the
-  default `--output-to split`, success goes to stdout and failure goes to
-  stderr. `--output-to stdout|stderr` selects a unified ordered event stream.
+- Every command emits AFDATA protocol-v1 JSON events, and results are JSON
+  only — `--output` accepts no other format for a command result, though
+  `--help`/`--version` also render `plain` and `yaml`. With the default
+  `--output-to split`, success goes to stdout and failure goes to stderr;
+  `--output-to stdout|stderr` selects a unified ordered event stream. `afhttp
+  host` is the one command whose output is a stream rather than a single
+  terminal event, so it defaults to `--output-to stdout`.
+- The CLI is compiled from a closed `cli-spec-v1` registry. An invocation runs
+  only when it matches exactly one registered shape, so mixes that used to fail
+  at runtime — `--takeover` with `--render none`, `--data` with `--form`,
+  `container logs --follow` without `--raw`, `--takeover-provider kasmvnc` with
+  `--display headless` — are now rejected by the parser with
+  `cli_unregistered_combination` before any work starts.
 
 ### `afhttp host`
 
@@ -150,7 +160,7 @@ afhttp fetch <url>
   --cookie 'name=value[; Path=/; Domain=...; Secure; HttpOnly; SameSite=Lax]'
   --user-agent <string>
   --evaluate-after-wait <js>
-  --want body,rendered_html,text,content,content_json,screenshot,network,console,observation,storage
+  --want body|rendered_html|text|content|content_json|screenshot|network|console|observation|storage   (repeatable)
   --network-bodies off|xhr|all
   --network-body-max-bytes <n>
   --readiness-idle-ms <n>
@@ -392,7 +402,7 @@ which payload is important.
 
 ## 9. Takeover
 
-Human takeover lets a person drive the *same* browser the agent is using — for a manual login, 2FA, captcha, or any step the agent cannot complete on its own. The single takeover surface is **real-display takeover**: when `afhttp host` is launched with `--takeover-provider <provider>` (currently only `kasmvnc`), afhttp starts that display provider, runs the browser headful on its X display, and reverse-proxies the provider's web client through the authenticated listener at `/takeover/panel`. The container shipped by `afhttp container install` is takeover-ready by default (Brave + KasmVNC + an ephemeral initial profile + 2g `/dev/shm`).
+Human takeover lets a person drive the *same* browser the agent is using — for a manual login, 2FA, captcha, or any step the agent cannot complete on its own. The single takeover surface is **real-display takeover**: when `afhttp host` is launched with `--takeover-provider <provider>` (currently only `kasmvnc`), afhttp starts that display provider, runs the browser headful on its X display, and reverse-proxies the provider's web client through the authenticated listener at `/takeover/panel`. The container shipped by `afhttp container install` is takeover-ready by default (Brave + KasmVNC + an ephemeral initial profile + 2g `/dev/shm`). The takeover backend is not fixed to one vendor: `brave` and `chrome` both drive the display and both clear the same walls, so `--with chrome -- --browser chrome` is a choice of fingerprint and Shields behaviour rather than of bot-wall capability.
 
 The driver-side entry point is `afhttp fetch <url> --takeover` against such a host (see §5). It opens or reuses a persistent tab, and either returns the content directly (if the warmed profile already reaches the target) or hands back a `takeover_url_secret` and a `recommended_command` re-fetch for the same tab. The human opens the `takeover_url_secret` in a local browser and drives the real display; the agent re-fetches once the wall is cleared.
 
@@ -511,9 +521,14 @@ let local = Client::inline_ephemeral().await?;
 default  = ["sdk", "cli"]
 sdk      = []                                   # client-side; what library consumers want
 host     = ["dep:chromiumoxide", ...]           # browser-launch deps; only in the bin
-cli      = ["sdk", "host", "dep:clap",
-            "dep:agent-first-data"]             # the afhttp binary
+cli      = ["sdk", "host", "dep:psl",
+            "agent-first-data/skill-admin",
+            "agent-first-data/stream-redirect"] # the afhttp binary
 ```
+
+The CLI has no argument-parser dependency of its own: argv parsing, legal
+argument combinations, help, and `docs/cli.md` all come from the
+`agent-first-data` `cli-spec-v1` registry in `src/cli/spec.rs`.
 
 External consumers (e.g. the `fetch` service) depend on the crate with `default-features = false, features = ["sdk"]` and link only the SDK weight, not chromiumoxide or any browser-launch code.
 

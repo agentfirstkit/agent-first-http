@@ -8,7 +8,7 @@ use crate::host::listener::AppState;
 use crate::shared::error::Error;
 
 /// Parsed command-line arguments for `afhttp host`. The CLI layer in
-/// `cli::cmd::host` builds this struct from `clap`.
+/// `cli::cmd::host` builds this struct from a resolved CLI invocation.
 #[derive(Debug, Clone)]
 pub struct HostArgs {
     pub listen: String,

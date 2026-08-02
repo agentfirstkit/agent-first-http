@@ -133,6 +133,7 @@ pub(super) async fn http_only(
     let mut result = FetchResult::new(request_id, builder.url.clone(), deadline.snapshot());
     result.final_url = final_url;
     result.status = status;
+    result.content_type = content_type.clone();
 
     if builder.want.contains(&Artifact::Body) {
         let path = body_artifact::write(paths, content_type.as_deref(), &bytes).await?;

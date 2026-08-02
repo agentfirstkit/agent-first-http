@@ -1,158 +1,189 @@
-command Agent-First HTTP
-  arg output_to --output-to
-  arg stdout_file --stdout-file
-  arg stderr_file --stderr-file
-  command fetch
-    arg url
-    arg endpoint --endpoint-url
-    arg token --token-secret
-    arg browser --browser
-    arg browser_bin --browser-bin
-    arg render --render
-    arg tab --tab
-    arg takeover --takeover
-    arg profile --profile
-    arg wait --wait
-    arg headers --header
-    arg cookies --cookie
-    arg user_agent --user-agent
-    arg evaluate_after_wait --evaluate-after-wait
-    arg want --want
-    arg method --method
-    arg data --data
-    arg form --form
-    arg network_bodies --network-bodies
-    arg network_body_max_bytes --network-body-max-bytes
-    arg readiness_idle_ms --readiness-idle-ms
-    arg readiness_stable_ms --readiness-stable-ms
-    arg readiness_min_text_bytes --readiness-min-text-bytes
-    arg no_network_redact --no-network-redact
-    arg out --out
-    arg cookie_jar --cookie-jar
-    arg no_cookie_jar --no-cookie-jar
-    arg observe_main_wait_ms --observe-main-wait-ms
-    arg max_response_bytes --max-response-bytes
-    arg retry --retry
-    arg backoff_ms --backoff-ms
-    arg proxy --proxy-url
-    arg ca_cert --ca-cert
-    arg tls_insecure --tls-insecure
-    arg timeout_ms --timeout-ms
-    arg capture_ws --capture-ws
-    arg capture_sse --capture-sse
-  command host
-    arg listen --listen
-    arg profile --profile
-    arg display --display
-    arg takeover_provider --takeover-provider
-    arg takeover_quality_percent --takeover-quality-percent
-    arg browser --browser
-    arg browser_bin --browser-bin
-    arg token --token-secret
-    arg no_health --no-health
-    arg health_public --health-public
-    arg engine_envs --engine-env
-    arg browser_args --browser-arg
-    arg proxy --proxy-url
-    arg recent_requests_cap --recent-requests-cap
-  command upload
-    arg endpoint --endpoint-url
-    arg token --token-secret
-    arg tab --tab
-    arg selector --selector
-    arg file --file
-  command cdp
-    arg method
-    arg endpoint --endpoint-url
-    arg token --token-secret
-    arg tab --tab
-    arg params --params
-    arg wait --wait-event
-  command panel
-    arg endpoint --endpoint-url
-    arg token --token-secret
-  command health
-    arg endpoint --endpoint-url
-    arg token --token-secret
-  command capabilities
-    arg endpoint --endpoint-url
-    arg token --token-secret
-  command profile
-    command list
-      arg profile_root --profile-root
-    command info
-      arg name
-      arg backend --backend
-      arg profile_root --profile-root
-    command lock-status
-      arg name
-      arg backend --backend
-      arg profile_root --profile-root
-    command downloads
-      arg name
-      arg backend --backend
-      arg profile_root --profile-root
-    command delete
-      arg name
-      arg backend --backend
-      arg confirm --confirm
-      arg profile_root --profile-root
-    command prune
-      arg older_than --older-than
-      arg dry_run --dry-run
-      arg profile_root --profile-root
-    command cookies
-      arg name
-      arg backend --backend
-      arg profile_root --profile-root
-  command tabs
-    command list
-      arg endpoint --endpoint-url
-      arg token --token-secret
-    command close
-      arg tab --tab
-      arg endpoint --endpoint-url
-      arg token --token-secret
-  command skill
-    command status
-      arg agent --agent
-      arg scope --scope
-      arg skills_dir --skills-dir
-    command install
-      arg agent --agent
-      arg scope --scope
-      arg skills_dir --skills-dir
-      arg force --force
-    command uninstall
-      arg agent --agent
-      arg scope --scope
-      arg skills_dir --skills-dir
-      arg force --force
-  command container
-    command install
-      arg runtime --runtime
-      arg name --name
-      arg port --port
-      arg profile --profile
-      arg shm_size --shm-size
-      arg takeover_provider --takeover-provider
-      arg with --with
-      arg rebuild --rebuild
-      arg from_source --from-source
-      arg context --context
-      arg host_args
-      arg reveal_token_secret --reveal-token-secret
-    command uninstall
-      arg runtime --runtime
-      arg name --name
-      arg purge --purge
-    command status
-      arg runtime --runtime
-      arg name --name
-      arg port --port
-      arg reveal_token_secret --reveal-token-secret
-    command logs
-      arg runtime --runtime
-      arg name --name
-      arg follow --follow
-      arg raw --raw
+command afhttp
+command fetch
+  arg url <positional 0>
+  arg endpoint_url --endpoint-url
+  arg token_secret --token-secret
+  arg browser --browser <auto|chromium|chrome|chrome-headless-shell|fingerprint-chromium|edge|brave|lightpanda|camoufox> =auto
+  arg browser_bin --browser-bin
+  arg render --render <none|auto|always> =auto
+  arg tab --tab =new
+  arg takeover --takeover
+  arg profile --profile
+  arg wait --wait =auto
+  arg header --header ...
+  arg cookie --cookie ...
+  arg user_agent --user-agent
+  arg evaluate_after_wait --evaluate-after-wait ...
+  arg want --want <body|rendered_html|text|content|content_json|screenshot|network|console|observation|storage> ...
+  arg method --method =GET
+  arg data --data
+  arg form --form ...
+  arg network_bodies --network-bodies <off|xhr|all> =off
+  arg network_body_max_bytes --network-body-max-bytes =10485760
+  arg readiness_idle_ms --readiness-idle-ms =800
+  arg readiness_stable_ms --readiness-stable-ms =500
+  arg readiness_min_text_bytes --readiness-min-text-bytes =32
+  arg no_network_redact --no-network-redact
+  arg out --out
+  arg cookie_jar --cookie-jar
+  arg no_cookie_jar --no-cookie-jar
+  arg observe_main_wait_ms --observe-main-wait-ms =500
+  arg max_response_bytes --max-response-bytes =1073741824
+  arg retry --retry =0
+  arg backoff_ms --backoff-ms =250
+  arg proxy_url --proxy-url
+  arg ca_cert --ca-cert
+  arg tls_insecure --tls-insecure
+  arg timeout_ms --timeout-ms =30000
+  arg capture_ws --capture-ws
+  arg capture_sse --capture-sse
+  shape fetch -> fetch
+  shape fetch-data -> fetch
+  shape fetch-form -> fetch
+  shape fetch-takeover -> fetch
+  shape fetch-takeover-data -> fetch
+  shape fetch-takeover-form -> fetch
+command host
+  arg listen --listen
+  arg profile --profile =-
+  arg display --display <headless|headful>
+  arg takeover_provider --takeover-provider <off|kasmvnc> =off
+  arg takeover_quality_percent --takeover-quality-percent =100
+  arg browser --browser <auto|chromium|chrome|chrome-headless-shell|fingerprint-chromium|edge|brave|lightpanda|camoufox> =auto
+  arg browser_bin --browser-bin
+  arg token_secret --token-secret
+  arg no_health --no-health
+  arg health_public --health-public <off|minimal> =off
+  arg engine_env --engine-env ...
+  arg browser_arg --browser-arg ...
+  arg proxy_url --proxy-url
+  arg recent_requests_cap --recent-requests-cap =0
+  shape host -> host
+  shape host-takeover -> host
+command upload
+  arg endpoint_url --endpoint-url
+  arg token_secret --token-secret
+  arg tab --tab
+  arg selector --selector
+  arg file --file
+  shape upload -> upload
+command cdp
+  arg method <positional 0>
+  arg endpoint_url --endpoint-url
+  arg token_secret --token-secret
+  arg tab --tab
+  arg params --params
+  arg wait_event --wait-event
+  shape cdp -> cdp
+command panel
+  arg endpoint_url --endpoint-url
+  arg token_secret --token-secret
+  shape panel -> panel
+command health
+  arg endpoint_url --endpoint-url
+  arg token_secret --token-secret
+  shape health -> health
+command capabilities
+  arg endpoint_url --endpoint-url
+  arg token_secret --token-secret
+  shape capabilities -> capabilities
+command profile
+command profile list
+  arg profile_root --profile-root
+  shape profile-list -> profile_list
+command profile info
+  arg name <positional 0>
+  arg backend --backend
+  arg profile_root --profile-root
+  shape profile-info -> profile_info
+command profile lock-status
+  arg name <positional 0>
+  arg backend --backend
+  arg profile_root --profile-root
+  shape profile-lock-status -> profile_lock_status
+command profile downloads
+  arg name <positional 0>
+  arg backend --backend
+  arg profile_root --profile-root
+  shape profile-downloads -> profile_downloads
+command profile cookies
+  arg name <positional 0>
+  arg backend --backend
+  arg profile_root --profile-root
+  shape profile-cookies -> profile_cookies
+command profile delete
+  arg name <positional 0>
+  arg backend --backend
+  arg confirm --confirm
+  arg profile_root --profile-root
+  shape profile-delete -> profile_delete
+command profile prune
+  arg older_than --older-than
+  arg dry_run --dry-run
+  arg profile_root --profile-root
+  shape profile-prune -> profile_prune
+command tabs
+command tabs list
+  arg endpoint_url --endpoint-url
+  arg token_secret --token-secret
+  shape tabs-list -> tabs_list
+command tabs close
+  arg tab --tab
+  arg endpoint_url --endpoint-url
+  arg token_secret --token-secret
+  shape tabs-close -> tabs_close
+command skill
+command skill status
+  arg agent --agent <all|codex|claude-code|opencode|hermes> =all
+  arg scope --scope <personal|workspace> =personal
+  arg skills_dir --skills-dir
+  shape skill-status-every-agent -> skill_status
+  shape skill-status-one-agent -> skill_status
+command skill install
+  arg agent --agent <all|codex|claude-code|opencode|hermes> =all
+  arg scope --scope <personal|workspace> =personal
+  arg skills_dir --skills-dir
+  arg force --force
+  shape skill-install-every-agent -> skill_install
+  shape skill-install-one-agent -> skill_install
+command skill uninstall
+  arg agent --agent <all|codex|claude-code|opencode|hermes> =all
+  arg scope --scope <personal|workspace> =personal
+  arg skills_dir --skills-dir
+  arg force --force
+  shape skill-uninstall-every-agent -> skill_uninstall
+  shape skill-uninstall-one-agent -> skill_uninstall
+command container
+command container install
+  arg runtime --runtime <docker|podman|apple>
+  arg name --name =afhttp-host
+  arg port --port =9222
+  arg profile --profile
+  arg shm_size --shm-size
+  arg takeover_provider --takeover-provider <off|kasmvnc> =kasmvnc
+  arg with --with <chrome-headless-shell|lightpanda|fingerprint-chromium|camoufox|chrome|brave|kasmvnc> ...
+  arg rebuild --rebuild
+  arg from_source --from-source
+  arg context --context
+  arg reveal_token_secret --reveal-token-secret
+  arg host_args <positional 0> ...
+  shape container-install -> container_install
+  shape container-install-from-source -> container_install
+command container uninstall
+  arg runtime --runtime <docker|podman|apple>
+  arg name --name =afhttp-host
+  arg purge --purge
+  shape container-uninstall -> container_uninstall
+command container status
+  arg runtime --runtime <docker|podman|apple>
+  arg name --name =afhttp-host
+  arg port --port =9222
+  arg reveal_token_secret --reveal-token-secret
+  shape container-status -> container_status
+command container logs
+  arg runtime --runtime <docker|podman|apple>
+  arg name --name =afhttp-host
+  arg follow --follow
+  arg raw --raw
+  shape container-logs -> container_logs
+  shape container-logs-raw -> container_logs

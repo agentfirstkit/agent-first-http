@@ -10,11 +10,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use clap::{Args as ClapArgs, Subcommand, ValueEnum};
 use serde::Serialize;
 
-use crate::cli::cmd::argenums::TakeoverProviderArg;
 use crate::cli::output;
+use crate::host::bootstrap::Takeover;
 use crate::sdk::capabilities::BackendFamily;
 use crate::shared::error::{Error, ErrorCode};
 
@@ -32,134 +31,76 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// requested from a different working directory, such as an agent scratch dir.
 const MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
 /// Default container name and image repository.
-const DEFAULT_NAME: &str = "afhttp-host";
-const DEFAULT_PORT: u16 = 9222;
+pub(crate) const DEFAULT_CONTAINER_NAME: &str = "afhttp-host";
+pub(crate) const DEFAULT_CONTAINER_PORT: u16 = 9222;
 const IMAGE_REPO: &str = "afhttp-host";
-const HARD_SITE_BROWSER_ARG: &str = "--disable-blink-features=AutomationControlled";
 
-#[derive(ClapArgs, Debug)]
+#[derive(Debug)]
 pub struct Args {
-    #[command(subcommand)]
     pub sub: ContainerSub,
 }
 
-#[derive(Subcommand, Debug)]
-#[command(disable_help_subcommand = true)]
+#[derive(Debug)]
 pub enum ContainerSub {
-    /// Build the host image if missing and run the container; print the client command.
     Install(InstallArgs),
-    /// Stop and remove the container (--purge also removes the image and cache).
     Uninstall(UninstallArgs),
-    /// Report whether the host is running, with its endpoint and client command.
     Status(StatusArgs),
-    /// Capture or explicitly stream the container logs.
     Logs(LogsArgs),
 }
 
 /// Flags shared by every subcommand.
-#[derive(ClapArgs, Debug)]
+#[derive(Debug)]
 pub struct CommonArgs {
-    /// Container runtime: docker, podman, or apple (auto-detected if omitted).
-    #[arg(long, value_enum)]
     pub runtime: Option<Runtime>,
-    /// Container name.
-    #[arg(long, default_value = DEFAULT_NAME)]
     pub name: String,
 }
 
-#[derive(ClapArgs, Debug)]
+#[derive(Debug)]
 pub struct InstallArgs {
-    #[command(flatten)]
     pub common: CommonArgs,
-    /// Host CDP port, published on 127.0.0.1.
-    #[arg(long, default_value_t = 9222)]
     pub port: u16,
-    /// Initial profile name inside the container.
-    ///
-    /// Defaults to `-` (ephemeral); persistent profiles are scoped by backend.
-    #[arg(long)]
     pub profile: Option<String>,
-    /// Chromium /dev/shm size. Defaults to `1g`, or `2g` when takeover is on.
-    #[arg(long = "shm-size")]
     pub shm_size: Option<String>,
-    /// Real-display takeover provider for the built host.
-    ///
-    /// The default `kasmvnc` builds a Brave + KasmVNC takeover-ready host with
-    /// an ephemeral initial profile and 2g /dev/shm; `off` builds a lean
-    /// headless host.
-    #[arg(long = "takeover-provider", default_value = "kasmvnc")]
-    pub takeover_provider: TakeoverProviderArg,
-    /// Extra image component to build (repeatable).
-    ///
-    /// Browser backends: chrome-headless-shell, lightpanda,
-    /// fingerprint-chromium, camoufox, brave. Takeover provider: kasmvnc.
-    #[arg(long = "with", value_name = "COMPONENT")]
+    pub takeover_provider: Takeover,
     pub with: Vec<String>,
-    /// Rebuild the image even if it already exists.
-    #[arg(long)]
+    /// Only the release shape carries this: a from-source build always
+    /// recompiles, so the registry does not accept a redundant `--rebuild`.
     pub rebuild: bool,
-    /// Build the image from a source checkout.
-    ///
-    /// Uses container/docker/Dockerfile instead of downloading the prebuilt
-    /// release and therefore needs the source tree.
-    #[arg(long = "from-source")]
     pub from_source: bool,
-    /// Source checkout used by --from-source.
-    ///
-    /// Defaults to the current directory, then the checkout from which this
-    /// afhttp binary was built.
-    #[arg(long, value_name = "DIR")]
+    /// Only the from-source shape carries this.
     pub context: Option<String>,
-    /// Extra args passed through to `afhttp host` inside the container.
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub host_args: Vec<String>,
-    /// Explicitly include the long-lived host token in stdout.
-    #[arg(long = "reveal-token-secret")]
     pub reveal_token_secret: bool,
 }
 
-#[derive(ClapArgs, Debug)]
+#[derive(Debug)]
 pub struct UninstallArgs {
-    #[command(flatten)]
     pub common: CommonArgs,
-    /// Also remove the built image and the cached build context.
-    #[arg(long)]
     pub purge: bool,
 }
 
-#[derive(ClapArgs, Debug)]
+#[derive(Debug)]
 pub struct StatusArgs {
-    #[command(flatten)]
     pub common: CommonArgs,
-    /// Published host port, used to format the endpoint and client command.
-    #[arg(long, default_value_t = 9222)]
     pub port: u16,
-    /// Explicitly include the long-lived host token in stdout.
-    #[arg(long = "reveal-token-secret")]
     pub reveal_token_secret: bool,
 }
 
-#[derive(ClapArgs, Debug)]
+#[derive(Debug)]
 pub struct LogsArgs {
-    #[command(flatten)]
     pub common: CommonArgs,
-    /// Follow the log output.
-    #[arg(long)]
     pub follow: bool,
-    /// Stream raw runtime logs instead of returning a JSON summary.
-    #[arg(long)]
     pub raw: bool,
 }
 
-/// Container runtime selector. Parsed from `--runtime` (clap `ValueEnum`) and
-/// from `AFHTTP_CONTAINER_RUNTIME` via [`runtime_from_str`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+/// Container runtime selector. Comes either from the registry-checked
+/// `--runtime` value or from `AFHTTP_CONTAINER_RUNTIME` via
+/// [`runtime_from_str`], which is the same closed set either way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Runtime {
     Docker,
     Podman,
-    /// Apple's `container` CLI. Accepts `apple` or `container` on the
-    /// command line; its binary is `container` (see [`Runtime::bin`]).
-    #[value(alias = "container")]
+    /// Apple's `container` CLI; its binary is `container` (see [`Runtime::bin`]).
     Apple,
 }
 
@@ -223,7 +164,7 @@ async fn install(mut args: InstallArgs) -> Result<(), Error> {
 
 async fn install_result(args: &mut InstallArgs) -> Result<InstallResult, Error> {
     apply_hard_site_defaults(args);
-    let backends = resolve_backends(&args.with)?;
+    let backends = resolve_backends(&args.with);
     validate_install_args(args, &backends)?;
     let runtime = resolve_runtime(args.common.runtime)?;
     let image = image_tag();
@@ -472,15 +413,17 @@ async fn status(args: StatusArgs) -> Result<(), Error> {
     }
 }
 
-/// Validate that a host's `/capabilities` describe a takeover-ready backend:
-/// Brave plus a KasmVNC real-display takeover surface. Relocated from the
-/// former `takeover` command so the install path can verify the host it built.
+/// Validate that a host's `/capabilities` describe a takeover-ready backend: a
+/// headful takeover browser plus a KasmVNC real-display takeover surface.
+/// Relocated from the former `takeover` command so the install path can verify
+/// the host it built.
 pub(crate) fn validate_hard_site_capabilities(
     caps: &crate::sdk::capabilities::CapabilitiesResponse,
 ) -> Result<(), Error> {
-    if caps.backend.family != "brave" {
+    if takeover_backend(&caps.backend.family).is_none() {
         return Err(hard_site_host_error(format!(
-            "takeover host requires backend.family=brave; host reported {}",
+            "takeover host requires backend.family=<{}>; host reported {}",
+            takeover_browser_list(),
             caps.backend.family
         )));
     }
@@ -517,14 +460,13 @@ struct LogsResult {
     tail_lines: Vec<String>,
 }
 
+/// Capture the logs, or forward the runtime's own stream.
+///
+/// `--follow` belongs only to the raw shape, because following is an
+/// open-ended stream rather than one summary event. The registry enforces that,
+/// so this only has to honor whichever shape matched.
 fn logs(args: LogsArgs) -> Result<(), Error> {
     let runtime = resolve_runtime(args.common.runtime)?;
-    if args.follow && !args.raw {
-        return Err(Error::new(
-            ErrorCode::InvalidArgument,
-            "container logs --follow requires --raw because follow mode is an open-ended stream",
-        ));
-    }
     let container = args.common.name;
     let mut argv: Vec<String> = vec!["logs".into()];
     if args.follow {
@@ -580,7 +522,7 @@ fn resolve_runtime(explicit: Option<Runtime>) -> Result<Runtime, Error> {
     }
 }
 
-fn runtime_from_str(value: &str) -> Result<Runtime, Error> {
+pub(crate) fn runtime_from_str(value: &str) -> Result<Runtime, Error> {
     match value {
         "docker" => Ok(Runtime::Docker),
         "podman" => Ok(Runtime::Podman),
@@ -646,7 +588,7 @@ struct Backend {
     build_arg: &'static str,
 }
 
-const BACKENDS: [Backend; 6] = [
+const BACKENDS: [Backend; 7] = [
     Backend {
         name: "chrome-headless-shell",
         build_arg: "WITH_CHROME_HEADLESS_SHELL",
@@ -664,6 +606,10 @@ const BACKENDS: [Backend; 6] = [
         build_arg: "WITH_CAMOUFOX",
     },
     Backend {
+        name: "chrome",
+        build_arg: "WITH_CHROME",
+    },
+    Backend {
         name: "brave",
         build_arg: "WITH_BRAVE",
     },
@@ -673,27 +619,86 @@ const BACKENDS: [Backend; 6] = [
     },
 ];
 
-fn resolve_backends(names: &[String]) -> Result<Vec<Backend>, Error> {
+/// A browser backend that can drive the KasmVNC real display a human takes over.
+///
+/// Takeover needs a headful CDP browser in the image, not one specific vendor:
+/// `browser` is the `--browser` host arg and the `/capabilities` backend family,
+/// `component` the `--with` image component, and `probe_bin` the binary an
+/// already-built image is checked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TakeoverBackend {
+    browser: &'static str,
+    component: &'static str,
+    probe_bin: &'static str,
+}
+
+/// Brave leads because it is freely redistributable, so the default install
+/// pulls no proprietary vendor binary, and its Shields keep captured content
+/// clear of ads and trackers. Chrome is there for callers who want the most
+/// common fingerprint on the web, or who hit a login flow that Brave's Shields
+/// break by blocking third-party auth scripts.
+///
+/// Both clear the same Cloudflare walls. An earlier revision of this comment
+/// claimed Brave drew a non-interactive challenge that Chrome escaped; that was
+/// measured against a host still carrying afhttp's own defects (no WebGL at all,
+/// plus a forced `--disable-blink-features` flag). With those fixed, Brave and
+/// Chrome both draw the ordinary checkbox and clear it. Do not reintroduce a
+/// browser-quality ranking here without re-measuring on a clean host.
+const TAKEOVER_BACKENDS: [TakeoverBackend; 2] = [
+    TakeoverBackend {
+        browser: "brave",
+        component: "brave",
+        probe_bin: "brave-browser",
+    },
+    TakeoverBackend {
+        browser: "chrome",
+        component: "chrome",
+        probe_bin: "google-chrome-stable",
+    },
+];
+
+const DEFAULT_TAKEOVER_BACKEND: TakeoverBackend = TAKEOVER_BACKENDS[0];
+
+fn takeover_backend(browser: &str) -> Option<TakeoverBackend> {
+    TAKEOVER_BACKENDS
+        .iter()
+        .copied()
+        .find(|b| b.browser == browser)
+}
+
+/// The takeover backend an install selected: an explicit `--browser` host arg
+/// when it names one, else the default. A `--browser` value that names no
+/// takeover backend falls back here and is rejected by
+/// `validate_hard_site_install_args`, so the error names the real problem.
+fn selected_takeover_backend(host_args: &[String]) -> TakeoverBackend {
+    host_arg_value(host_args, "--browser")
+        .as_deref()
+        .and_then(takeover_backend)
+        .unwrap_or(DEFAULT_TAKEOVER_BACKEND)
+}
+
+fn takeover_browser_list() -> String {
+    TAKEOVER_BACKENDS
+        .iter()
+        .map(|b| b.browser)
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+/// Map the `--with` component names onto their Dockerfile build args.
+///
+/// `--with` is a closed value set in the CLI registry, so an unknown name never
+/// reaches here and this needs no rejection path of its own.
+fn resolve_backends(names: &[String]) -> Vec<Backend> {
     let mut out = Vec::with_capacity(names.len());
     for name in names {
-        let backend = BACKENDS.iter().find(|b| b.name == name).ok_or_else(|| {
-            Error::new(
-                ErrorCode::InvalidArgument,
-                format!(
-                    "unknown backend '{name}': expected one of {}",
-                    BACKENDS
-                        .iter()
-                        .map(|b| b.name)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            )
-        })?;
-        if !out.contains(backend) {
+        if let Some(backend) = BACKENDS.iter().find(|b| b.name == name)
+            && !out.contains(backend)
+        {
             out.push(*backend);
         }
     }
-    Ok(out)
+    out
 }
 
 fn validate_install_args(args: &InstallArgs, backends: &[Backend]) -> Result<(), Error> {
@@ -715,18 +720,29 @@ fn validate_install_args(args: &InstallArgs, backends: &[Backend]) -> Result<(),
 /// `container install` defaults to `kasmvnc` (takeover on);
 /// `--takeover-provider off` builds a lean headless host.
 fn install_takeover_provider(args: &InstallArgs) -> Option<&'static str> {
-    args.takeover_provider.provider_name()
+    match args.takeover_provider {
+        Takeover::Off => None,
+        Takeover::On { provider } => Some(provider.as_str()),
+    }
 }
 
+/// The takeover preset deliberately adds no stealth `--browser-arg`. It used to
+/// force `--disable-blink-features=AutomationControlled`, which bought nothing:
+/// the host never launches Chromium with `--enable-automation` (a unit test in
+/// the chromium backend pins that), so `navigator.webdriver` already reports
+/// false without it — measured identical with and against the flag. What it did
+/// buy was Chromium listing it in the "unsupported command-line flag" warning,
+/// i.e. the browser announcing on-screen that something automated launched it,
+/// on the one path where a human is looking at the window.
 fn apply_hard_site_defaults(args: &mut InstallArgs) {
     let Some(provider) = install_takeover_provider(args).map(str::to_string) else {
         return;
     };
-    push_backend_if_missing(&mut args.with, "brave");
+    let backend = selected_takeover_backend(&args.host_args);
+    push_backend_if_missing(&mut args.with, backend.component);
     push_backend_if_missing(&mut args.with, "kasmvnc");
-    push_host_arg_default(&mut args.host_args, "--browser", "brave");
+    push_host_arg_default(&mut args.host_args, "--browser", backend.browser);
     push_host_arg_default(&mut args.host_args, "--takeover-provider", &provider);
-    push_host_arg_value_if_missing(&mut args.host_args, "--browser-arg", HARD_SITE_BROWSER_ARG);
 }
 
 fn effective_profile(args: &InstallArgs) -> String {
@@ -757,30 +773,33 @@ fn push_host_arg_default(host_args: &mut Vec<String>, name: &str, value: &str) {
     }
 }
 
-fn push_host_arg_value_if_missing(host_args: &mut Vec<String>, name: &str, value: &str) {
-    if !host_arg_has_value(host_args, name, value) {
-        host_args.push(format!("{name}={value}"));
-    }
-}
-
 fn validate_hard_site_install_args(
     args: &InstallArgs,
     backends: &[Backend],
     provider: &str,
 ) -> Result<(), Error> {
-    if !backends.iter().any(|b| b.name == "brave") {
-        return Err(hard_site_install_error(
-            "takeover requires the brave backend; omit conflicting backend overrides".to_string(),
-        ));
+    let browser = host_arg_value(&args.host_args, "--browser");
+    let Some(backend) = browser.as_deref().and_then(takeover_backend) else {
+        let got = browser
+            .map(|v| format!("; got `--browser {v}`"))
+            .unwrap_or_default();
+        return Err(hard_site_install_error(format!(
+            "takeover requires host arg `--browser <{}>`{got}",
+            takeover_browser_list()
+        )));
+    };
+    if !backends.iter().any(|b| b.name == backend.component) {
+        return Err(hard_site_install_error(format!(
+            "takeover with `--browser {}` requires the {} backend; omit conflicting backend overrides",
+            backend.browser, backend.component
+        )));
     }
     if !backends.iter().any(|b| b.name == "kasmvnc") {
         return Err(hard_site_install_error(
             "takeover requires the KasmVNC display backend".to_string(),
         ));
     }
-    require_hard_site_host_arg(&args.host_args, "--browser", "brave")?;
     require_hard_site_host_arg(&args.host_args, "--takeover-provider", provider)?;
-    require_hard_site_host_arg_value(&args.host_args, "--browser-arg", HARD_SITE_BROWSER_ARG)?;
     Ok(())
 }
 
@@ -811,19 +830,6 @@ fn hard_site_install_error(detail: String) -> Error {
     )
 }
 
-fn require_hard_site_host_arg_value(
-    host_args: &[String],
-    name: &str,
-    expected: &str,
-) -> Result<(), Error> {
-    if host_arg_has_value(host_args, name, expected) {
-        return Ok(());
-    }
-    Err(hard_site_install_error(format!(
-        "takeover requires host arg `{name} {expected}`"
-    )))
-}
-
 fn host_args_select_camoufox(host_args: &[String]) -> bool {
     host_arg_value(host_args, "--browser").as_deref() == Some("camoufox")
 }
@@ -851,29 +857,6 @@ fn host_arg_value(host_args: &[String], name: &str) -> Option<String> {
     value
 }
 
-fn host_arg_has_value(host_args: &[String], name: &str, expected: &str) -> bool {
-    let eq_prefix = format!("{name}=");
-    let mut iter = host_args.iter().peekable();
-    while let Some(arg) = iter.next() {
-        if arg == name {
-            if let Some(next) = iter.peek()
-                && host_arg_values_equal(next, expected)
-            {
-                return true;
-            }
-        } else if let Some(value) = arg.strip_prefix(&eq_prefix)
-            && host_arg_values_equal(value, expected)
-        {
-            return true;
-        }
-    }
-    false
-}
-
-fn host_arg_values_equal(value: &str, expected: &str) -> bool {
-    value == expected || value.trim_start_matches("--") == expected.trim_start_matches("--")
-}
-
 fn validate_container_image_host_args(
     runtime: Runtime,
     image: &str,
@@ -893,13 +876,20 @@ fn validate_container_image_host_args(
             ),
         ));
     }
-    if host_arg_value(host_args, "--browser").as_deref() == Some("brave")
-        && !container_image_hard_site_components(runtime, image)
+    if let Some(backend) = host_arg_value(host_args, "--browser")
+        .as_deref()
+        .and_then(takeover_backend)
+        && !container_image_hard_site_components(runtime, image, backend)
     {
+        // The image tag carries only the version, not the backend set, so an
+        // image built for the other takeover browser is reused as-is. Name the
+        // rebuild that adds this one rather than the generic source rebuild.
         return Err(Error::new(
             ErrorCode::BackendUnsupported,
             format!(
-                "container image `{image}` does not expose the Brave + KasmVNC takeover components; rebuild with `afhttp container install --from-source --rebuild`"
+                "container image `{image}` does not expose the {browser} + KasmVNC takeover components; rebuild it with `afhttp container install --rebuild --with {component} -- --browser {browser}`",
+                browser = backend.browser,
+                component = backend.component
             ),
         ));
     }
@@ -948,7 +938,7 @@ async fn validate_running_hard_site(endpoint: &str, token: &str) -> Result<(), E
 }
 
 fn is_hard_site_capabilities(caps: &crate::sdk::capabilities::CapabilitiesResponse) -> bool {
-    caps.backend.family == "brave"
+    takeover_backend(&caps.backend.family).is_some()
         && caps.takeover.supported
         && caps.takeover.provider.as_deref() == Some("kasmvnc")
 }
@@ -967,43 +957,43 @@ pub(crate) async fn discover_default_takeover_host(
 ) -> Result<LocalTakeoverHost, Error> {
     let runtime = resolve_runtime(None).map_err(|e| {
         local_takeover_error(format!(
-            "could not choose a container runtime to inspect `{DEFAULT_NAME}`: {}",
+            "could not choose a container runtime to inspect `{DEFAULT_CONTAINER_NAME}`: {}",
             e.detail
         ))
     })?;
-    let running = inspect_container_state(runtime, DEFAULT_NAME)
+    let running = inspect_container_state(runtime, DEFAULT_CONTAINER_NAME)
         .map(|s| s.running)
-        .unwrap_or_else(|| container_running(runtime, DEFAULT_NAME));
+        .unwrap_or_else(|| container_running(runtime, DEFAULT_CONTAINER_NAME));
     if !running {
         return Err(local_takeover_error(format!(
-            "default local container `{DEFAULT_NAME}` is not running"
+            "default local container `{DEFAULT_CONTAINER_NAME}` is not running"
         )));
     }
 
     let token_secret = match token_override {
         Some(token) => Some(token.to_string()),
-        None => Some(read_token(runtime, DEFAULT_NAME).await.map_err(|e| {
+        None => Some(read_token(runtime, DEFAULT_CONTAINER_NAME).await.map_err(|e| {
             local_takeover_error(format!(
-                "default local container `{DEFAULT_NAME}` is running, but its token could not be read: {}",
+                "default local container `{DEFAULT_CONTAINER_NAME}` is running, but its token could not be read: {}",
                 e.detail
             ))
         })?),
     };
-    let endpoint = endpoint_url(DEFAULT_PORT);
+    let endpoint = endpoint_url(DEFAULT_CONTAINER_PORT);
     let client = match token_secret.as_deref() {
         Some(token) => crate::sdk::Client::connect(&endpoint)?.with_token(token.to_string()),
         None => crate::sdk::Client::connect(&endpoint)?,
     };
     let health = client.health().await.map_err(|e| {
         local_takeover_error(format!(
-            "default local container `{DEFAULT_NAME}` at {endpoint} could not be verified: {}",
+            "default local container `{DEFAULT_CONTAINER_NAME}` at {endpoint} could not be verified: {}",
             e.detail
         ))
         .with_retryable(e.retryable)
     })?;
     if health.version != VERSION {
         return Err(local_takeover_error(host_version_mismatch_detail(
-            DEFAULT_NAME,
+            DEFAULT_CONTAINER_NAME,
             &health.version,
         )));
     }
@@ -1013,19 +1003,19 @@ pub(crate) async fn discover_default_takeover_host(
             .map(|e| format!("{}: {}", e.error_code, e.error))
             .unwrap_or_else(|| format!("status={}", health.status));
         return Err(local_takeover_error(format!(
-            "default local container `{DEFAULT_NAME}` at {endpoint} is not ready: {detail}"
+            "default local container `{DEFAULT_CONTAINER_NAME}` at {endpoint} is not ready: {detail}"
         )));
     }
     let caps = client.capabilities().await.map_err(|e| {
         local_takeover_error(format!(
-            "default local container `{DEFAULT_NAME}` at {endpoint} could not be verified: {}",
+            "default local container `{DEFAULT_CONTAINER_NAME}` at {endpoint} could not be verified: {}",
             e.detail
         ))
         .with_retryable(e.retryable)
     })?;
     validate_hard_site_capabilities(&caps).map_err(|e| {
         local_takeover_error(format!(
-            "default local container `{DEFAULT_NAME}` at {endpoint} is not takeover-ready: {}",
+            "default local container `{DEFAULT_CONTAINER_NAME}` at {endpoint} is not takeover-ready: {}",
             e.detail
         ))
     })?;
@@ -1061,10 +1051,10 @@ fn host_version_mismatch_detail(name: &str, host_version: &str) -> String {
 }
 
 fn host_args_need_takeover_support(host_args: &[String]) -> bool {
-    // A `--takeover-provider <provider>` host arg (anything other than
-    // off/none) needs a display-capable host binary in the image.
+    // A `--takeover-provider <provider>` host arg other than `off` needs a
+    // display-capable host binary in the image.
     match host_arg_value(host_args, "--takeover-provider") {
-        Some(value) => value != "off" && value != "none",
+        Some(value) => value != "off",
         None => false,
     }
 }
@@ -1093,7 +1083,11 @@ fn image_host_help_args(image: &str) -> Vec<String> {
     ]
 }
 
-fn container_image_hard_site_components(runtime: Runtime, image: &str) -> bool {
+fn container_image_hard_site_components(
+    runtime: Runtime,
+    image: &str,
+    backend: TakeoverBackend,
+) -> bool {
     let argv = vec![
         "run".into(),
         "--rm".into(),
@@ -1101,7 +1095,10 @@ fn container_image_hard_site_components(runtime: Runtime, image: &str) -> bool {
         "/bin/sh".into(),
         image.to_string(),
         "-lc".into(),
-        "command -v brave-browser >/dev/null 2>&1 && test -x \"${AFHTTP_KASMVNC_BIN:-/usr/bin/Xvnc}\" && test -d \"${AFHTTP_KASMVNC_WEB_ROOT:-/usr/share/kasmvnc/www}\"".into(),
+        format!(
+            "command -v {} >/dev/null 2>&1 && test -x \"${{AFHTTP_KASMVNC_BIN:-/usr/bin/Xvnc}}\" && test -d \"${{AFHTTP_KASMVNC_WEB_ROOT:-/usr/share/kasmvnc/www}}\"",
+            backend.probe_bin
+        ),
     ];
     capture(runtime.bin(), &argv)
         .map(|out| out.status.success())
@@ -1674,22 +1671,25 @@ mod tests {
     }
 
     #[test]
-    fn backend_names_map_to_build_args_and_reject_unknown() {
-        let resolved =
-            resolve_backends(&["camoufox".into(), "brave".into(), "kasmvnc".into()]).unwrap();
+    fn backend_names_map_to_build_args() {
+        let resolved = resolve_backends(&["camoufox".into(), "brave".into(), "kasmvnc".into()]);
         assert_eq!(resolved.len(), 3);
         assert_eq!(resolved[0].build_arg, "WITH_CAMOUFOX");
         assert_eq!(resolved[1].build_arg, "WITH_BRAVE");
         assert_eq!(resolved[2].build_arg, "WITH_KASMVNC");
 
         // Duplicates collapse.
-        let deduped = resolve_backends(&["camoufox".into(), "camoufox".into()]).unwrap();
+        let deduped = resolve_backends(&["camoufox".into(), "camoufox".into()]);
         assert_eq!(deduped.len(), 1);
+    }
 
-        assert_eq!(
-            resolve_backends(&["nope".into()]).unwrap_err().error_code,
-            ErrorCode::InvalidArgument
-        );
+    /// Every component the registry offers has a build arg behind it.
+    #[test]
+    fn every_registry_component_maps_to_a_build_arg() {
+        for component in crate::cli::spec::CONTAINER_COMPONENTS {
+            let resolved = resolve_backends(&[component.to_string()]);
+            assert_eq!(resolved.len(), 1, "{component}");
+        }
     }
 
     #[test]
@@ -1702,7 +1702,7 @@ mod tests {
             port: 9222,
             profile: Some("work".into()),
             shm_size: Some("1g".into()),
-            takeover_provider: TakeoverProviderArg::Off,
+            takeover_provider: Takeover::Off,
             with: vec!["camoufox".into()],
             rebuild: false,
             from_source: false,
@@ -1710,7 +1710,7 @@ mod tests {
             host_args: vec!["--browser".into(), "camoufox".into()],
             reveal_token_secret: false,
         };
-        let backends = resolve_backends(&args.with).unwrap();
+        let backends = resolve_backends(&args.with);
         let err = validate_install_args(&args, &backends).unwrap_err();
         assert_eq!(err.error_code, ErrorCode::InvalidArgument);
         assert!(err.detail.contains("--profile -"));
@@ -1726,7 +1726,7 @@ mod tests {
             port: 9222,
             profile: Some("-".into()),
             shm_size: Some("1g".into()),
-            takeover_provider: TakeoverProviderArg::Off,
+            takeover_provider: Takeover::Off,
             with: vec!["camoufox".into()],
             rebuild: false,
             from_source: false,
@@ -1734,7 +1734,7 @@ mod tests {
             host_args: vec!["--browser=camoufox".into()],
             reveal_token_secret: false,
         };
-        let backends = resolve_backends(&args.with).unwrap();
+        let backends = resolve_backends(&args.with);
         validate_install_args(&args, &backends).unwrap();
     }
 
@@ -1838,12 +1838,12 @@ mod tests {
 
     #[test]
     fn host_version_warning_points_to_profile_preserving_reinstall() {
-        let warning = host_version_warning(DEFAULT_NAME, "0.5.0").expect("warning");
+        let warning = host_version_warning(DEFAULT_CONTAINER_NAME, "0.5.0").expect("warning");
         assert!(warning.contains("0.5.0"));
         assert!(warning.contains(VERSION));
         assert!(warning.contains("afhttp container install"));
         assert!(warning.contains("persistent profiles are preserved"));
-        assert!(host_version_warning(DEFAULT_NAME, VERSION).is_none());
+        assert!(host_version_warning(DEFAULT_CONTAINER_NAME, VERSION).is_none());
     }
 
     #[test]
@@ -1876,7 +1876,9 @@ mod tests {
             port: 9222,
             profile: None,
             shm_size: None,
-            takeover_provider: TakeoverProviderArg::Kasmvnc,
+            takeover_provider: Takeover::On {
+                provider: crate::host::bootstrap::TakeoverProviderKind::KasmVnc,
+            },
             with: Vec::new(),
             rebuild: false,
             from_source: false,
@@ -1885,7 +1887,7 @@ mod tests {
             reveal_token_secret: false,
         };
         apply_hard_site_defaults(&mut args);
-        let backends = resolve_backends(&args.with).unwrap();
+        let backends = resolve_backends(&args.with);
         validate_install_args(&args, &backends).unwrap();
         assert_eq!(effective_profile(&args), "-");
         assert_eq!(effective_shm_size(&args), "2g");
@@ -1900,7 +1902,6 @@ mod tests {
                 "brave".to_string(),
                 "--takeover-provider".to_string(),
                 "kasmvnc".to_string(),
-                format!("--browser-arg={HARD_SITE_BROWSER_ARG}")
             ]
         );
     }
@@ -1915,7 +1916,9 @@ mod tests {
             port: 9222,
             profile: Some("work".into()),
             shm_size: Some("3g".into()),
-            takeover_provider: TakeoverProviderArg::Kasmvnc,
+            takeover_provider: Takeover::On {
+                provider: crate::host::bootstrap::TakeoverProviderKind::KasmVnc,
+            },
             with: vec!["kasmvnc".into()],
             rebuild: false,
             from_source: false,
@@ -1923,12 +1926,11 @@ mod tests {
             host_args: vec![
                 "--browser=brave".into(),
                 "--takeover-provider=kasmvnc".into(),
-                format!("--browser-arg={HARD_SITE_BROWSER_ARG}"),
             ],
             reveal_token_secret: false,
         };
         apply_hard_site_defaults(&mut args);
-        let backends = resolve_backends(&args.with).unwrap();
+        let backends = resolve_backends(&args.with);
         validate_install_args(&args, &backends).unwrap();
         assert_eq!(effective_shm_size(&args), "3g");
         assert_eq!(
@@ -1941,8 +1943,14 @@ mod tests {
         );
     }
 
+    /// The preset keeps the caller's own `--browser-arg` values and contributes
+    /// none of its own. It used to force
+    /// `--disable-blink-features=AutomationControlled`, which changed nothing
+    /// (`navigator.webdriver` is false either way, since the host never passes
+    /// `--enable-automation`) while making Chromium flag the browser on-screen
+    /// as launched with an unsupported flag.
     #[test]
-    fn hard_site_install_appends_stealth_browser_arg_without_clobbering_user_args() {
+    fn hard_site_install_keeps_user_browser_args_and_adds_none() {
         let mut args = InstallArgs {
             common: CommonArgs {
                 runtime: Some(Runtime::Docker),
@@ -1951,7 +1959,9 @@ mod tests {
             port: 9222,
             profile: None,
             shm_size: None,
-            takeover_provider: TakeoverProviderArg::Kasmvnc,
+            takeover_provider: Takeover::On {
+                provider: crate::host::bootstrap::TakeoverProviderKind::KasmVnc,
+            },
             with: Vec::new(),
             rebuild: false,
             from_source: false,
@@ -1960,18 +1970,30 @@ mod tests {
             reveal_token_secret: false,
         };
         apply_hard_site_defaults(&mut args);
-        let backends = resolve_backends(&args.with).unwrap();
+        let backends = resolve_backends(&args.with);
         validate_install_args(&args, &backends).unwrap();
-        assert!(host_arg_has_value(
-            &args.host_args,
-            "--browser-arg",
-            "--lang=zh-CN"
-        ));
-        assert!(host_arg_has_value(
-            &args.host_args,
-            "--browser-arg",
-            HARD_SITE_BROWSER_ARG
-        ));
+        assert!(
+            args.host_args.iter().any(|a| a == "--lang=zh-CN"),
+            "the caller's own browser arg must survive: {:?}",
+            args.host_args
+        );
+        assert_eq!(
+            args.host_args
+                .iter()
+                .filter(|a| a.starts_with("--browser-arg"))
+                .count(),
+            1,
+            "the takeover preset must contribute no --browser-arg of its own: {:?}",
+            args.host_args
+        );
+        assert!(
+            !args
+                .host_args
+                .iter()
+                .any(|a| a.contains("AutomationControlled")),
+            "the AutomationControlled flag must not come back: {:?}",
+            args.host_args
+        );
     }
 
     #[test]
@@ -1984,7 +2006,9 @@ mod tests {
             port: 9222,
             profile: Some("work".into()),
             shm_size: None,
-            takeover_provider: TakeoverProviderArg::Kasmvnc,
+            takeover_provider: Takeover::On {
+                provider: crate::host::bootstrap::TakeoverProviderKind::KasmVnc,
+            },
             with: Vec::new(),
             rebuild: false,
             from_source: false,
@@ -1993,7 +2017,7 @@ mod tests {
             reveal_token_secret: false,
         };
         apply_hard_site_defaults(&mut args);
-        let backends = resolve_backends(&args.with).unwrap();
+        let backends = resolve_backends(&args.with);
         validate_install_args(&args, &backends).unwrap();
         assert_eq!(effective_profile(&args), "work");
     }
@@ -2008,7 +2032,9 @@ mod tests {
             port: 9222,
             profile: Some("-".into()),
             shm_size: None,
-            takeover_provider: TakeoverProviderArg::Kasmvnc,
+            takeover_provider: Takeover::On {
+                provider: crate::host::bootstrap::TakeoverProviderKind::KasmVnc,
+            },
             with: Vec::new(),
             rebuild: false,
             from_source: false,
@@ -2017,13 +2043,13 @@ mod tests {
             reveal_token_secret: false,
         };
         apply_hard_site_defaults(&mut args);
-        let backends = resolve_backends(&args.with).unwrap();
+        let backends = resolve_backends(&args.with);
         validate_install_args(&args, &backends).unwrap();
         assert_eq!(effective_profile(&args), "-");
     }
 
     #[test]
-    fn hard_site_install_rejects_non_brave_browser_override() {
+    fn hard_site_install_rejects_non_takeover_browser_override() {
         let mut args = InstallArgs {
             common: CommonArgs {
                 runtime: Some(Runtime::Docker),
@@ -2032,7 +2058,9 @@ mod tests {
             port: 9222,
             profile: None,
             shm_size: None,
-            takeover_provider: TakeoverProviderArg::Kasmvnc,
+            takeover_provider: Takeover::On {
+                provider: crate::host::bootstrap::TakeoverProviderKind::KasmVnc,
+            },
             with: Vec::new(),
             rebuild: false,
             from_source: false,
@@ -2041,10 +2069,11 @@ mod tests {
             reveal_token_secret: false,
         };
         apply_hard_site_defaults(&mut args);
-        let backends = resolve_backends(&args.with).unwrap();
+        let backends = resolve_backends(&args.with);
         let err = validate_install_args(&args, &backends).unwrap_err();
         assert_eq!(err.error_code, ErrorCode::InvalidArgument);
-        assert!(err.detail.contains("--browser brave"));
+        assert!(err.detail.contains("--browser <brave|chrome>"));
+        assert!(err.detail.contains("got `--browser chromium`"));
         assert!(err.detail.contains("afhttp container install"));
     }
 
@@ -2058,7 +2087,9 @@ mod tests {
             port: 9222,
             profile: None,
             shm_size: None,
-            takeover_provider: TakeoverProviderArg::Kasmvnc,
+            takeover_provider: Takeover::On {
+                provider: crate::host::bootstrap::TakeoverProviderKind::KasmVnc,
+            },
             with: Vec::new(),
             rebuild: false,
             from_source: false,
@@ -2067,10 +2098,64 @@ mod tests {
             reveal_token_secret: false,
         };
         apply_hard_site_defaults(&mut args);
-        let backends = resolve_backends(&args.with).unwrap();
+        let backends = resolve_backends(&args.with);
         let err = validate_install_args(&args, &backends).unwrap_err();
         assert_eq!(err.error_code, ErrorCode::InvalidArgument);
-        assert!(err.detail.contains("--browser brave"));
+        assert!(err.detail.contains("--browser <brave|chrome>"));
+    }
+
+    /// `--browser chrome` must pull in the chrome image component, not the
+    /// default brave one — the takeover preset follows the selected backend.
+    #[test]
+    fn hard_site_install_expands_chrome_override_to_chrome_component() {
+        let mut args = InstallArgs {
+            common: CommonArgs {
+                runtime: Some(Runtime::Docker),
+                name: "afhttp-host".into(),
+            },
+            port: 9222,
+            profile: None,
+            shm_size: None,
+            takeover_provider: Takeover::On {
+                provider: crate::host::bootstrap::TakeoverProviderKind::KasmVnc,
+            },
+            with: Vec::new(),
+            rebuild: false,
+            from_source: false,
+            context: None,
+            host_args: vec!["--browser".into(), "chrome".into()],
+            reveal_token_secret: false,
+        };
+        apply_hard_site_defaults(&mut args);
+        let backends = resolve_backends(&args.with);
+        validate_install_args(&args, &backends).unwrap();
+        assert_eq!(
+            backends.iter().map(|b| b.name).collect::<Vec<_>>(),
+            vec!["chrome", "kasmvnc"]
+        );
+        assert_eq!(
+            host_arg_value(&args.host_args, "--browser").as_deref(),
+            Some("chrome")
+        );
+    }
+
+    /// Both takeover browsers satisfy the running-host capability gate; anything
+    /// else (here the always-present chromium) does not.
+    #[test]
+    fn takeover_capability_gate_accepts_every_takeover_backend() {
+        for backend in TAKEOVER_BACKENDS {
+            assert!(
+                takeover_backend(backend.browser).is_some(),
+                "{} should be a takeover backend",
+                backend.browser
+            );
+            assert!(
+                BACKENDS.iter().any(|b| b.name == backend.component),
+                "{} needs a --with image component",
+                backend.component
+            );
+        }
+        assert!(takeover_backend("chromium").is_none());
     }
 
     #[test]
@@ -2085,10 +2170,6 @@ mod tests {
         assert!(!host_args_need_takeover_support(&[
             "--takeover-provider".into(),
             "off".into()
-        ]));
-        assert!(!host_args_need_takeover_support(&[
-            "--takeover-provider".into(),
-            "none".into()
         ]));
         assert!(!host_args_need_takeover_support(&[
             "--browser".into(),
@@ -2111,7 +2192,7 @@ mod tests {
     #[test]
     fn embedded_build_args_include_version_target_and_apple_platform() {
         let ctx = PathBuf::from("/cache/ctx");
-        let backends = resolve_backends(&["lightpanda".into()]).unwrap();
+        let backends = resolve_backends(&["lightpanda".into()]);
         let docker = build_args(
             "afhttp-host:1.2.3",
             Runtime::Docker,
@@ -2149,7 +2230,7 @@ mod tests {
     #[test]
     fn from_source_build_args_use_canonical_dockerfile_no_release_args() {
         let repo = PathBuf::from("/repo");
-        let backends = resolve_backends(&["camoufox".into()]).unwrap();
+        let backends = resolve_backends(&["camoufox".into()]);
         let args = build_args(
             "afhttp-host:1.2.3",
             Runtime::Podman,

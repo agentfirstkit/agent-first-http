@@ -29,18 +29,26 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 2
 fi
 
-# Build the image when the Dockerfile or pinned deps changed since the last build.
+# Build the image when the Dockerfile or pinned deps changed since the last
+# build. install-backends.sh is baked into the image and carries every
+# third-party version pin, so a pin bump has to invalidate the stamp too —
+# otherwise the drift check passes while the image still runs the old backends.
 CAMOUFOX_BUILD="${AFHTTP_TEST_INSTALL_CAMOUFOX:-0}"
 IMAGE_STAMP="$SPORE_DIR/target/.docker-image-stamp-camoufox-${CAMOUFOX_BUILD}"
 DOCKERFILE="$SPORE_DIR/tests/Dockerfile.test"
+BUILD_INPUTS=("$DOCKERFILE" "$SPORE_DIR/container/docker/install-backends.sh")
 NEEDS_BUILD=1
 if [ -f "$IMAGE_STAMP" ] && docker image inspect "$IMAGE_TAG" >/dev/null 2>&1; then
-  if [ "$DOCKERFILE" -ot "$IMAGE_STAMP" ]; then
-    NEEDS_BUILD=0
-  fi
+  NEEDS_BUILD=0
+  for build_input in "${BUILD_INPUTS[@]}"; do
+    if [ ! "$build_input" -ot "$IMAGE_STAMP" ]; then
+      NEEDS_BUILD=1
+      break
+    fi
+  done
 fi
 if [ "$NEEDS_BUILD" = "1" ]; then
-  echo "==> docker build $IMAGE_TAG (tests/Dockerfile.test changed or image missing)" >&2
+  echo "==> docker build $IMAGE_TAG (Dockerfile or backend pins changed, or image missing)" >&2
   docker build \
     --build-arg "AFHTTP_TEST_INSTALL_CAMOUFOX=$CAMOUFOX_BUILD" \
     -t "$IMAGE_TAG" \

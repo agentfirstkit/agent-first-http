@@ -2,88 +2,51 @@
 
 use std::path::PathBuf;
 
-use clap::{Args as ClapArgs, Subcommand};
-
 use crate::cli::output;
 use crate::sdk::profile;
 use crate::shared::error::Error;
 use crate::shared::time::parse_duration;
 
-#[derive(ClapArgs, Debug)]
+#[derive(Debug)]
 pub struct Args {
-    #[command(subcommand)]
     pub sub: ProfileSub,
 }
 
-#[derive(Subcommand, Debug)]
-#[command(disable_help_subcommand = true)]
+#[derive(Debug)]
 pub enum ProfileSub {
-    /// List on-disk profiles under the profiles root.
     List(ListArgs),
-    /// Show metadata for one profile (size, last use, lock state).
     Info(InfoArgs),
-    /// Report whether a profile is currently locked by a running host.
     LockStatus(InfoArgs),
-    /// List files captured in the profile's browser download directory.
     Downloads(InfoArgs),
-    /// Delete a profile and all of its on-disk state.
     Delete(DeleteArgs),
-    /// Delete profiles whose last use is older than a cutoff.
     Prune(PruneArgs),
-    /// Show the non-expired cookies in a profile's jar (values redacted).
     Cookies(InfoArgs),
 }
 
-#[derive(ClapArgs, Debug)]
+#[derive(Debug)]
 pub struct ListArgs {
-    /// Profiles root directory. Defaults to `$XDG_DATA_HOME/afhttp/profiles`.
-    #[arg(long)]
     pub profile_root: Option<PathBuf>,
 }
 
-#[derive(ClapArgs, Debug)]
+#[derive(Debug)]
 pub struct InfoArgs {
-    /// Profile name.
     pub name: String,
-    /// Filter by browser backend.
-    ///
-    /// For example: chromium, brave, or camoufox.
-    /// Required when the same profile name exists under multiple backends.
-    #[arg(long)]
     pub backend: Option<String>,
-    /// Profiles root directory. Defaults to `$XDG_DATA_HOME/afhttp/profiles`.
-    #[arg(long)]
     pub profile_root: Option<PathBuf>,
 }
 
-#[derive(ClapArgs, Debug)]
+#[derive(Debug)]
 pub struct DeleteArgs {
-    /// Profile name to delete.
     pub name: String,
-    /// Filter by browser backend.
-    ///
-    /// For example: chromium, brave, or camoufox.
-    /// Required when the same profile name exists under multiple backends.
-    #[arg(long)]
     pub backend: Option<String>,
-    /// Confirmation guard: must equal the profile name for the delete to proceed.
-    #[arg(long)]
     pub confirm: String,
-    /// Profiles root directory. Defaults to `$XDG_DATA_HOME/afhttp/profiles`.
-    #[arg(long)]
     pub profile_root: Option<PathBuf>,
 }
 
-#[derive(ClapArgs, Debug)]
+#[derive(Debug)]
 pub struct PruneArgs {
-    /// Age cutoff (e.g. `30d`, `12h`); profiles last used before this are removed.
-    #[arg(long)]
     pub older_than: String,
-    /// Report what would be deleted without deleting anything.
-    #[arg(long, default_value_t = false)]
     pub dry_run: bool,
-    /// Profiles root directory. Defaults to `$XDG_DATA_HOME/afhttp/profiles`.
-    #[arg(long)]
     pub profile_root: Option<PathBuf>,
 }
 

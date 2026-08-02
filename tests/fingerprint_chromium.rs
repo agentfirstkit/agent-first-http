@@ -1,4 +1,4 @@
-//! Integration test: `--browser fingerprint_chromium` launches the
+//! Integration test: `--browser fingerprint-chromium` launches the
 //! upstream Ungoogled-Chromium fingerprint fork, derives a stable seed
 //! from the resolved profile path, and the resulting `navigator.userAgent`
 //! is consistent across two browser fetches in the same host (proving

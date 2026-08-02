@@ -4,7 +4,9 @@
 
 All command outputs are AFDATA protocol-v1 JSON events. With the default
 `--output-to split`, successes go to stdout and failures go to stderr;
-`--output-to stdout|stderr` selects one ordered event stream. Successes are
+`--output-to stdout|stderr` selects one ordered event stream. `afhttp host`
+streams rather than answering once, so it defaults to `--output-to stdout`.
+Successes are
 `{"kind":"result","result":...,"trace":{}}`; artifact files are referenced by
 absolute `*_file` paths inside `result`. Failures are
 `{"kind":"error","error":...,"trace":{}}`.
@@ -35,6 +37,7 @@ other commands may omit it.
 | `status` | if HTTP response exists | Final HTTP status code. 4xx/5xx are successful transport responses, not `error` envelopes. |
 | `final_url` | always on success | URL after redirects/navigation. |
 | `tab_id` | when a browser tab was used | CDP target/tab id for follow-up `afhttp cdp` or `afhttp fetch --tab`. |
+| `content_type` | when the response carried one | Response `Content-Type` verbatim. Prefer it over guessing from `body_file`'s extension: the extension comes from a lossy table and unknown types land in `body.bin`. |
 | `body_file` | when `body` requested and body exists | Raw HTTP response body path. |
 | `rendered_html_file` | when produced | Serialized post-JS DOM path. |
 | `text_file` | when produced | `document.body.innerText` path. |
@@ -496,7 +499,25 @@ Examples below are representative `error` / Chromium `errorText` strings.
 | `profile_delete_locked` | `profile "work" is locked; refusing delete` | Stop the owning host before delete/prune. |
 | `profile_invalid_name` | `profile name "../work" is invalid` | Use a simple non-hidden profile name without path separators. |
 | `profile_root_unavailable` | `profile root cannot be created: permission denied` | Fix filesystem permissions/path or choose another profile root. |
-| `invalid_argument` | `--render: unknown mode "sometimes"` | Correct the CLI/SDK argument before retrying. |
+| `invalid_argument` | `--takeover-quality-percent: expected an integer from 0 to 100, got 140` | Correct the CLI/SDK argument before retrying. |
 | `invalid_endpoint` | `endpoint must start with ws://, http://, or unix:` | Correct endpoint syntax. |
 | `io_error` | `write /out/body.html: permission denied` | Fix local filesystem permissions/space/path and retry. |
 | `internal_error` | `serialize observation: ...` | Treat as a bug; capture logs and file an issue if reproducible. |
+
+### Argv rejections
+
+The CLI is compiled from a closed `cli-spec-v1` registry, so an argv that does
+not match exactly one registered shape is rejected before any work starts. The
+rejection names the rule it broke in `error.code`, carries a `hint` pointing at
+the command's `--help`, and exits 2.
+
+| `error.code` | Meaning |
+| --- | --- |
+| `cli_unknown_command` | The command path is not registered. |
+| `cli_unknown_argument` | The argument is not registered for that command. |
+| `cli_unregistered_combination` | Every argument is known, but the mix is not a registered shape. |
+| `cli_missing_argument_value` | An argument that takes a value was given none. |
+| `cli_invalid_argument_value` | The value is outside the argument's declared type or value set. |
+| `cli_duplicate_argument` | A non-repeatable argument appeared more than once. |
+| `cli_unexpected_positional` | More positionals were supplied than the command declares. |
+| `cli_invalid_utf8` | An argv token is not valid UTF-8. |

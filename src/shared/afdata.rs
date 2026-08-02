@@ -13,40 +13,12 @@ use crate::shared::error::Error;
 
 static OUTPUT_TO: OnceLock<agent_first_data::OutputTo> = OnceLock::new();
 
-/// Resolve and install the process-wide AFDATA stream selector before command
-/// dispatch. The default is finite one-shot `split` routing.
-pub fn install_output_to<I, S>(args: I) -> Result<(), Error>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-{
-    let args = args
-        .into_iter()
-        .map(|arg| arg.as_ref().to_string())
-        .collect::<Vec<_>>();
-    let mut value = "split".to_string();
-    let mut index = 1;
-    while index < args.len() {
-        let arg = &args[index];
-        if arg == "--" {
-            break;
-        }
-        if let Some(candidate) = arg.strip_prefix("--output-to=") {
-            value = candidate.to_string();
-        } else if arg == "--output-to" {
-            index += 1;
-            let Some(candidate) = args.get(index) else {
-                return Err(Error::new(
-                    crate::shared::error::ErrorCode::InvalidArgument,
-                    "--output-to requires a value: split, stdout, or stderr",
-                ));
-            };
-            value = candidate.clone();
-        }
-        index += 1;
-    }
-    let selector = agent_first_data::OutputTo::parse(&value)
-        .map_err(|message| Error::new(crate::shared::error::ErrorCode::InvalidArgument, message))?;
+/// Install the process-wide AFDATA stream selector for this run.
+///
+/// Which selector that is comes from the resolved invocation's output plan —
+/// the CLI registry has already decided which destinations the matched shape
+/// admits and which one applies — so nothing here re-reads argv.
+pub fn install_output_to(selector: agent_first_data::OutputTo) -> Result<(), Error> {
     OUTPUT_TO.set(selector).map_err(|_| {
         Error::new(
             crate::shared::error::ErrorCode::InternalError,
@@ -61,20 +33,6 @@ pub fn output_to() -> agent_first_data::OutputTo {
         .get()
         .copied()
         .unwrap_or(agent_first_data::OutputTo::Split)
-}
-
-/// Write an already-rendered discovery result (`--help`/`--version`) to the
-/// result side of the selected route.
-#[allow(clippy::disallowed_methods)]
-pub fn write_process_result(text: &str) -> std::io::Result<()> {
-    let mut writer: Box<dyn std::io::Write> = match output_to() {
-        agent_first_data::OutputTo::Stderr => Box::new(std::io::stderr()),
-        agent_first_data::OutputTo::Split | agent_first_data::OutputTo::Stdout => {
-            Box::new(std::io::stdout())
-        }
-    };
-    writer.write_all(text.as_bytes())?;
-    writer.flush()
 }
 
 /// Emit a typed result event to `writer` and write it as one line of JSON followed

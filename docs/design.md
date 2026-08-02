@@ -125,14 +125,19 @@ Boolean flags are bare presence toggles, never `on|off` values. A behavior that 
 
 ### Output is single-line JSON with explicit routing
 
-CLI mode has no `--output` flag and no alternate rendering. Every command emits
-exactly one AFDATA protocol-v1 JSON event with `_secret` redaction:
+A command result has exactly one rendering: `--output` is registered for every
+command but its value set is `json` alone, because an agent-facing fetch result
+has no useful human form. (`--help` and `--version` are read by people too, so
+they also render `plain` and `yaml`.) Every command emits AFDATA protocol-v1
+JSON with `_secret` redaction:
 `{"kind":"result","result":{"code":"fetch",...},"trace":{}}` on success or
 `{"kind":"error","error":{"code":...,"message":...},"trace":{}}` on failure.
 The default `--output-to split` sends results to stdout and errors to stderr;
 `--output-to stdout` or `--output-to stderr` collapses all event kinds onto one
-ordered stream. Page bytes and captured data go to artifact files referenced by
-`*_file` fields inside `result`.
+ordered stream. `afhttp host` is the one streaming command — it announces
+`host_ready` and keeps serving — so its contract is a stream and it defaults to
+one ordered channel on stdout. Page bytes and captured data go to artifact files
+referenced by `*_file` fields inside `result`.
 
 ### No `unwrap` / `expect` / `panic` in the crate
 

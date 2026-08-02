@@ -438,6 +438,7 @@ pub(super) async fn browser_path(
         });
     }
     if let Some(main) = main_entry.as_ref() {
+        result.content_type = main.mime_type.clone();
         if let Some(status) = main.status {
             result.status = status;
         } else {

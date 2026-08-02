@@ -29,9 +29,8 @@ ARG AFHTTP_BIN_FROM=builder
 # ── Source stage A: compile from a checkout (default) ──
 FROM rust:bookworm AS builder
 WORKDIR /src
-# Only the crate inputs — NOT .cargo/ (its dev path override to
-# ../agent-first-data is absent here, so agent-first-data resolves from
-# crates.io per Cargo.lock).
+# Only the crate inputs. Dependencies, including agent-first-data, resolve from
+# crates.io per Cargo.lock.
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src/ src/
 COPY assets/ assets/
@@ -76,13 +75,29 @@ ENV DEBIAN_FRONTEND=noninteractive
 # chromium (the always-on backend) + the libraries it needs to start, plus the
 # small toolset install-backends.sh uses for the optional backends, plus tini to
 # reap the browser's child processes (afhttp host is PID 1).
+#
+# The font set is deliberately broad. Font enumeration is a standard
+# fingerprinting dimension, and a browser that can see a couple of dozen
+# families reads as a bare server image rather than a desktop: this list takes
+# the image from ~46 resolvable fonts to ~486. It also stops CJK and emoji text
+# from rendering as tofu in captured screenshots.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         chromium \
         curl \
+        fonts-crosextra-caladea \
+        fonts-crosextra-carlito \
+        fonts-croscore \
+        fonts-dejavu \
+        fonts-dejavu-extra \
+        fonts-freefont-ttf \
         fonts-liberation \
+        fonts-liberation2 \
         fonts-noto-cjk \
+        fonts-noto-color-emoji \
+        fonts-noto-core \
+        fonts-urw-base35 \
         libatk-bridge2.0-0 \
         libatk1.0-0 \
         libdrm2 \
@@ -95,6 +110,7 @@ RUN apt-get update \
         libxrandr2 \
         procps \
         tini \
+        tzdata \
         unzip \
         xdg-utils \
         xz-utils \
@@ -109,6 +125,7 @@ ARG WITH_CHROME_HEADLESS_SHELL=0
 ARG WITH_LIGHTPANDA=0
 ARG WITH_FINGERPRINT_CHROMIUM=0
 ARG WITH_CAMOUFOX=0
+ARG WITH_CHROME=0
 ARG WITH_BRAVE=0
 ARG WITH_KASMVNC=0
 
@@ -116,6 +133,7 @@ RUN if [ "$WITH_CHROME_HEADLESS_SHELL" = "1" ]; then install-backends.sh chrome-
 RUN if [ "$WITH_LIGHTPANDA" = "1" ]; then install-backends.sh lightpanda; fi
 RUN if [ "$WITH_FINGERPRINT_CHROMIUM" = "1" ]; then install-backends.sh fingerprint-chromium; fi
 RUN if [ "$WITH_CAMOUFOX" = "1" ]; then install-backends.sh camoufox; fi
+RUN if [ "$WITH_CHROME" = "1" ]; then install-backends.sh chrome; fi
 RUN if [ "$WITH_BRAVE" = "1" ]; then install-backends.sh brave; fi
 RUN if [ "$WITH_KASMVNC" = "1" ]; then install-backends.sh kasmvnc; fi
 

@@ -28,6 +28,17 @@ case "$MODE" in
     run "bash tests/check_regressions.sh"
     ;;
   integration)
+    # Chrome-for-Testing ships linux64 only, so `install_chrome_headless_shell`
+    # self-skips on other architectures and the two chrome-shell tests then
+    # early-return — printing a notice that cargo captures, so the suite reports
+    # a clean pass over assertions that never ran. Say so out loud: on arm64 the
+    # pinned CHROME_FOR_TESTING_VERSION is exercised only by the x86 CI leg, and
+    # a bump verified "green" here has not actually been verified.
+    run 'if [ "$(uname -m)" != "x86_64" ]; then
+           printf "WARNING: %s is not x86_64 — chrome-headless-shell is absent, so\n" "$(uname -m)" >&2
+           printf "         chrome_shell_capabilities asserts nothing in this run.\n" >&2
+           printf "         The pinned chrome-for-testing version is covered by CI only.\n" >&2
+         fi'
     run "cargo test --all-features \
       --test fetch_http_only \
       --test health_capabilities \
@@ -37,6 +48,7 @@ case "$MODE" in
       --test fingerprint_chromium \
       --test lightpanda_backend \
       --test camoufox_foxbridge \
+      --test takeover_backends \
       --test cookie_jar \
       --test cookie_jar_isolation \
       --test retry_backoff \

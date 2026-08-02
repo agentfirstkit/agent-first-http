@@ -1,6 +1,5 @@
 //! `afhttp cdp` subcommand. Raw CDP method invocation.
 
-use clap::Args as ClapArgs;
 use serde::Serialize;
 
 use crate::cli::output;
@@ -14,25 +13,13 @@ struct CdpResult {
     result: serde_json::Value,
 }
 
-#[derive(ClapArgs, Debug)]
+#[derive(Debug)]
 pub struct Args {
-    /// CDP method name (e.g. Runtime.evaluate).
     pub method: String,
-    /// CDP endpoint of the running host (e.g. `ws://127.0.0.1:9222`). Falls back to `AFHTTP_ENDPOINT_URL`.
-    #[arg(long = "endpoint-url", env = "AFHTTP_ENDPOINT_URL")]
     pub endpoint: String,
-    /// Bearer token, if the host was started with `--token-secret`.
-    /// Falls back to `AFHTTP_TOKEN_SECRET`.
-    #[arg(long = "token-secret", env = "AFHTTP_TOKEN_SECRET")]
     pub token: Option<String>,
-    /// CDP target id (tab) to drive.
-    #[arg(long)]
     pub tab: String,
-    /// JSON literal, or `@-` to read from stdin.
-    #[arg(long, value_name = "JSON|@-")]
     pub params: Option<String>,
-    /// "<event>:<timeout>" — wait for a CDP event before exiting.
-    #[arg(long = "wait-event")]
     pub wait: Option<String>,
 }
 

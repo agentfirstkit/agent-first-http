@@ -648,5 +648,7 @@ async fn cli_fetch_rejects_legacy_timeout_flag() {
     let body: serde_json::Value = serde_json::from_slice(&output.stderr).expect("json");
     assert_eq!(body["kind"], "error");
     agent_first_data::validate_protocol_event(&body, true).expect("protocol event");
-    assert_eq!(body["error"]["code"], "invalid_argument");
+    // The closed-world registry names the rule it broke; a flag it never
+    // registered is an unknown argument, not a generic bad value.
+    assert_eq!(body["error"]["code"], "cli_unknown_argument");
 }

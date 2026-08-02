@@ -2,52 +2,12 @@
 //! Agent Skill across Codex, Claude Code, opencode, and Hermes via the shared
 //! `agent_first_data::skill` admin.
 
-use clap::{Args as ClapArgs, Subcommand, ValueEnum};
-
 use agent_first_data::skill::{
     self, SkillAction, SkillAgentSelection, SkillError, SkillOptions, SkillScope, SkillSpec,
 };
 
 use crate::cli::output;
 use crate::shared::error::{Error, ErrorCode};
-
-/// `--agent` selector.
-#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SkillAgentArg {
-    All,
-    Codex,
-    ClaudeCode,
-    Opencode,
-    Hermes,
-}
-
-impl From<SkillAgentArg> for SkillAgentSelection {
-    fn from(v: SkillAgentArg) -> Self {
-        match v {
-            SkillAgentArg::All => SkillAgentSelection::All,
-            SkillAgentArg::Codex => SkillAgentSelection::Codex,
-            SkillAgentArg::ClaudeCode => SkillAgentSelection::ClaudeCode,
-            SkillAgentArg::Opencode => SkillAgentSelection::Opencode,
-            SkillAgentArg::Hermes => SkillAgentSelection::Hermes,
-        }
-    }
-}
-
-/// `--scope` selector.
-#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SkillScopeArg {
-    Personal,
-    Workspace,
-}
-
-impl From<SkillScopeArg> for SkillScope {
-    fn from(v: SkillScopeArg) -> Self {
-        match v {
-            SkillScopeArg::Personal => SkillScope::Personal,
-            SkillScopeArg::Workspace => SkillScope::Workspace,
-        }
-    }
-}
 
 /// The embedded skill this binary installs.
 const SPEC: SkillSpec = SkillSpec {
@@ -58,42 +18,30 @@ const SPEC: SkillSpec = SkillSpec {
     assets: &[],
 };
 
-#[derive(ClapArgs, Debug)]
+#[derive(Debug)]
 pub struct Args {
-    #[command(subcommand)]
     pub sub: SkillSub,
 }
 
-#[derive(Subcommand, Debug)]
-#[command(disable_help_subcommand = true)]
+#[derive(Debug)]
 pub enum SkillSub {
-    /// Show whether the skill is installed, valid, and up to date.
     Status(TargetArgs),
-    /// Install or refresh the skill.
     Install(WriteArgs),
-    /// Remove a managed skill.
     Uninstall(WriteArgs),
 }
 
-#[derive(ClapArgs, Debug)]
+/// `--agent` and `--scope` arrive as registry-checked enum values, so the
+/// selector types below map from a closed set rather than parsing one.
+#[derive(Debug)]
 pub struct TargetArgs {
-    /// Agent to manage.
-    #[arg(long, default_value = "all")]
-    pub agent: SkillAgentArg,
-    /// Skill scope.
-    #[arg(long, default_value = "personal")]
-    pub scope: SkillScopeArg,
-    /// Skills directory; requires a single concrete --agent.
-    #[arg(long = "skills-dir")]
+    pub agent: String,
+    pub scope: String,
     pub skills_dir: Option<String>,
 }
 
-#[derive(ClapArgs, Debug)]
+#[derive(Debug)]
 pub struct WriteArgs {
-    #[command(flatten)]
     pub target: TargetArgs,
-    /// Overwrite or remove a skill this tool did not manage.
-    #[arg(long)]
     pub force: bool,
 }
 
@@ -111,8 +59,17 @@ pub async fn run(args: Args) -> Result<(), Error> {
 /// Convert the `--agent` / `--scope` flags into the library options.
 fn build_options(target: TargetArgs, force: bool) -> SkillOptions {
     SkillOptions {
-        agent: target.agent.into(),
-        scope: target.scope.into(),
+        agent: match target.agent.as_str() {
+            "codex" => SkillAgentSelection::Codex,
+            "claude-code" => SkillAgentSelection::ClaudeCode,
+            "opencode" => SkillAgentSelection::Opencode,
+            "hermes" => SkillAgentSelection::Hermes,
+            _ => SkillAgentSelection::All,
+        },
+        scope: match target.scope.as_str() {
+            "workspace" => SkillScope::Workspace,
+            _ => SkillScope::Personal,
+        },
         skills_dir: target.skills_dir,
         force,
     }
@@ -142,16 +99,33 @@ mod tests {
     }
 
     #[test]
-    fn build_options_maps_flags() {
+    fn build_options_maps_every_registry_value() {
+        for (agent, expected) in [
+            ("all", SkillAgentSelection::All),
+            ("codex", SkillAgentSelection::Codex),
+            ("claude-code", SkillAgentSelection::ClaudeCode),
+            ("opencode", SkillAgentSelection::Opencode),
+            ("hermes", SkillAgentSelection::Hermes),
+        ] {
+            let options = build_options(
+                TargetArgs {
+                    agent: agent.into(),
+                    scope: "personal".into(),
+                    skills_dir: None,
+                },
+                false,
+            );
+            assert_eq!(options.agent, expected, "{agent}");
+        }
+
         let ok = build_options(
             TargetArgs {
-                agent: SkillAgentArg::Opencode,
-                scope: SkillScopeArg::Workspace,
+                agent: "opencode".into(),
+                scope: "workspace".into(),
                 skills_dir: Some("/tmp/x".into()),
             },
             true,
         );
-        assert_eq!(ok.agent, SkillAgentSelection::Opencode);
         assert_eq!(ok.scope, SkillScope::Workspace);
         assert!(ok.force);
     }

@@ -1,4 +1,4 @@
-//! Integration test: `--browser chrome_shell` launches chrome-headless-shell
+//! Integration test: `--browser chrome-headless-shell` launches chrome-headless-shell
 //! and exposes the same capability matrix as the default chromium backend.
 //! Gated on `AFHTTP_TEST_CHROME_SHELL_BIN` (or the standard install path);
 //! Dockerfile.test pre-installs it on linux64.

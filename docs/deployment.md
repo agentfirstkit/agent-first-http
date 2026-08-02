@@ -29,6 +29,41 @@ isolated and disposable:
   host; `--takeover-provider off` builds lean down to `--shm-size=1g`,
 - on a private network — never host networking with the port exposed publicly.
 
+`--no-sandbox` is not a fingerprinting concern, so do not trade the container's
+posture away chasing one: it is invisible to page JavaScript, and Chromium 151
+shows no "unsupported command-line flag" warning for it (measured — the browser
+chrome is the same height with the sandbox on and off). Enabling Chromium's own
+sandbox inside the container would mean handing it `--cap-add=SYS_ADMIN`, which
+gives away more isolation than it buys back.
+
+### Timezone
+
+The image carries `tzdata` and honours `TZ`, and it is worth setting: a
+container left on the default UTC while its egress IP geolocates somewhere else
+is a mismatch a site can see, and UTC is the giveaway default of a server rather
+than a desktop. Set it to match the exit IP the host actually browses from —
+including the proxy's location when `--proxy-url` is in play, not the machine's:
+
+```bash
+docker run -e TZ=America/Los_Angeles ...
+```
+
+afhttp deliberately does not pick one for you. There is no value that is right
+for every deployment, and guessing wrong replaces one mismatch with another.
+
+### Graphics
+
+The host never passes `--disable-gpu`. That flag switches off the GPU process
+and takes WebGL with it — a browser launched that way reports `webgl: false`,
+`webgl2: false` and zero WebGL extensions, which no real browser does and every
+anti-bot scorer treats as automation. The host passes
+`--enable-unsafe-swiftshader` instead: hardware GL still wins wherever it exists,
+and containers without a GPU fall back to SwiftShader with full WebGL 1 + 2. The
+software renderer does report a SwiftShader `UNMASKED_RENDERER_WEBGL` string,
+which is its own weak signal, but a present-and-software WebGL grades far better
+than an absent one. `--browser-arg=--disable-gpu` remains available for callers
+who want the old behaviour.
+
 ## Quick start
 
 The driver embeds the host image recipe, so a brew-only install (no source tree)
@@ -168,6 +203,7 @@ build time and arch-guarded (several upstreams ship x86_64-only Linux builds):
 | `WITH_LIGHTPANDA=1` | `lightpanda` | x86_64 + arm64 |
 | `WITH_FINGERPRINT_CHROMIUM=1` | `fingerprint-chromium` | x86_64 |
 | `WITH_CAMOUFOX=1` | `camoufox` (+ foxbridge) | x86_64 + arm64 |
+| `WITH_CHROME=1` | `chrome` | x86_64 + arm64 |
 | `WITH_BRAVE=1` | `brave` | x86_64 + arm64 |
 | `WITH_KASMVNC=1` | KasmVNC display provider for `--takeover-provider kasmvnc` | x86_64 + arm64 |
 
@@ -179,13 +215,20 @@ docker build -t afhttp-host:stealth \
 
 The pinned/download recipes live in one place —
 `container/docker/install-backends.sh` — shared with the test image
-(`tests/Dockerfile.test`) so they cannot drift. Brave is installed from Brave's
-stable apt repository because it publishes architecture-native Debian packages.
+(`tests/Dockerfile.test`) so they cannot drift. Chrome and Brave are installed
+from their vendors' stable apt repositories because both publish
+architecture-native Debian packages; Google shipped native arm64 Linux builds in
+July 2026, so `WITH_CHROME=1` now resolves on both architectures.
 
 ### Proprietary browsers (Chrome / Edge)
 
-These can't be redistributed, so they're not bundled. Mount the vendor binary
-into the container and point at it:
+Neither can be redistributed, so neither is in a default image. `WITH_CHROME=1`
+(`--with chrome`) installs Chrome from Google's apt repository into an image
+**you** build locally, which is not redistribution — that is the supported way
+to get Chrome, and it is the one takeover backend besides Brave.
+
+Edge, and any Chrome build you would rather pin yourself, still mount from the
+host:
 
 ```bash
 docker run --rm -p 9222:9222 --shm-size=1g \
@@ -200,6 +243,25 @@ docker run --rm -p 9222:9222 --shm-size=1g \
 Human takeover is real-display takeover backed by KasmVNC. The default
 `afhttp container install` host is takeover-ready (Brave + KasmVNC + ephemeral
 initial profile + 2g `/dev/shm`); a raw `afhttp host` opts in with `--takeover-provider kasmvnc`.
+
+Takeover needs a headful browser on that display, not one specific vendor:
+`brave` (default) and `chrome` both qualify. Swap with
+
+```bash
+afhttp container install --with chrome --with kasmvnc -- --browser chrome
+```
+
+Both clear the same Cloudflare walls, so this is not a bot-wall ranking. Pick
+Chrome when you want the most common fingerprint on the web, or when a login
+flow breaks because Brave's Shields block its third-party auth scripts; stay on
+Brave for a default install that pulls no proprietary vendor binary and for
+captures kept clear of ads and trackers.
+
+If a wall serves a challenge that never becomes clickable, suspect the host
+before the browser. That symptom was afhttp's own doing until the WebGL and
+forced-`--browser-arg` defects below were fixed, and it looked exactly like a
+browser-quality problem.
+
 The driver-side entry point is:
 
 ```bash

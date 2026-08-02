@@ -1,6 +1,6 @@
 [package]
 name = "agent-first-http"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2024"
 description = "Give your AI agent its own private browser — so it reads the real page, past logins and bot walls, without ever touching yours."
 license = "MIT"
@@ -31,7 +31,7 @@ host = [
     "dep:hyper",
     "dep:hyper-util",
 ]
-cli = ["sdk", "host", "dep:clap", "dep:psl", "agent-first-data/cli-help", "agent-first-data/cli-help-markdown", "agent-first-data/skill-admin", "agent-first-data/stream-redirect"]
+cli = ["sdk", "host", "dep:psl", "agent-first-data/skill-admin", "agent-first-data/stream-redirect"]
 
 [dependencies]
 # SDK floor — always compiled.
@@ -62,11 +62,10 @@ tower-http = { version = "0.7", optional = true, features = ["fs", "trace"] }
 hyper = { version = "1", optional = true, features = ["full"] }
 hyper-util = { version = "0.1", optional = true, features = ["server-auto", "tokio"] }
 
-# SDK floor — used for URL secret redaction (redact_url_secrets); the cli-help
-# and skill-admin features are enabled only by the `cli` feature.
-agent-first-data = { version = "0.26.1", default-features = false }
-# CLI feature deps.
-clap = { version = "4", optional = true, features = ["derive", "env"] }
+# SDK floor. `cli` is part of the floor because every build emits protocol
+# events through `CliEmitter`; skill administration and stream redirection are
+# enabled only by this crate's own `cli` feature.
+agent-first-data = { version = "0.29.0", default-features = false, features = ["cli"] }
 cookie = "0.18"
 psl = { version = "2", optional = true }
 

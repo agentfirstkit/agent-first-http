@@ -3,271 +3,54 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use clap::Args as ClapArgs;
-use clap::ValueEnum;
-
-use crate::cli::cmd::argenums::{BrowserArg, RenderArg};
 use crate::cli::output;
-use crate::sdk::fetch::{
-    DEFAULT_NETWORK_BODY_MAX_BYTES, FetchCookie, NetworkBodies, RenderMode, Wait,
-};
+use crate::host::bootstrap::BrowserChoice;
+use crate::sdk::fetch::{FetchCookie, NetworkBodies, RenderMode, Wait};
 use crate::sdk::{Client, InlineConfig};
 use crate::shared::artifacts::Artifact;
 use crate::shared::error::{Error, ErrorCode};
 use crate::shared::ids::TabId;
 
-#[derive(ValueEnum, Debug, Clone, Copy, Default)]
-pub enum NetworkBodiesArg {
-    #[default]
-    Off,
-    Xhr,
-    All,
-}
-
-impl From<NetworkBodiesArg> for NetworkBodies {
-    fn from(v: NetworkBodiesArg) -> Self {
-        match v {
-            NetworkBodiesArg::Off => NetworkBodies::Off,
-            NetworkBodiesArg::Xhr => NetworkBodies::Xhr,
-            NetworkBodiesArg::All => NetworkBodies::All,
-        }
-    }
-}
-
-impl std::fmt::Display for NetworkBodiesArg {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Off => "off",
-            Self::Xhr => "xhr",
-            Self::All => "all",
-        })
-    }
-}
-
-#[derive(ClapArgs, Debug)]
+/// One fetch, already narrowed to a registered shape: `data` and `form` are
+/// never both set, and `takeover` never coexists with [`RenderMode::None`].
+#[derive(Debug)]
 pub struct Args {
-    /// URL to fetch.
     pub url: String,
-    /// CDP endpoint of a running host.
-    ///
-    /// Omit to spawn an inline ephemeral host for ordinary browser fetches;
-    /// with --takeover, omission discovers the standard local `afhttp-host`.
-    /// Falls back to `AFHTTP_ENDPOINT_URL`.
-    #[arg(
-        long = "endpoint-url",
-        env = "AFHTTP_ENDPOINT_URL",
-        help_heading = "Connection"
-    )]
     pub endpoint: Option<String>,
-    /// Bearer token for a protected host.
-    ///
-    /// Use when the host was started with `--token-secret`.
-    /// Falls back to `AFHTTP_TOKEN_SECRET`.
-    #[arg(
-        long = "token-secret",
-        env = "AFHTTP_TOKEN_SECRET",
-        help_heading = "Connection"
-    )]
     pub token: Option<String>,
-    /// Browser backend for the inline host.
-    ///
-    /// Ignored when --endpoint-url is set because the host owns its browser.
-    #[arg(long, default_value = "auto", help_heading = "Inline host")]
-    pub browser: BrowserArg,
-    /// Browser binary path for the inline host.
-    ///
-    /// Use when auto-discovery cannot find one. Ignored when --endpoint-url is
-    /// set.
-    #[arg(
-        long = "browser-bin",
-        value_name = "PATH",
-        help_heading = "Inline host"
-    )]
+    pub browser: BrowserChoice,
     pub browser_bin: Option<PathBuf>,
-    /// Render strategy: none, auto, or always.
-    ///
-    /// `none` uses the HTTP fast path without a browser, `auto` starts with
-    /// HTTP and escalates on failure, and `always` uses the browser only.
-    #[arg(long, default_value = "auto", help_heading = "Rendering")]
-    pub render: RenderArg,
-    /// Browser tab target: new or an existing CDP target ID.
-    ///
-    /// `new` allocates a temporary target and closes it after fetch; an ID
-    /// reuses that target and leaves it open (the same ID accepted by
-    /// `afhttp cdp`, `upload`, and `tabs`).
-    #[arg(
-        long,
-        default_value = "new",
-        value_name = "new|<id>",
-        help_heading = "Session"
-    )]
+    pub render: RenderMode,
     pub tab: String,
-    /// Escalate captcha, login, or 2FA walls to human takeover.
-    ///
-    /// Keeps a persistent tab open and returns its short-lived takeover URL in
-    /// `next_action`, plus a re-fetch command for the same tab once the human
-    /// clears the wall. Uses `--endpoint-url` / `AFHTTP_ENDPOINT_URL` when set;
-    /// otherwise discovers the standard local `afhttp-host` container (build
-    /// one with `afhttp container install`).
-    #[arg(long, help_heading = "Session")]
     pub takeover: bool,
-    /// Host profile to use for this fetch.
-    ///
-    /// Switches the host's active profile if it differs (per-domain
-    /// isolation), relaunching its browser. With `--takeover` and no
-    /// `--profile`, the profile defaults to the URL's registrable domain
-    /// (eTLD+1). Requires a host via `--endpoint-url`, or the standard local
-    /// takeover host discovered by `--takeover`.
-    #[arg(long, help_heading = "Session")]
     pub profile: Option<String>,
-    /// Readiness signal before browser capture.
-    ///
-    /// Values: auto | load | idle | selector:<css> |
-    /// selector-visible:<css> | ms:<n>.
-    #[arg(long, default_value = "auto", help_heading = "Rendering")]
     pub wait: String,
-    /// Add a request header (repeatable).
-    ///
-    /// Format: `Name:value` (a space after the colon is allowed).
-    #[arg(long = "header", value_name = "NAME:VALUE", help_heading = "Request")]
     pub headers: Vec<String>,
-    /// Add a request cookie (repeatable). Format: `name=value`.
-    #[arg(long = "cookie", value_name = "NAME=VALUE", help_heading = "Request")]
     pub cookies: Vec<String>,
-    /// Override the User-Agent header for this fetch.
-    #[arg(long, help_heading = "Request")]
     pub user_agent: Option<String>,
-    /// Evaluate JavaScript after readiness (repeatable).
-    ///
-    /// Runs in page context before artifacts are captured.
-    #[arg(long, value_name = "JS", help_heading = "Rendering")]
     pub evaluate_after_wait: Vec<String>,
-    /// Artifacts to capture, comma-separated.
-    ///
-    /// Defaults to body on the HTTP fast path and browser-default artifacts
-    /// when rendering. `content` is the agent-oriented composed page view
-    /// (content.md); `content_json` is its structured form with link/action
-    /// candidates. `storage` is opt-in and sensitive (localStorage/IndexedDB).
-    #[arg(long, value_delimiter = ',', help_heading = "Rendering")]
     pub want: Vec<String>,
-    /// HTTP method. Common values: POST, PUT, PATCH, DELETE.
-    #[arg(long, default_value = "GET", help_heading = "Request")]
     pub method: String,
-    /// Request body as a string or `@FILE`.
-    ///
-    /// Prefix with `@` to read from a file path (for example,
-    /// `--data @payload.json`). Mutually exclusive with `--form`.
-    #[arg(long, value_name = "STRING|@FILE", help_heading = "Request")]
     pub data: Option<String>,
-    /// Add a URL-encoded form field (repeatable).
-    ///
-    /// Sends `application/x-www-form-urlencoded`, uses `name=value`, and is
-    /// mutually exclusive with `--data`.
-    #[arg(long = "form", value_name = "NAME=VALUE", help_heading = "Request")]
     pub form: Vec<String>,
-    /// Capture network response bodies: off, xhr, or all.
-    ///
-    /// `xhr` captures XHR/fetch only.
-    #[arg(long, default_value_t = NetworkBodiesArg::Off, help_heading = "Network capture")]
-    pub network_bodies: NetworkBodiesArg,
-    /// Per-body byte cap for captured network sub-requests.
-    ///
-    /// See `--max-response-bytes` for the main HTTP-path response body.
-    #[arg(long, default_value_t = DEFAULT_NETWORK_BODY_MAX_BYTES, help_heading = "Network capture")]
+    pub network_bodies: NetworkBodies,
     pub network_body_max_bytes: u64,
-    /// Network quiet window used by --wait auto, in milliseconds.
-    #[arg(long, default_value_t = 800, help_heading = "Readiness tuning")]
     pub readiness_idle_ms: u64,
-    /// DOM/text unchanged window used by --wait auto, in milliseconds.
-    #[arg(long, default_value_t = 500, help_heading = "Readiness tuning")]
     pub readiness_stable_ms: u64,
-    /// Low visible-text byte threshold for --wait auto quality warnings only.
-    #[arg(long, default_value_t = 32, help_heading = "Readiness tuning")]
     pub readiness_min_text_bytes: u64,
-    /// Disable sensitive-value redaction in network.json.
-    ///
-    /// Writes raw Authorization/Cookie headers and token-bearing query
-    /// parameters to the artifact. Use only for trusted local debugging.
-    #[arg(long, help_heading = "Network capture")]
     pub no_network_redact: bool,
-    /// Directory in which to write artifacts.
-    ///
-    /// Defaults to `afhttp-out` under the system temporary directory. Files
-    /// persist there for inspection.
-    #[arg(long, help_heading = "Output")]
     pub out: Option<PathBuf>,
-    /// Override the profile cookie-jar path.
-    ///
-    /// The default, derived from the host's `GET /profile`, is
-    /// `<profile-dir>/cookies.jar.json`. A mismatch with the host profile is
-    /// rejected with `invalid_argument`; this flag is for tests and forensic
-    /// tooling, not production sessions. Honors `AFHTTP_COOKIE_JAR` when
-    /// omitted (same validation applies).
-    #[arg(long, help_heading = "Cookies")]
     pub cookie_jar: Option<PathBuf>,
-    /// Disable cookie-jar replay and persistence for this fetch.
-    ///
-    /// No cookies are replayed and no `Set-Cookie` responses are merged back.
-    #[arg(long, help_heading = "Cookies")]
     pub no_cookie_jar: bool,
-    /// Maximum wait for the browser's main-document event, in milliseconds.
-    ///
-    /// Raise for slow networks or low-end machines.
-    #[arg(long, default_value_t = 500, help_heading = "Readiness tuning")]
     pub observe_main_wait_ms: u64,
-    /// Maximum main HTTP-path response body size in bytes.
-    ///
-    /// See `--network-body-max-bytes` for captured sub-requests. The default is
-    /// 1 GiB (`1073741824`); `0` disables the cap. Hitting the cap returns the
-    /// collected prefix successfully with a `network_body_truncated` warning.
-    #[arg(long, default_value_t = 1_073_741_824, help_heading = "HTTP transport")]
     pub max_response_bytes: u64,
-    /// Number of retry attempts after the first.
-    ///
-    /// Retries run only for `retryable: true` errors such as
-    /// `host_unreachable` or `cdp_timeout`; non-retryable failures such as
-    /// `tls_error` short-circuit. The default `0` means one total attempt.
-    #[arg(long, default_value_t = 0, help_heading = "Retry")]
     pub retry: u32,
-    /// Fixed delay between retries, in milliseconds.
-    #[arg(long, default_value_t = 250, help_heading = "Retry")]
     pub backoff_ms: u64,
-    /// Upstream proxy for this fetch's HTTP fast path.
-    ///
-    /// The SDK never honors ambient `HTTP_PROXY`; this flag is the only proxy
-    /// route. Use `http://user:pass@host:port` or `socks5://host:port`.
-    #[arg(long = "proxy-url", help_heading = "HTTP transport")]
     pub proxy: Option<String>,
-    /// PEM file with extra root CAs for the HTTP path.
-    ///
-    /// Useful for self-signed staging or corporate MITM CAs.
-    #[arg(long, help_heading = "HTTP transport")]
     pub ca_cert: Option<PathBuf>,
-    /// Disable TLS certificate verification on the HTTP path.
-    ///
-    /// Dangerous: leaves the connection open to MITM. Use only against a
-    /// known self-signed environment.
-    #[arg(long, help_heading = "HTTP transport")]
     pub tls_insecure: bool,
-    /// Overall fetch timeout, in milliseconds. Applies to both the HTTP fast
-    /// path and the browser path.
-    #[arg(
-        long = "timeout-ms",
-        default_value_t = 30_000,
-        help_heading = "HTTP transport"
-    )]
     pub timeout_ms: u64,
-    /// Capture WebSocket frame payloads.
-    ///
-    /// Writes network-bodies/<id>.frames.jsonl. Frames may carry bearer
-    /// tokens, session IDs, and message content; treat it as sensitive.
-    #[arg(long, help_heading = "Network capture")]
     pub capture_ws: bool,
-    /// Capture SSE event payloads.
-    ///
-    /// Writes network-bodies/<id>.frames.jsonl. Events may carry PII; treat it
-    /// as sensitive.
-    #[arg(long, help_heading = "Network capture")]
     pub capture_sse: bool,
 }
 
@@ -283,9 +66,9 @@ pub async fn run(args: Args) -> Result<(), Error> {
 }
 
 async fn run_inner(mut args: Args) -> Result<(), FetchRunError> {
-    let render: RenderMode = args.render.into();
+    let render = args.render;
     let endpoint_was_preconfigured = args.endpoint.is_some();
-    prepare_takeover_connection(&mut args, render, |token| async move {
+    prepare_takeover_connection(&mut args, |token| async move {
         crate::cli::cmd::container::discover_default_takeover_host(token.as_deref()).await
     })
     .await?;
@@ -313,11 +96,11 @@ async fn run_inner(mut args: Args) -> Result<(), FetchRunError> {
     let takeover_token = args.token.clone();
     let wait = Wait::parse(&args.wait)?;
     let timeout = Duration::from_millis(args.timeout_ms);
-    let network_bodies = NetworkBodies::from(args.network_bodies);
+    let network_bodies = args.network_bodies;
     let network_redact = !args.no_network_redact;
 
     let body_bytes = resolve_body(&args).await?;
-    let want = resolve_want(&args.want)?;
+    let want = resolve_want(&args.want);
     let mut client = build_client(&args, render).await?;
     if let Some(profile) = &resolved_profile {
         client = client.with_profile(profile.clone());
@@ -452,23 +235,18 @@ async fn run_inner(mut args: Args) -> Result<(), FetchRunError> {
     }
 }
 
-async fn prepare_takeover_connection<D, Fut>(
-    args: &mut Args,
-    render: RenderMode,
-    discover: D,
-) -> Result<(), Error>
+/// Fill in the host `--takeover` needs when the caller did not name one.
+///
+/// That `--takeover` requires a browser render is not checked here: the
+/// registry's takeover shapes pin `--render` to the modes that reach one, so an
+/// unusable mix never becomes an invocation.
+async fn prepare_takeover_connection<D, Fut>(args: &mut Args, discover: D) -> Result<(), Error>
 where
     D: FnOnce(Option<String>) -> Fut,
     Fut: std::future::Future<Output = Result<crate::cli::cmd::container::LocalTakeoverHost, Error>>,
 {
     if !args.takeover {
         return Ok(());
-    }
-    if matches!(render, RenderMode::None) {
-        return Err(Error::new(
-            ErrorCode::InvalidArgument,
-            "fetch --takeover needs a browser render; use --render auto or always",
-        ));
     }
     if args.endpoint.is_none() {
         let discovered = discover(args.token.clone()).await?;
@@ -554,16 +332,11 @@ impl From<Error> for FetchRunError {
     }
 }
 
-/// Resolve the request body from `--data` (literal, or `@path` to read a file),
-/// rejecting coexistence with `--form`. `--form` fields are wired separately by
-/// the caller; this only enforces that they don't coexist with a raw body.
+/// Resolve the request body from `--data` (literal, or `@path` to read a file).
+///
+/// `--form` fields are wired separately by the caller, and the registry's three
+/// body shapes already guarantee the two never arrive together.
 async fn resolve_body(args: &Args) -> Result<Option<Vec<u8>>, Error> {
-    if args.data.is_some() && !args.form.is_empty() {
-        return Err(Error::new(
-            ErrorCode::InvalidArgument,
-            "--data and --form are mutually exclusive",
-        ));
-    }
     if let Some(data) = &args.data {
         if let Some(path) = data.strip_prefix('@') {
             return Ok(Some(tokio::fs::read(path).await.map_err(|e| {
@@ -576,15 +349,17 @@ async fn resolve_body(args: &Args) -> Result<Option<Vec<u8>>, Error> {
 }
 
 /// Parse the `--want` tokens into an artifact set; `None` means use the
-/// render-mode-aware default.
-fn resolve_want(want: &[String]) -> Result<Option<std::collections::BTreeSet<Artifact>>, Error> {
+/// render-mode-aware default. The registry declares `--want` as a closed value
+/// set, so every token that reaches here names an artifact.
+fn resolve_want(want: &[String]) -> Option<std::collections::BTreeSet<Artifact>> {
     if want.is_empty() {
-        return Ok(None);
+        return None;
     }
-    want.iter()
-        .map(|t| parse_artifact(t))
-        .collect::<Result<std::collections::BTreeSet<_>, _>>()
-        .map(Some)
+    Some(
+        want.iter()
+            .filter_map(|token| parse_artifact(token))
+            .collect(),
+    )
 }
 
 /// Construct the SDK client for this fetch: a remote connection when
@@ -602,7 +377,7 @@ async fn build_client(args: &Args, render: RenderMode) -> Result<Client, Error> 
         None if matches!(render, RenderMode::None) => Client::http_only(),
         None => {
             let cfg = InlineConfig {
-                browser: args.browser.into(),
+                browser: args.browser.clone(),
                 browser_bin: args.browser_bin.clone(),
             };
             if matches!(render, RenderMode::Auto) {
@@ -614,8 +389,8 @@ async fn build_client(args: &Args, render: RenderMode) -> Result<Client, Error> 
     }
 }
 
-fn parse_artifact(token: &str) -> Result<Artifact, Error> {
-    Ok(match token {
+fn parse_artifact(token: &str) -> Option<Artifact> {
+    Some(match token {
         "body" => Artifact::Body,
         "rendered_html" => Artifact::RenderedHtml,
         "text" => Artifact::Text,
@@ -626,12 +401,7 @@ fn parse_artifact(token: &str) -> Result<Artifact, Error> {
         "console" => Artifact::Console,
         "observation" => Artifact::Observation,
         "storage" => Artifact::Storage,
-        other => {
-            return Err(Error::new(
-                ErrorCode::InvalidArgument,
-                format!("--want: unknown artifact {other:?}"),
-            ));
-        }
+        _ => return None,
     })
 }
 
@@ -675,14 +445,16 @@ fn parse_cookie_arg(raw: &str) -> Result<FetchCookie, Error> {
 mod tests {
     use super::*;
 
+    use crate::sdk::fetch::DEFAULT_NETWORK_BODY_MAX_BYTES;
+
     fn base_args(url: &str) -> Args {
         Args {
             url: url.to_string(),
             endpoint: None,
             token: None,
-            browser: BrowserArg::Auto,
+            browser: BrowserChoice::Auto,
             browser_bin: None,
-            render: RenderArg::Auto,
+            render: RenderMode::Auto,
             tab: "new".into(),
             takeover: false,
             profile: None,
@@ -695,7 +467,7 @@ mod tests {
             method: "GET".into(),
             data: None,
             form: Vec::new(),
-            network_bodies: NetworkBodiesArg::Off,
+            network_bodies: NetworkBodies::Off,
             network_body_max_bytes: DEFAULT_NETWORK_BODY_MAX_BYTES,
             readiness_idle_ms: 800,
             readiness_stable_ms: 500,
@@ -721,7 +493,7 @@ mod tests {
     async fn takeover_autodiscovery_fills_missing_endpoint_and_token() {
         let mut args = base_args("https://contabo.com");
         args.takeover = true;
-        prepare_takeover_connection(&mut args, RenderMode::Auto, |token| async move {
+        prepare_takeover_connection(&mut args, |token| async move {
             assert_eq!(token, None);
             Ok(crate::cli::cmd::container::LocalTakeoverHost {
                 endpoint: "ws://127.0.0.1:9222".into(),
@@ -740,7 +512,7 @@ mod tests {
         let mut args = base_args("https://contabo.com");
         args.takeover = true;
         args.token = Some("env-token".into());
-        prepare_takeover_connection(&mut args, RenderMode::Auto, |token| async move {
+        prepare_takeover_connection(&mut args, |token| async move {
             assert_eq!(token.as_deref(), Some("env-token"));
             Ok(crate::cli::cmd::container::LocalTakeoverHost {
                 endpoint: "ws://127.0.0.1:9222".into(),
@@ -758,7 +530,7 @@ mod tests {
     async fn takeover_autodiscovery_surfaces_failure() {
         let mut args = base_args("https://contabo.com");
         args.takeover = true;
-        let err = prepare_takeover_connection(&mut args, RenderMode::Auto, |_| async {
+        let err = prepare_takeover_connection(&mut args, |_| async {
             Err(Error::new(
                 ErrorCode::InvalidArgument,
                 "default local container `afhttp-host` is not running",
@@ -773,22 +545,18 @@ mod tests {
         assert!(args.endpoint.is_none());
     }
 
-    #[tokio::test]
-    async fn takeover_autodiscovery_rejects_render_none() {
-        let mut args = base_args("https://contabo.com");
-        args.takeover = true;
-        let err = prepare_takeover_connection(&mut args, RenderMode::None, |_| async {
-            Ok(crate::cli::cmd::container::LocalTakeoverHost {
-                endpoint: "ws://127.0.0.1:9222".into(),
-                token_secret: None,
-            })
-        })
-        .await
-        .err()
-        .unwrap();
-
-        assert_eq!(err.error_code, ErrorCode::InvalidArgument);
-        assert!(err.detail.contains("browser render"));
+    /// Every value the registry lets `--want` carry names a real artifact, so
+    /// the projection can be total.
+    #[test]
+    fn every_registry_want_value_names_an_artifact() {
+        for token in crate::cli::spec::ARTIFACTS {
+            assert!(parse_artifact(token).is_some(), "{token}");
+        }
+        let wanted = resolve_want(&["body".to_string(), "network".to_string()])
+            .expect("an explicit want is a set");
+        assert!(wanted.contains(&Artifact::Body));
+        assert!(wanted.contains(&Artifact::Network));
+        assert!(resolve_want(&[]).is_none(), "no want means the default set");
     }
 
     #[test]

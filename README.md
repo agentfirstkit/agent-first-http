@@ -143,7 +143,8 @@ afhttp is not "headless Chromium." How hard a site fights back decides which eng
 - **camoufox** (via foxbridge) — a Firefox stealth fork for sites that fingerprint Chromium, driven through the [foxbridge](https://foxbridge.vulpineos.com/) CDP→Juggler proxy. Same CDP subset as Lightpanda (no Chromium screenshot), but optional real-display takeover works because the human drives the real X display.
 - **lightpanda** — an ultralight engine covering a rendering subset: HTML / text / network metadata / console / limited observation only — no screenshot, no display takeover (no rendering).
 - **edge** — Microsoft Edge, when a target expects that specific engine; the full Chromium capability matrix.
-- **brave** — Brave, with built-in ad/tracker blocking and the full capability matrix; also the browser a human drives during takeover.
+- **brave** — Brave, with built-in ad/tracker blocking and the full capability matrix; the default browser a human drives during takeover.
+- **chrome** — Google Chrome, the other takeover backend; reach for it for the web's most common fingerprint, or when Brave's Shields break a login flow.
 - **Any other CDP-compatible browser** — launch it yourself; drivers connect via `--endpoint-url`.
 
 Unsupported per-artifact operations return per-artifact warnings (`backend_unsupported`), not whole-fetch failures.
@@ -199,7 +200,8 @@ afhttp host --listen tcp:0.0.0.0:9222 --profile work --display headless \
 # From the agent's machine:
 afhttp fetch --endpoint-url ws://host.mesh.internal:9222 --token-secret "$AFHTTP_TOKEN_SECRET" \
              --render auto --wait auto \
-             --want rendered_html,observation,screenshot,network,console \
+             --want rendered_html --want observation --want screenshot \
+             --want network --want console \
              --network-bodies xhr \
              https://target.example.com/dashboard
 ```

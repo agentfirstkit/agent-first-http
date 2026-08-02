@@ -20,10 +20,16 @@ afhttp fetch --help
 afhttp container --help
 ```
 
-Bare help is a compact AFDATA JSON result. Start at the root, then request only
-the relevant command; use `--recursive` only when a full-tree index is actually
-needed. Add `--output plain` for conventional human help or `--output markdown`
-for the long-form documentation view.
+Help is an AFDATA JSON result that lists every legal shape of that command at
+once, so one call per command is enough; the root call lists the commands. Add
+`--output plain` for a terminal rendering. `afhttp --docs` renders the whole CLI
+as Markdown when a full reference is genuinely needed.
+
+An invocation runs only when it matches one registered shape. A rejection names
+the rule it broke in `error.code` — `cli_unknown_argument`,
+`cli_unregistered_combination`, `cli_invalid_argument_value`, and so on — so
+read that code rather than the message, and re-read the command's help instead
+of guessing another flag mix.
 
 ## Fetch A Page
 
@@ -37,7 +43,7 @@ Read `content.md` first when `content_file` is present; it is the
 agent-oriented composed page view and should include visible text from open
 shadow DOM, same-origin frames, cards, tables, and links. If the fetch stayed on
 the HTTP fast path, read `body_file` first and only retry with `--render always`
-or explicit `--want content,content_json,observation,network,console` when the
+or explicit `--want content --want content_json --want observation` when the
 raw body looks incomplete, placeholder-like, or contradicted by warnings. Use
 `content.json` when present and you need to choose a follow-up link/action.
 Inspect `observation.json`, `network.json`, and `console.json` only when needed.
@@ -144,9 +150,22 @@ ask the user to complete or confirm the visible browser state, then stop and
 wait. Only after the user explicitly confirms should you run
 `next_action.recommended_command` (a re-fetch of the same `--tab`).
 
-If takeover still fails, report that the target page could not be verified and
-name likely external causes such as IP/network reputation, account state, or
-site policy.
+Check what the challenge actually offered before handing its URL to anyone. A
+challenge stuck on "Verifying..." that never produces a checkbox is a silent
+rejection, not a puzzle: there is nothing for a human to click, so sending the
+user there wastes their time. Say that the wall rejected the browser outright
+rather than presenting it as a step they can complete.
+
+Do not answer that symptom by swapping takeover backends. Both takeover
+browsers clear the same walls, and a wall that offers one of them nothing to
+click is rejecting the host, not the vendor. Suspect, in order: the host's own
+browser environment, then the exit IP's reputation, then account state or site
+policy. A useful split is to try the same URL from an ordinary desktop browser
+on the same network — when that succeeds and the host fails, the difference is
+the host environment, and no browser swap will close it.
+
+If the user clears an interactive challenge and the page still does not verify,
+report that plainly instead of retrying variations at them.
 
 ## Host State
 

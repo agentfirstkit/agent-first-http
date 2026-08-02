@@ -357,3 +357,131 @@ async fn kasmvnc_process_launches_when_binary_available() {
         .expect("kasm web request");
     assert!(resp.status().is_success());
 }
+
+/// The `--disable-gpu` regression, pinned where it actually reproduces.
+///
+/// The host used to pass `--disable-gpu` unconditionally, which switched the
+/// GPU process off and took WebGL with it: a takeover browser reported
+/// `webgl: false`, `webgl2: false` and zero extensions. No real browser looks
+/// like that, and anti-bot scorers read it as automation — the takeover host
+/// was advertising itself as a bot on the one path built to get past walls.
+///
+/// This has to run headful on a real X display. Under `--headless=new`,
+/// Chromium serves WebGL whether or not `--disable-gpu` is passed, so the same
+/// assertion in a headless test passes with the fix reverted and guards
+/// nothing. Ignored and driven by `tests/test.sh takeover`, alongside the other
+/// tests that need a live KasmVNC display.
+#[tokio::test]
+#[ignore]
+async fn takeover_browsers_expose_webgl_on_a_real_display() {
+    use agent_first_http::sdk::Client;
+    use agent_first_http::sdk::fetch::{RenderMode, Wait};
+    use agent_first_http::shared::artifacts::Artifact;
+
+    support::ensure_rustls_provider();
+    let Some(kasm) = support::env::discover_kasmvnc() else {
+        panic!("KasmVNC is required for the takeover gate; set AFHTTP_TEST_KASMVNC_BIN");
+    };
+    // SAFETY: the takeover gate runs these ignored display tests with
+    // --test-threads=1, so no other thread touches the environment here.
+    unsafe { std::env::set_var("AFHTTP_KASMVNC_BIN", kasm) };
+    let provider = agent_first_http::host::takeover::launch_kasmvnc_provider()
+        .await
+        .expect("launch kasmvnc");
+
+    // Writes the verdict into the DOM: evaluate_after_wait runs JS but returns
+    // nothing to the caller, so the page has to carry the answer out.
+    const PROBE: &str = r#"(() => {
+      const one = document.createElement('canvas').getContext('webgl');
+      const two = document.createElement('canvas').getContext('webgl2');
+      const out = document.createElement('div');
+      out.id = 'afhttp-webgl-probe';
+      out.textContent = JSON.stringify({
+        webgl: !!one,
+        webgl2: !!two,
+        extensions: one ? one.getSupportedExtensions().length : 0,
+      });
+      document.body.appendChild(out);
+    })()"#;
+
+    let fixture = support::fixture_server::spawn().await;
+
+    for (choice, label, bin) in [
+        (
+            BrowserChoice::Brave,
+            "brave",
+            support::env::discover_brave(),
+        ),
+        (
+            BrowserChoice::Chrome,
+            "chrome",
+            support::env::discover_chrome(),
+        ),
+    ] {
+        let bin = bin.unwrap_or_else(|| {
+            panic!("{label} is a takeover backend and must be present in the test image")
+        });
+        let args = HostArgs {
+            listen: "tcp:127.0.0.1:0".into(),
+            profile: ProfileChoice::Ephemeral,
+            display: DisplayMode::Headful,
+            takeover: Takeover::On {
+                provider: TakeoverProviderKind::KasmVnc,
+            },
+            display_quality: 100,
+            browser: choice,
+            browser_bin: Some(bin),
+            token: None,
+            takeover_enabled: true,
+            health_enabled: true,
+            health_public: HealthPublic::Off,
+            engine_envs: vec![("DISPLAY".to_string(), provider.display.clone())],
+            browser_args: Vec::new(),
+            proxy: None,
+            recent_requests_cap: 0,
+        };
+        let handle = agent_first_http::host::browser::launch(&args)
+            .await
+            .unwrap_or_else(|e| panic!("{label} headful launch: {e:?}"));
+
+        let state = test_state(None, HealthPublic::Off).with_default_browser(Arc::new(handle));
+        let app = router_for_tests(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let client = Client::connect(&format!("ws://{addr}")).expect("client");
+        let result = client
+            .fetch(format!("{}/identity.html", fixture.base_url()))
+            .render(RenderMode::Always)
+            .wait(Wait::Load)
+            .timeout(Duration::from_secs(30))
+            .evaluate_after_wait(PROBE)
+            .want([Artifact::RenderedHtml])
+            .out_dir(tmp.path().to_path_buf())
+            .send()
+            .await
+            .unwrap_or_else(|e| panic!("{label} fetch: {e:?}"));
+
+        let rendered = std::fs::read_to_string(
+            result
+                .rendered_html_file
+                .as_ref()
+                .expect("rendered_html_file"),
+        )
+        .expect("read rendered html");
+
+        assert!(
+            rendered.contains("\"webgl\":true") && rendered.contains("\"webgl2\":true"),
+            "{label} lost WebGL on a real display — that is the --disable-gpu regression: {rendered}"
+        );
+        assert!(
+            !rendered.contains("\"extensions\":0"),
+            "{label} exposed a WebGL context with no extensions: {rendered}"
+        );
+    }
+}

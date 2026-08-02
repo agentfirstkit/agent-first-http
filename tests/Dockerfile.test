@@ -58,6 +58,7 @@ RUN chmod +x /usr/local/bin/install-backends.sh \
     && install-backends.sh lightpanda \
     && install-backends.sh fingerprint-chromium \
     && if [ "$AFHTTP_TEST_INSTALL_CAMOUFOX" = "1" ]; then install-backends.sh camoufox; else echo "skipping camoufox in test image; set AFHTTP_TEST_INSTALL_CAMOUFOX=1 to include it"; fi \
+    && install-backends.sh chrome \
     && install-backends.sh brave \
     && install-backends.sh kasmvnc
 
@@ -70,6 +71,7 @@ ENV CARGO_HOME=/cargo-home \
     AFHTTP_TEST_FINGERPRINT_CHROMIUM_BIN=/usr/local/bin/fingerprint-chromium \
     AFHTTP_TEST_FOXBRIDGE_BIN=/usr/local/bin/foxbridge \
     AFHTTP_TEST_CAMOUFOX_BIN=/usr/local/bin/camoufox \
+    AFHTTP_TEST_CHROME_BIN=/usr/bin/google-chrome-stable \
     AFHTTP_TEST_BRAVE_BIN=/usr/bin/brave-browser \
     AFHTTP_TEST_KASMVNC_BIN=/usr/bin/Xvnc \
     AFHTTP_KASMVNC_BIN=/usr/bin/Xvnc \

@@ -10,21 +10,16 @@ on:
     - cron: '17 4 * * *'   # nightly, 04:17 UTC
   workflow_dispatch:
 
-# afhttp depends on a sibling crate at ../agent-first-data via a Cargo path
-# override; check out both repos in the layout the Docker harness expects.
+# agent-first-data resolves from crates.io here: the development path override
+# in .cargo/config.toml is excluded by the release sync and has never existed in
+# this repository.
+
 jobs:
   display-takeover:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          path: kit/spores/agent-first-http
           fetch-depth: 0
-      - uses: actions/checkout@v4
-        with:
-          repository: agentfirstkit/agent-first-data
-          path: kit/spores/agent-first-data
-          fetch-depth: 1
       - name: Display-takeover suite (KasmVNC, Docker harness)
-        working-directory: kit/spores/agent-first-http
         run: tests/test.sh takeover

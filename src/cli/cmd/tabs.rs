@@ -1,51 +1,32 @@
 //! `afhttp tabs` — list and close CDP targets.
 
-use clap::{Args as ClapArgs, Subcommand};
 use serde_json::Value;
 
 use crate::cli::output;
 use crate::sdk::Client;
 use crate::shared::error::{Error, ErrorCode};
 
-#[derive(ClapArgs, Debug)]
+#[derive(Debug)]
 pub struct Args {
-    #[command(subcommand)]
     pub sub: TabsSub,
 }
 
-#[derive(Subcommand, Debug)]
-#[command(disable_help_subcommand = true)]
+#[derive(Debug)]
 pub enum TabsSub {
-    /// List currently-attached CDP targets.
     List(EndpointArgs),
-    /// Close a target by its CDP target id.
     Close(CloseArgs),
 }
 
-#[derive(ClapArgs, Debug)]
+#[derive(Debug)]
 pub struct EndpointArgs {
-    /// CDP endpoint URL (e.g. `ws://127.0.0.1:9222`). Falls back to
-    /// `AFHTTP_ENDPOINT_URL`.
-    #[arg(long = "endpoint-url", env = "AFHTTP_ENDPOINT_URL")]
     pub endpoint: String,
-    /// Bearer token, if the host was started with `--token-secret`.
-    /// Falls back to `AFHTTP_TOKEN_SECRET`.
-    #[arg(long = "token-secret", env = "AFHTTP_TOKEN_SECRET")]
     pub token: Option<String>,
 }
 
-#[derive(ClapArgs, Debug)]
+#[derive(Debug)]
 pub struct CloseArgs {
-    /// CDP target id (tab) to close (e.g. `41A0F1E0FD…`).
-    #[arg(long)]
     pub tab: String,
-    /// CDP endpoint URL (e.g. `ws://127.0.0.1:9222`). Falls back to
-    /// `AFHTTP_ENDPOINT_URL`.
-    #[arg(long = "endpoint-url", env = "AFHTTP_ENDPOINT_URL")]
     pub endpoint: String,
-    /// Bearer token, if the host was started with `--token-secret`.
-    /// Falls back to `AFHTTP_TOKEN_SECRET`.
-    #[arg(long = "token-secret", env = "AFHTTP_TOKEN_SECRET")]
     pub token: Option<String>,
 }
 

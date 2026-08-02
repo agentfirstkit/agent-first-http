@@ -1,19 +1,12 @@
 //! `afhttp capabilities` subcommand.
 
-use clap::Args as ClapArgs;
-
 use crate::cli::output;
 use crate::sdk::Client;
 use crate::shared::error::Error;
 
-#[derive(ClapArgs, Debug)]
+#[derive(Debug)]
 pub struct Args {
-    /// CDP endpoint of the running host (e.g. `ws://127.0.0.1:9222`). Falls back to `AFHTTP_ENDPOINT_URL`.
-    #[arg(long = "endpoint-url", env = "AFHTTP_ENDPOINT_URL")]
     pub endpoint: String,
-    /// Bearer token, if the host was started with `--token-secret`.
-    /// Falls back to `AFHTTP_TOKEN_SECRET`.
-    #[arg(long = "token-secret", env = "AFHTTP_TOKEN_SECRET")]
     pub token: Option<String>,
 }
 

@@ -10,8 +10,12 @@ shared::artifacts::tests::filename_templates_match_spec_table
 sdk::fetch::result::tests::fetch_success_json_is_flat_golden
 shared::contract_tests::readme_and_reference_fetch_json_examples_are_flat
 sdk::inline::tests::inline_guard_drop_closes_port_and_removes_ephemeral_profile
-cli::args::tests::clap_command_flag_snapshot_matches
-cli::args::tests::cli_contract_has_no_legacy_aliases
+cli::spec::tests::command_flag_snapshot_matches
+cli::spec::tests::cli_contract_has_no_legacy_aliases
+cli::spec::tests::registry_builds_and_every_shape_is_reachable
+cli::spec::tests::takeover_rejects_the_render_mode_that_has_no_browser
+cli::spec::tests::a_request_body_is_data_or_form_but_never_both
+cli::args::tests::every_action_has_exactly_one_handler
 cli::cmd::panel::tests::panel_result_exposes_takeover_url_secret_only
 takeover_handoff_is_unavailable_without_display_provider
 cli_render_none_without_endpoint_does_not_require_browser_env

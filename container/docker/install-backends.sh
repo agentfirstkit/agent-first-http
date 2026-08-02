@@ -11,18 +11,19 @@
 # unavailable, and its tests self-skip).
 #
 #   install-backends.sh chrome-headless-shell | lightpanda | fingerprint-chromium
-#                       | camoufox | brave | kasmvnc
+#                       | camoufox | chrome | brave | kasmvnc
 set -euo pipefail
 
 # Pinned versions for direct-download backends — bump these (and re-verify both
-# images build) together. Apt-backed Brave tracks Brave's stable repository.
-CHROME_FOR_TESTING_VERSION="151.0.7922.47"
+# images build) together. Apt-backed Chrome and Brave track their vendors'
+# stable repositories.
+CHROME_FOR_TESTING_VERSION="151.0.7922.71"
 FINGERPRINT_CHROMIUM_VERSION="148.0.7778.215"
 CAMOUFOX_RELEASE="v152.0.4-beta.28"
 CAMOUFOX_X86_BUILD="152.0.4-beta.28"
 CAMOUFOX_ARM_BUILD="152.0.4-beta.28"
 GO_VERSION="1.26.5"
-KASMVNC_VERSION="1.4.0"
+KASMVNC_VERSION="1.5.0"
 
 arch="$(uname -m)"
 
@@ -119,6 +120,29 @@ install_camoufox() {
     rm -rf /usr/local/go "$GOPATH"
 }
 
+install_chrome() {
+    # Google Chrome, from Google's own apt repository. Chrome is proprietary and
+    # cannot be redistributed, so this only ever runs in an image the user builds
+    # locally — it is opt-in via `--with chrome` and never part of a published
+    # artifact. Google shipped native arm64 Linux builds in July 2026, so both
+    # architectures now resolve; before that only amd64 existed.
+    local deb_arch
+    case "$arch" in
+        x86_64) deb_arch="amd64" ;;
+        aarch64|arm64) deb_arch="arm64" ;;
+        *) echo "skipping Chrome on unsupported arch $arch"; return 0 ;;
+    esac
+    # Google publishes an ASCII-armored key; apt reads it as-is from a .asc file,
+    # so this needs no gnupg in the image (Brave ships a pre-dearmored .gpg).
+    curl -4 --retry 5 --retry-all-errors -fsSLo /usr/share/keyrings/google-chrome.asc \
+        https://dl.google.com/linux/linux_signing_key.pub
+    echo "deb [signed-by=/usr/share/keyrings/google-chrome.asc arch=${deb_arch}] https://dl.google.com/linux/chrome/deb/ stable main" \
+        > /etc/apt/sources.list.d/google-chrome.list
+    apt-get update
+    apt-get install -y --no-install-recommends google-chrome-stable
+    rm -rf /var/lib/apt/lists/*
+}
+
 install_brave() {
     # Brave publishes Debian packages for both amd64 and arm64. It stays in the
     # Chromium/CDP family, so persistent profiles and iframe targets keep the
@@ -160,7 +184,8 @@ case "${1:-}" in
     lightpanda)            install_lightpanda ;;
     fingerprint-chromium)  install_fingerprint_chromium ;;
     camoufox)              install_camoufox ;;
+    chrome)                install_chrome ;;
     brave)                 install_brave ;;
     kasmvnc)               install_kasmvnc ;;
-    *) echo "usage: $0 {chrome-headless-shell|lightpanda|fingerprint-chromium|camoufox|brave|kasmvnc}" >&2; exit 2 ;;
+    *) echo "usage: $0 {chrome-headless-shell|lightpanda|fingerprint-chromium|camoufox|chrome|brave|kasmvnc}" >&2; exit 2 ;;
 esac

@@ -97,6 +97,47 @@ pub fn discover_fingerprint_chromium() -> Option<PathBuf> {
     None
 }
 
+/// Resolve the Brave binary — the default takeover backend.
+///
+/// Unlike the arch-limited backends above this one is not allowed to go
+/// missing: Brave publishes amd64 and arm64 Debian packages, so the test image
+/// carries it on every architecture the suite runs on and the takeover tests
+/// must actually execute rather than self-skip.
+pub fn discover_brave() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("AFHTTP_TEST_BRAVE_BIN") {
+        let path = PathBuf::from(p);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    for candidate in ["/usr/bin/brave-browser", "/usr/bin/brave"] {
+        let path = PathBuf::from(candidate);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// Resolve the Google Chrome binary — the other takeover backend. Google ships
+/// arm64 Linux builds as of July 2026, so like Brave this is present on every
+/// architecture the test image is built for.
+pub fn discover_chrome() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("AFHTTP_TEST_CHROME_BIN") {
+        let path = PathBuf::from(p);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    for candidate in ["/usr/bin/google-chrome-stable", "/usr/bin/google-chrome"] {
+        let path = PathBuf::from(candidate);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    None
+}
+
 /// Resolve the foxbridge binary. The camoufox backend needs BOTH this
 /// and a camoufox binary; if either is missing the test should skip.
 pub fn discover_foxbridge() -> Option<PathBuf> {

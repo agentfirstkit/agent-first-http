@@ -1,7 +1,7 @@
-//! Per-subcommand implementations. Each builds a request from clap args,
-//! calls into the SDK, and emits a response envelope.
+//! Per-subcommand implementations. Each takes the argument struct the CLI
+//! registry projected for it, calls into the SDK, and emits a response
+//! envelope.
 
-pub mod argenums;
 pub mod capabilities;
 pub mod cdp;
 pub mod container;

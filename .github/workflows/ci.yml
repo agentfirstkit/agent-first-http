@@ -5,9 +5,10 @@ on:
   push:
     branches: [main]
 
-# afhttp depends on a sibling crate at ../agent-first-data via a
-# Cargo path override (see .cargo/config.toml). CI checks out both repos
-# in the layout the override expects.
+# agent-first-data resolves from crates.io here, with no second checkout and
+# nothing to undo: the Cargo path override that development uses lives in
+# .cargo/config.toml, which the release sync excludes, so it has never existed
+# in this repository.
 
 jobs:
   static:
@@ -15,41 +16,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          path: kit/spores/agent-first-http
           fetch-depth: 0
-      - uses: actions/checkout@v4
-        with:
-          repository: agentfirstkit/agent-first-data
-          path: kit/spores/agent-first-data
-          fetch-depth: 1
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - name: Install afdata skill validator
         run: cargo install agent-first-data --locked --features skill
       - name: Validate Agent Skill and fmt
-        working-directory: kit/spores/agent-first-http
         run: |
           afdata skill validate skills/agent-first-http
           cargo fmt --all --check
       - name: build --all-features
-        working-directory: kit/spores/agent-first-http
         run: cargo build --all-features
       - name: build --no-default-features --features sdk
-        working-directory: kit/spores/agent-first-http
         run: cargo build --no-default-features --features sdk
       - name: SDK-only build excludes chromiumoxide
-        working-directory: kit/spores/agent-first-http
         run: |
           if cargo tree --no-default-features --features sdk | grep -q chromiumoxide; then
             echo "::error::SDK-only build linked chromiumoxide"
             exit 1
           fi
       - name: clippy --all-features
-        working-directory: kit/spores/agent-first-http
         run: cargo clippy --all-features --all-targets -- -D warnings
       - name: clippy --no-default-features --features sdk
-        working-directory: kit/spores/agent-first-http
         run: cargo clippy --no-default-features --features sdk --all-targets -- -D warnings
 
   unit:
@@ -58,19 +47,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          path: kit/spores/agent-first-http
           fetch-depth: 0
-      - uses: actions/checkout@v4
-        with:
-          repository: agentfirstkit/agent-first-data
-          path: kit/spores/agent-first-data
-          fetch-depth: 1
       - uses: dtolnay/rust-toolchain@stable
       - name: Unit + bin tests
-        working-directory: kit/spores/agent-first-http
         run: cargo test --lib --bins --features sdk,cli
       - name: Regression list
-        working-directory: kit/spores/agent-first-http
         run: bash tests/check_regressions.sh
 
   integration:
@@ -94,20 +75,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          path: kit/spores/agent-first-http
           fetch-depth: 0
-      - uses: actions/checkout@v4
-        with:
-          repository: agentfirstkit/agent-first-data
-          path: kit/spores/agent-first-data
-          fetch-depth: 1
       - uses: dtolnay/rust-toolchain@stable
       - name: Install browser
         if: matrix.install != ''
         shell: bash
         run: ${{ matrix.install }}
       - name: Browser integration suite
-        working-directory: kit/spores/agent-first-http
         env:
           AFHTTP_TEST_BROWSER_BIN: ${{ matrix.browser_bin }}
           # Tests poll the deep fetch/host future chain on tokio worker threads;
@@ -135,16 +109,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          path: kit/spores/agent-first-http
           fetch-depth: 0
-      - uses: actions/checkout@v4
-        with:
-          repository: agentfirstkit/agent-first-data
-          path: kit/spores/agent-first-data
-          fetch-depth: 1
       # The harness builds tests/Dockerfile.test on first use (chromium + 4
-      # backends + KasmVNC), mounts the spores/ parent, and resolves the afdata
-      # path override from the sibling checkout.
+      # backends + KasmVNC); Cargo resolves agent-first-data from crates.io.
       - name: Full integration suite (Docker harness)
-        working-directory: kit/spores/agent-first-http
         run: tests/test.sh integration

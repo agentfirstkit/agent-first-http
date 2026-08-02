@@ -190,7 +190,19 @@ fn chromium_args(args: &HostArgs, profile_dir: &Path, port: u16) -> Vec<String> 
         out.push("--no-sandbox".to_string());
         out.push("--disable-setuid-sandbox".to_string());
     }
-    out.push("--disable-gpu".to_string());
+    // Do NOT pass --disable-gpu. It switches off the GPU process wholesale, and
+    // with it WebGL: a browser launched that way reports webgl=false, webgl2=false
+    // and zero WebGL extensions. No real browser looks like that, so every
+    // anti-bot scorer reads it as automation — measured against a Cloudflare
+    // Turnstile wall, the no-WebGL profile never cleared even with a human
+    // clicking the checkbox.
+    //
+    // --enable-unsafe-swiftshader only *permits* the software fallback; hardware
+    // GL still wins wherever it exists, so this is a no-op on a machine with a
+    // usable GPU and restores full WebGL 1 + 2 on the headless/container hosts
+    // that have none. Callers who really want the GPU off can still pass
+    // --disable-gpu through --browser-arg.
+    out.push("--enable-unsafe-swiftshader".to_string());
     match args.proxy.as_deref() {
         Some(url) => out.push(format!("--proxy-server={url}")),
         None => out.push("--no-proxy-server".to_string()),
@@ -593,6 +605,38 @@ mod tests {
             out.last().map(String::as_str),
             Some("--proxy-server=http://override")
         );
+    }
+
+    /// --disable-gpu takes WebGL down with it (webgl=false, webgl2=false, zero
+    /// extensions), which no real browser reports and every anti-bot scorer
+    /// penalises. Both display modes must keep the software-GL fallback instead.
+    #[test]
+    fn chromium_args_keep_webgl_available_in_both_display_modes() {
+        let dir = tempfile::tempdir().unwrap();
+        for display in [DisplayMode::Headless, DisplayMode::Headful] {
+            let mut args = base_args();
+            args.display = display;
+            let out = chromium_args(&args, dir.path(), 12345);
+            assert!(
+                !out.iter().any(|arg| arg == "--disable-gpu"),
+                "--disable-gpu removes WebGL entirely ({display:?}): {out:?}"
+            );
+            assert!(
+                out.iter().any(|arg| arg == "--enable-unsafe-swiftshader"),
+                "software GL fallback keeps WebGL alive without a GPU ({display:?}): {out:?}"
+            );
+        }
+    }
+
+    /// The escape hatch: a caller who genuinely wants the GPU off can still say
+    /// so, and --browser-arg is appended after the defaults so it wins.
+    #[test]
+    fn browser_arg_can_still_disable_the_gpu() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut args = base_args();
+        args.browser_args.push("disable-gpu".into());
+        let out = chromium_args(&args, dir.path(), 12345);
+        assert_eq!(out.last().map(String::as_str), Some("--disable-gpu"));
     }
 
     #[test]

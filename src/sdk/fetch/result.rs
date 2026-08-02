@@ -25,6 +25,13 @@ pub struct FetchResult {
     pub trace: Trace,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub warnings: Vec<Warning>,
+    /// Response `Content-Type` as the origin sent it, verbatim (parameters
+    /// included). Reported separately because `body_file`'s extension is a
+    /// lossy derivative of it: types outside the extension table land in
+    /// `body.bin`, and callers that reconstructed the type from the filename
+    /// silently lost everything the table did not cover.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body_file: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -293,6 +300,7 @@ impl FetchResult {
             tab_id: None,
             trace,
             warnings: Vec::new(),
+            content_type: None,
             body_file: None,
             rendered_html_file: None,
             text_file: None,
