@@ -8,7 +8,7 @@ Give your AI agent its own private browser — so it reads the real page, past l
 
 ## Global arguments
 
-AFDATA registers these; no command declares them, and the syntax in [Commands](#commands) leaves them out.
+AFDATA registers these itself, so the syntax in [Commands](#commands) leaves them out.
 
 | Argument | Where | What it does |
 |---|---|---|

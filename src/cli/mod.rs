@@ -6,7 +6,6 @@ pub mod cmd;
 pub mod output;
 pub mod spec;
 
-use std::io::Write;
 use std::process::ExitCode;
 
 use agent_first_data::{
@@ -243,13 +242,10 @@ fn emit_lifecycle_event(
     }
 }
 
-#[allow(clippy::disallowed_methods)]
+// AFDATA injects the raw outcomes this writes (`--docs`, plain help), so it owns
+// the routing and the rule that a closed reader is success rather than failure.
 fn write_text(text: &str, output_to: OutputTo) -> ExitCode {
-    let result = match output_to {
-        OutputTo::Stderr => std::io::stderr().lock().write_all(text.as_bytes()),
-        OutputTo::Split | OutputTo::Stdout => std::io::stdout().lock().write_all(text.as_bytes()),
-    };
-    match result {
+    match agent_first_data::write_raw(text, output_to) {
         Ok(()) => ExitCode::SUCCESS,
         Err(_) => ExitCode::from(4),
     }

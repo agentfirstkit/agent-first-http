@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-http",
   "name": "Agent-First HTTP",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "Give your AI agent its own private browser — so it reads the real page, past logins and bot walls, without ever touching yours.",
@@ -13,18 +13,13 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Compile the CLI from afdata's closed-world registry — the root, four command groups, 23 leaf commands and 34 legal shapes in one declaration — so combinations that were runtime errors become disjoint shapes the parser rejects; clap and two hand-rolled argv scanners are deleted",
-    "Report the origin's response Content-Type verbatim on FetchResult, so callers stop reconstructing it from body_file's extension, which silently loses every type outside the extension table",
-    "Make takeover backend-agnostic and add Chrome as an opt-in backend: the install preflight, capability gate, and image probe now follow the selected --browser instead of naming Brave, whose pin rested on the since-obsolete premise that Linux arm64 had no Chrome; Brave stays the default on its own merits",
-    "Stop passing --disable-gpu to Chromium, which switched off the GPU process and took WebGL with it, making every host read as automation; --enable-unsafe-swiftshader permits the software fallback instead, so hardware GL still wins wherever it exists",
-    "Drop the forced --disable-blink-features=AutomationControlled, which bought nothing and made Chromium show an unsupported-flag banner on the one path a human is watching, and widen container fonts from about 46 to about 486 families so a captured browser stops fingerprinting as a bare server and stops rendering CJK as tofu",
-    "Refresh the container pins the drift check had been failing the gate on: chrome-for-testing 151.0.7922.47 to .71, and KasmVNC 1.4.0 to 1.5.0",
-    "Upgrade Agent-First Data to 0.29.0 and resolve it from crates.io in standalone CI, deleting the sibling-repository checkout every job previously needed"
+    "Route --docs and plain help through the new agent-first-data write_raw instead of a private stdout/stderr dispatch, so stream routing comes from the crate that injects those outcomes rather than from a copy in this binary",
+    "Treat a closed reader as success: afhttp --docs | head now exits 0 where the private copy returned a failure code"
   ],
   "bonds": [
     {
       "relation": "depends_on",
-      "uri": "cmn://agentfirstkit.com/b3.GdSUU8ZExR7bmDoeQe9VhEgpfdPw22o7pM13PwQAznSL",
+      "uri": "cmn://agentfirstkit.com/b3.DybgBCZQ6YRTrjjif59swyURbRsA47mnfM3hyc37KMR7",
       "id": "agent-first-data",
       "reason": "All request/response fields use Agent-First Data suffix conventions, and runtime protocol/log events are emitted on stdout only"
     }
