@@ -128,7 +128,7 @@ afhttp host
   --display headless|headful
   --takeover-provider off|<provider> # provider name (currently only kasmvnc); off = no takeover
   --takeover-quality-percent <0-100>
-  --browser auto|chromium|chrome|chrome-headless-shell|fingerprint-chromium|edge|brave|lightpanda|camoufox
+  --browser auto|chromium|chrome|fingerprint-chromium|edge|brave|lightpanda|camoufox
   --browser-bin <path>
   --token-secret <string>
   --no-health
@@ -417,7 +417,6 @@ The driver-side entry point is `afhttp fetch <url> --takeover` against such a ho
 | Backend | Launch profile in `host` | Capabilities |
 | --- | --- | --- |
 | Chromium / Chrome / Edge / Brave | `chromium` (and aliases) | Full: body, rendered_html, text, content, content_json, screenshot, network, console, observation, network body capture, real-display takeover, health/capabilities, multi-attach. |
-| chrome-headless-shell | `chromium` (binary `chrome-headless-shell`) | Same capability matrix as Chromium — chrome-headless-shell is Google's slimmer headless distribution of the same engine, identical CDP surface. Use when the full Chrome/Chromium browser is unavailable or too heavy. |
 | fingerprint-chromium | `fingerprint-chromium` | Same capability matrix as Chromium, including real-display takeover. Engine surface (UA, navigator props, WebGL vendor, canvas/font enumeration, CDP-detection evasion) is spoofed per [adryfish/fingerprint-chromium](https://github.com/adryfish/fingerprint-chromium). The host derives a stable 32-bit `--fingerprint=<seed>` from the resolved profile path so identity stays consistent within a profile and diverges between profiles. Per-surface overrides (`--fingerprint-brand`, `--fingerprint-platform`, etc.) reach the engine via `--browser-arg`. |
 | Lightpanda | `lightpanda` | body, rendered_html (modulo JS engine limits), text, network metadata, console, limited observation. No screenshot, no display takeover (no rendering), network body capture depends on backend support. |
 | Camoufox (via foxbridge) | `camoufox` | Firefox stealth fork driven by the [foxbridge](https://foxbridge.vulpineos.com/) CDP→Juggler proxy. Same artifact subset as Lightpanda for CDP-only features: no chromium-only screenshot. Display takeover is supported because the human drives the real X display. Body, rendered_html, text, network metadata, console, observation work. Persistent profiles refused with `backend_unsupported` until Firefox profile lifecycle is wired explicitly. The host spawns foxbridge with `--binary <camoufox>` on a pre-reserved port; the SDK sees a chromium-style WebSocket. |

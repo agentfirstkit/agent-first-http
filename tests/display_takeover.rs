@@ -485,3 +485,133 @@ async fn takeover_browsers_expose_webgl_on_a_real_display() {
         );
     }
 }
+
+/// The takeover download regression, pinned where it actually reproduces.
+///
+/// A download started on the takeover display used to stop on a native GTK
+/// "wants to save" dialog aimed at `~/Downloads`. Nothing reached
+/// `download_dir`, and the dialog blocked the display until a human clicked it.
+///
+/// The host did issue `Browser.setDownloadBehavior` at launch, which looked
+/// like it covered this — but on a connection it closed immediately, and
+/// Chromium scopes that override to the client that set it. Nothing survived to
+/// the moment anything downloaded. The profile prefs written by
+/// `preseed_chromium_profile` are what actually carry it now.
+///
+/// It must run headful on a real display: `--headless=new` never shows a save
+/// dialog, so the same assertion passes headless with the fix reverted.
+///
+/// It must also NOT go through `Client::fetch`. That pipeline sets its own
+/// `Browser.setDownloadBehavior` on its own live connection, so a fetch-driven
+/// download succeeds even with this bug fully present. Driving a bare CDP
+/// session — like the human whose click is not a CDP client at all — is the
+/// only way this fails when regressed.
+#[tokio::test]
+#[ignore]
+async fn takeover_download_lands_in_profile_without_a_save_dialog() {
+    use agent_first_http::sdk::cdp::ws_client::Connection;
+
+    support::ensure_rustls_provider();
+    let Some(kasm) = support::env::discover_kasmvnc() else {
+        panic!("KasmVNC is required for the takeover gate; set AFHTTP_TEST_KASMVNC_BIN");
+    };
+    // SAFETY: the takeover gate runs these ignored display tests with
+    // --test-threads=1, so no other thread touches the environment here.
+    unsafe { std::env::set_var("AFHTTP_KASMVNC_BIN", kasm) };
+    let provider = agent_first_http::host::takeover::launch_kasmvnc_provider()
+        .await
+        .expect("launch kasmvnc");
+
+    let fixture = support::fixture_server::spawn().await;
+    let bin = support::env::discover_brave()
+        .expect("brave is a takeover backend and must be present in the test image");
+
+    let args = HostArgs {
+        listen: "tcp:127.0.0.1:0".into(),
+        profile: ProfileChoice::Ephemeral,
+        display: DisplayMode::Headful,
+        takeover: Takeover::On {
+            provider: TakeoverProviderKind::KasmVnc,
+        },
+        display_quality: 100,
+        browser: BrowserChoice::Brave,
+        browser_bin: Some(bin),
+        token: None,
+        takeover_enabled: true,
+        health_enabled: true,
+        health_public: HealthPublic::Off,
+        engine_envs: vec![("DISPLAY".to_string(), provider.display.clone())],
+        browser_args: Vec::new(),
+        proxy: None,
+        recent_requests_cap: 0,
+    };
+    let handle = agent_first_http::host::browser::launch(&args)
+        .await
+        .unwrap_or_else(|e| panic!("brave headful launch: {e:?}"));
+    let download_dir = handle.download_dir.clone();
+
+    let conn = Connection::connect(&handle.ws_url, None)
+        .await
+        .expect("connect to browser");
+    let targets = conn
+        .send("Target.getTargets", &serde_json::json!({}), None)
+        .await
+        .expect("Target.getTargets");
+    let target_id = targets["targetInfos"]
+        .as_array()
+        .and_then(|list| {
+            list.iter()
+                .find(|t| t["type"] == "page")
+                .and_then(|t| t["targetId"].as_str())
+        })
+        .expect("a page target")
+        .to_string();
+    let attached = conn
+        .send(
+            "Target.attachToTarget",
+            &serde_json::json!({"targetId": target_id, "flatten": true}),
+            None,
+        )
+        .await
+        .expect("Target.attachToTarget");
+    let session_id = attached["sessionId"]
+        .as_str()
+        .expect("sessionId")
+        .to_string();
+
+    // Navigating to an attachment is what a human clicking a download link
+    // does. The navigation itself aborts with ERR_ABORTED by design — the
+    // download, not the page load, is the outcome under test.
+    let _ = conn
+        .send(
+            "Page.navigate",
+            &serde_json::json!({"url": format!("{}/download.bin", fixture.base_url())}),
+            Some(&session_id),
+        )
+        .await;
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut landed = Vec::new();
+    while std::time::Instant::now() < deadline {
+        landed = std::fs::read_dir(&download_dir)
+            .map(|rd| {
+                rd.filter_map(Result::ok)
+                    .map(|e| e.file_name().to_string_lossy().to_string())
+                    // Chromium writes .crdownload while a transfer is in flight.
+                    .filter(|n| !n.ends_with(".crdownload"))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if !landed.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    assert!(
+        !landed.is_empty(),
+        "takeover download never reached {}: a save dialog is blocking the display, \
+         which is the regression this pins",
+        download_dir.display()
+    );
+}

@@ -3,7 +3,7 @@ command fetch
   arg url <positional 0>
   arg endpoint_url --endpoint-url
   arg token_secret --token-secret
-  arg browser --browser <auto|chromium|chrome|chrome-headless-shell|fingerprint-chromium|edge|brave|lightpanda|camoufox> =auto
+  arg browser --browser <auto|chromium|chrome|fingerprint-chromium|edge|brave|lightpanda|camoufox> =auto
   arg browser_bin --browser-bin
   arg render --render <none|auto|always> =auto
   arg tab --tab =new
@@ -49,7 +49,7 @@ command host
   arg display --display <headless|headful>
   arg takeover_provider --takeover-provider <off|kasmvnc> =off
   arg takeover_quality_percent --takeover-quality-percent =100
-  arg browser --browser <auto|chromium|chrome|chrome-headless-shell|fingerprint-chromium|edge|brave|lightpanda|camoufox> =auto
+  arg browser --browser <auto|chromium|chrome|fingerprint-chromium|edge|brave|lightpanda|camoufox> =auto
   arg browser_bin --browser-bin
   arg token_secret --token-secret
   arg no_health --no-health
@@ -161,7 +161,7 @@ command container install
   arg profile --profile
   arg shm_size --shm-size
   arg takeover_provider --takeover-provider <off|kasmvnc> =kasmvnc
-  arg with --with <chrome-headless-shell|lightpanda|fingerprint-chromium|camoufox|chrome|brave|kasmvnc> ...
+  arg with --with <lightpanda|fingerprint-chromium|camoufox|chrome|brave|kasmvnc> ...
   arg rebuild --rebuild
   arg from_source --from-source
   arg context --context

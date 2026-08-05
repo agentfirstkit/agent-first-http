@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-http",
   "name": "Agent-First HTTP",
-  "version": "0.10.1",
+  "version": "0.11.0",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "Give your AI agent its own private browser — so it reads the real page, past logins and bot walls, without ever touching yours.",
@@ -13,13 +13,18 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Route --docs and plain help through the new agent-first-data write_raw instead of a private stdout/stderr dispatch, so stream routing comes from the crate that injects those outcomes rather than from a copy in this binary",
-    "Treat a closed reader as success: afhttp --docs | head now exits 0 where the private copy returned a failure code"
+    "Drop the chrome-headless-shell backend: it shipped the same engine and CDP surface as chromium for an extra pinned download and an x86_64-only asymmetry, so --browser and 'container install --with' no longer accept it",
+    "Move the runtime, builder, downloader, and test container images from Debian bookworm to trixie, including the matching KasmVNC package",
+    "Install a managed browser policy in both container images so Chromium's unsupported-command-line-flag bar stops stealing viewport on the takeover display, changing no launch flag and no sandbox posture",
+    "Fix takeover downloads landing nowhere: profile prefs now suppress the native save dialog and point downloads at the profile's own directory, replacing a host-level Browser.setDownloadBehavior that died with the throwaway connection that set it",
+    "Correct the deployment guide's claim that --no-sandbox raises no warning bar, and record what does and does not suppress it",
+    "Upgrade to agent-first-data 0.31.0, resolving bound registries through BoundOutcome and running invocations off the invocation itself",
+    "Add a CLI test that drives every declared shape through its own handler with strict argument reads, so a handler asking for an id its shape cannot supply fails in test rather than silently projecting an empty string"
   ],
   "bonds": [
     {
       "relation": "depends_on",
-      "uri": "cmn://agentfirstkit.com/b3.DybgBCZQ6YRTrjjif59swyURbRsA47mnfM3hyc37KMR7",
+      "uri": "cmn://agentfirstkit.com/b3.7Kf6i6HNpFxooXKQTCzfugkqq89rPCuM1mekg8hsKAQC",
       "id": "agent-first-data",
       "reason": "All request/response fields use Agent-First Data suffix conventions, and runtime protocol/log events are emitted on stdout only"
     }

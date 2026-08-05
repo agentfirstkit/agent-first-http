@@ -79,15 +79,6 @@ pub(super) async fn launch(args: &HostArgs) -> Result<BrowserHandle, Error> {
                 continue;
             }
         };
-        if let Err(e) = enable_download_capture(&ws_url, &download_dir).await {
-            let _ = child.start_kill();
-            last_error = Some(Error::new(
-                e.error_code,
-                format!("chromium attempt {attempt}/3 download setup: {}", e.detail),
-            ));
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            continue;
-        }
         let (browser, mut handler) = match Browser::connect(ws_url.clone()).await {
             Ok(pair) => pair,
             Err(e) => {
@@ -116,7 +107,6 @@ pub(super) async fn launch(args: &HostArgs) -> Result<BrowserHandle, Error> {
         let family = match args.browser {
             BrowserChoice::Auto | BrowserChoice::Chromium => "chromium",
             BrowserChoice::Chrome => "chrome",
-            BrowserChoice::ChromeShell => "chrome-headless-shell",
             BrowserChoice::FingerprintChromium => "fingerprint-chromium",
             BrowserChoice::Edge => "edge",
             BrowserChoice::Brave => "brave",
@@ -297,6 +287,31 @@ fn preseed_chromium_profile(profile_dir: &Path) -> Result<(), Error> {
             root,
             &["safebrowsing", "scout_reporting_enabled_when_deprecated"],
             Value::Bool(false),
+        );
+        // Downloads must land in the profile's own downloads/ without a native
+        // save dialog, and these prefs are the only thing that guarantees it.
+        // `Browser.setDownloadBehavior` cannot: that override belongs to the
+        // DevTools client that set it and dies with it, and a human clicking a
+        // link on the takeover display is not a CDP client at all. Left to the
+        // browser default, a takeover download stops on a GTK "wants to save"
+        // dialog pointing at ~/Downloads — the display blocks and nothing is
+        // captured. Pinned by
+        // `takeover_download_lands_in_profile_without_a_save_dialog`.
+        let downloads = profile_dir.join("downloads");
+        set_json_path(
+            root,
+            &["download", "prompt_for_download"],
+            Value::Bool(false),
+        );
+        set_json_path(
+            root,
+            &["download", "default_directory"],
+            Value::String(downloads.display().to_string()),
+        );
+        set_json_path(
+            root,
+            &["savefile", "default_directory"],
+            Value::String(downloads.display().to_string()),
         );
     })?;
     Ok(())
@@ -527,25 +542,16 @@ async fn read_chromium_ws_url(port: u16) -> Result<String, Error> {
     }
 }
 
-async fn enable_download_capture(
-    ws_url: &str,
-    download_dir: &std::path::Path,
-) -> Result<(), Error> {
-    let conn = crate::sdk::cdp::ws_client::Connection::connect(ws_url, None).await?;
-    let result = conn
-        .send(
-            "Browser.setDownloadBehavior",
-            &serde_json::json!({
-                "behavior": "allow",
-                "downloadPath": download_dir.display().to_string(),
-                "eventsEnabled": true,
-            }),
-            None,
-        )
-        .await;
-    conn.close();
-    result.map(|_| ())
-}
+// The host used to open a throwaway CDP connection here and send
+// `Browser.setDownloadBehavior`. It never did anything: Chromium scopes that
+// override to the DevTools client that issued it and drops it the moment the
+// client disconnects, which was immediately. The profile prefs written by
+// `preseed_chromium_profile` now carry the same download directory and suppress
+// the save prompt, they apply to a human clicking on the takeover display (who
+// is not a CDP client at all), and each fetch sets its own behavior with
+// `eventsEnabled` on its own live connection where it needs download events —
+// see `sdk::fetch::pipeline::browser::download`. Nothing at host level consumed
+// browser-level download events, so there is nothing left for this to do.
 
 #[cfg(test)]
 mod tests {
@@ -683,6 +689,34 @@ mod tests {
         assert_eq!(prefs["profile"]["exited_cleanly"], true);
         assert_eq!(prefs["profile"]["password_manager_enabled"], false);
         assert_eq!(prefs["credentials_enable_service"], false);
+    }
+
+    /// A takeover download used to stop on a native "wants to save" dialog
+    /// pointing at `~/Downloads`, capturing nothing and blocking the display
+    /// until a human clicked through it.
+    ///
+    /// `Browser.setDownloadBehavior` cannot be the only guard: Chromium scopes
+    /// that override to the DevTools client that set it, and a human clicking a
+    /// link on the takeover display is not a CDP client at all. The prefs below
+    /// are the part that survives both, so they are pinned here rather than on
+    /// the CDP call.
+    #[test]
+    fn profile_preseed_routes_downloads_into_the_profile_without_a_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+
+        preseed_chromium_profile(dir.path()).unwrap();
+
+        let prefs: Value = serde_json::from_slice(
+            &std::fs::read(dir.path().join("Default").join("Preferences")).unwrap(),
+        )
+        .unwrap();
+        let downloads = dir.path().join("downloads").display().to_string();
+        assert_eq!(
+            prefs["download"]["prompt_for_download"], false,
+            "a save dialog on the takeover display blocks the whole session"
+        );
+        assert_eq!(prefs["download"]["default_directory"], downloads);
+        assert_eq!(prefs["savefile"]["default_directory"], downloads);
     }
 
     #[test]

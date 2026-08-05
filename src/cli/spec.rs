@@ -14,11 +14,10 @@ use crate::cli::cmd::container::{DEFAULT_CONTAINER_NAME, DEFAULT_CONTAINER_PORT}
 use crate::sdk::fetch::DEFAULT_NETWORK_BODY_MAX_BYTES;
 
 /// Browser backends the inline client and the host can launch.
-pub const BROWSERS: [&str; 9] = [
+pub const BROWSERS: [&str; 8] = [
     "auto",
     "chromium",
     "chrome",
-    "chrome-headless-shell",
     "fingerprint-chromium",
     "edge",
     "brave",
@@ -43,8 +42,7 @@ pub const ARTIFACTS: [&str; 10] = [
 
 /// Optional image components `container install --with` accepts. A `container`
 /// unit test proves every one of them maps to a Dockerfile build arg.
-pub const CONTAINER_COMPONENTS: [&str; 7] = [
-    "chrome-headless-shell",
+pub const CONTAINER_COMPONENTS: [&str; 6] = [
     "lightpanda",
     "fingerprint-chromium",
     "camoufox",

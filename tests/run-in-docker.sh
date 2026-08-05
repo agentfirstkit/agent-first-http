@@ -36,7 +36,11 @@ fi
 CAMOUFOX_BUILD="${AFHTTP_TEST_INSTALL_CAMOUFOX:-0}"
 IMAGE_STAMP="$SPORE_DIR/target/.docker-image-stamp-camoufox-${CAMOUFOX_BUILD}"
 DOCKERFILE="$SPORE_DIR/tests/Dockerfile.test"
-BUILD_INPUTS=("$DOCKERFILE" "$SPORE_DIR/container/docker/install-backends.sh")
+BUILD_INPUTS=(
+  "$DOCKERFILE"
+  "$SPORE_DIR/container/docker/install-backends.sh"
+  "$SPORE_DIR/container/docker/install-browser-policy.sh"
+)
 NEEDS_BUILD=1
 if [ -f "$IMAGE_STAMP" ] && docker image inspect "$IMAGE_TAG" >/dev/null 2>&1; then
   NEEDS_BUILD=0

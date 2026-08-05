@@ -12,7 +12,6 @@ services:
       context: ../../
       dockerfile: container/docker/Dockerfile
       args:
-        WITH_CHROME_HEADLESS_SHELL: "${WITH_CHROME_HEADLESS_SHELL:-0}"
         WITH_LIGHTPANDA: "${WITH_LIGHTPANDA:-0}"
         WITH_FINGERPRINT_CHROMIUM: "${WITH_FINGERPRINT_CHROMIUM:-0}"
         WITH_CAMOUFOX: "${WITH_CAMOUFOX:-0}"

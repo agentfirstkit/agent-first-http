@@ -76,17 +76,6 @@ need jq
 fail=0
 unreachable=0
 
-if chrome_json="$(fetch_json "chrome-for-testing" "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json")"; then
-    latest_chrome="$(printf '%s' "$chrome_json" | jq -r '.channels.Stable.version')" || latest_chrome=""
-    if usable "chrome-for-testing stable" "$latest_chrome"; then
-        expect_eq "chrome-for-testing stable" "$(require_pin CHROME_FOR_TESTING_VERSION)" "$latest_chrome" || fail=1
-    else
-        unreachable=1
-    fi
-else
-    unreachable=1
-fi
-
 if fingerprint_json="$(fetch_json "fingerprint-chromium" "https://api.github.com/repos/adryfish/fingerprint-chromium/releases/latest")"; then
     latest_fingerprint="$(printf '%s' "$fingerprint_json" | jq -r '.tag_name')" || latest_fingerprint=""
     if usable "fingerprint-chromium" "$latest_fingerprint"; then
@@ -136,9 +125,9 @@ if kasm_json="$(fetch_json "kasmvnc" "https://api.github.com/repos/kasmtech/Kasm
     if usable "kasmvnc" "$latest_kasm"; then
         expect_eq "kasmvnc" "$(require_pin KASMVNC_VERSION)" "$latest_kasm" || fail=1
         for deb_arch in amd64 arm64; do
-            kasm_asset="kasmvncserver_bookworm_${latest_kasm}_${deb_arch}.deb"
+            kasm_asset="kasmvncserver_trixie_${latest_kasm}_${deb_arch}.deb"
             if ! printf '%s' "$kasm_json" | jq -e --arg name "$kasm_asset" 'any(.assets[].name; . == $name)' >/dev/null; then
-                echo "missing expected KasmVNC bookworm asset: $kasm_asset" >&2
+                echo "missing expected KasmVNC trixie asset: $kasm_asset" >&2
                 fail=1
             fi
         done

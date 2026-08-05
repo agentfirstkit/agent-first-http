@@ -138,7 +138,6 @@ container setup, upgrades, and security posture.
 afhttp is not "headless Chromium." How hard a site fights back decides which engine actually reaches it, so afhttp drives a whole spectrum behind one CDP contract — pick one with `--browser` (or point `--browser-bin` at a binary):
 
 - **chromium / chrome** — the default: full rendering, screenshots, downloads, all artifacts, observation, network body capture, and optional real-display takeover, with multi-attach.
-- **chrome-headless-shell** — Google's slimmer headless distribution with an identical CDP surface: a lean build for fast, low-overhead fetches, and useful when the full browser is unavailable.
 - **fingerprint-chromium** — the Chromium capability matrix (including optional real-display takeover) plus engine-level fingerprint spoofing (UA, WebGL, canvas, CDP-detection evasion) for bot-walled sites; a stable seed derived from the profile path keeps identity per-profile.
 - **camoufox** (via foxbridge) — a Firefox stealth fork for sites that fingerprint Chromium, driven through the [foxbridge](https://foxbridge.vulpineos.com/) CDP→Juggler proxy. Same CDP subset as Lightpanda (no Chromium screenshot), but optional real-display takeover works because the human drives the real X display.
 - **lightpanda** — an ultralight engine covering a rendering subset: HTML / text / network metadata / console / limited observation only — no screenshot, no display takeover (no rendering).

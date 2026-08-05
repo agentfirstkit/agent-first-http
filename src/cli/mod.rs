@@ -9,7 +9,7 @@ pub mod spec;
 use std::process::ExitCode;
 
 use agent_first_data::{
-    CliOutcome, OutputPlan, OutputTo, cli_error_event, cli_help_event, cli_parse_output,
+    BoundOutcome, OutputPlan, OutputTo, cli_error_event, cli_help_event, cli_parse_output,
     cli_version_event, render_cli_reference,
 };
 
@@ -45,7 +45,9 @@ pub fn run() -> ExitCode {
     };
 
     match outcome {
-        CliOutcome::Run(invocation) => {
+        BoundOutcome::Run(invocation) => {
+            // The plan is readable before the handler runs, so output routing is
+            // established before anything can be written.
             let _redirect = match install_redirect(invocation.output_plan()) {
                 Ok(redirect) => redirect,
                 Err(code) => return code,
@@ -53,7 +55,7 @@ pub fn run() -> ExitCode {
             if let Err(code) = install_route(invocation.output_plan()) {
                 return code;
             }
-            let command = match app.execute(&invocation) {
+            let command = match invocation.run() {
                 Ok(command) => command,
                 Err(error) => {
                     let _ = crate::shared::afdata::emit_process_error(&error);
@@ -64,14 +66,14 @@ pub fn run() -> ExitCode {
         }
         // `--docs` renders the whole registry as raw Markdown, so it carries no
         // format of its own and never becomes a protocol event.
-        CliOutcome::Docs(docs) => {
+        BoundOutcome::Docs(docs) => {
             let _redirect = match install_redirect(docs.output_plan()) {
                 Ok(redirect) => redirect,
                 Err(code) => return code,
             };
             write_text(&render_cli_reference(&cli), stream_of(docs.output_plan()))
         }
-        CliOutcome::Help(help) => {
+        BoundOutcome::Help(help) => {
             let _redirect = match install_redirect(help.output_plan()) {
                 Ok(redirect) => redirect,
                 Err(code) => return code,
@@ -88,7 +90,7 @@ pub fn run() -> ExitCode {
                 )
             }
         }
-        CliOutcome::Version(version) => {
+        BoundOutcome::Version(version) => {
             let _redirect = match install_redirect(version.output_plan()) {
                 Ok(redirect) => redirect,
                 Err(code) => return code,
@@ -274,11 +276,14 @@ fn emit_bootstrap_error(msg: &str) {
 
 #[cfg(test)]
 mod tests {
+    use agent_first_data::CliOutcome;
     use serde_json::Value;
 
     use super::*;
 
     fn help(argv: &[&str]) -> Value {
+        // The unbound registry, which resolves to `CliOutcome` — help needs no
+        // handler, so there is nothing to bind.
         let cli = spec::cli_spec().expect("registry must build");
         let CliOutcome::Help(help) = cli.resolve_from(argv.to_vec()).expect("help resolves") else {
             panic!("{argv:?} did not resolve to help");

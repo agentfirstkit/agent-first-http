@@ -76,6 +76,11 @@ pub fn handlers() -> [(&'static str, Handler); 23] {
 
 // ── value projection ────────────────────────────────────────────────────────
 
+/// A value the matched shape declares as required or fixed.
+///
+/// Reading it cannot fail: the shape that matched supplies every id it
+/// declares. Asking for an id it does not declare is a defect in this file, and
+/// `call_every_combination` is where that surfaces, from a test.
 fn string(invocation: &ResolvedInvocation, id: &str) -> String {
     invocation
         .required(id)
@@ -517,7 +522,7 @@ fn container_logs(invocation: &ResolvedInvocation) -> Projected {
 
 #[cfg(test)]
 mod tests {
-    use agent_first_data::CliOutcome;
+    use agent_first_data::BoundOutcome;
 
     use super::*;
     use crate::cli::spec::cli_spec;
@@ -532,7 +537,7 @@ mod tests {
             Err(error) => panic!("handlers must cover every action: {error}"),
         };
         match app.resolve_from(argv.to_vec()) {
-            Ok(CliOutcome::Run(invocation)) => app.execute(&invocation),
+            Ok(BoundOutcome::Run(invocation)) => invocation.run(),
             Ok(_) => panic!("{argv:?} did not resolve to a run"),
             Err(error) => panic!("{argv:?} failed to resolve: {}", error.message),
         }
@@ -543,6 +548,21 @@ mod tests {
         let cli = cli_spec().expect("registry must build");
         cli.bind_actions(handlers())
             .expect("handlers must cover every action exactly once");
+    }
+
+    /// Every declared shape, run through its own handler with strict reads: a
+    /// handler that asks for an argument id its shape cannot supply names
+    /// itself here rather than degrading to an empty string in production.
+    ///
+    /// Safe to run because these handlers only project — nothing here opens a
+    /// socket, launches a host, or touches a profile directory.
+    #[test]
+    fn every_combination_reads_only_ids_its_shape_declares() {
+        let cli = cli_spec().expect("registry must build");
+        let app = cli
+            .bind_actions(handlers())
+            .expect("handlers must cover every action exactly once");
+        app.call_every_combination();
     }
 
     #[test]

@@ -44,24 +44,6 @@ macro_rules! skip_if_no_browser {
     };
 }
 
-/// Resolve the chrome-headless-shell binary for backend-specific tests.
-/// Honors `AFHTTP_TEST_CHROME_SHELL_BIN` first, then checks the standard
-/// install location used in Dockerfile.test. Returns `None` so tests can
-/// skip when the binary is absent.
-pub fn discover_chrome_shell() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("AFHTTP_TEST_CHROME_SHELL_BIN") {
-        let path = PathBuf::from(p);
-        if path.exists() {
-            return Some(path);
-        }
-    }
-    let standard = PathBuf::from("/usr/local/bin/chrome-headless-shell");
-    if standard.exists() {
-        return Some(standard);
-    }
-    None
-}
-
 /// Resolve the lightpanda binary for backend-specific tests. Honors
 /// `AFHTTP_TEST_LIGHTPANDA_BIN` first, then `/usr/local/bin/lightpanda`.
 /// Returns `None` so tests skip gracefully when the binary is absent.

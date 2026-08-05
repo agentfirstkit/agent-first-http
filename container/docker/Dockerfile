@@ -27,7 +27,7 @@
 ARG AFHTTP_BIN_FROM=builder
 
 # ── Source stage A: compile from a checkout (default) ──
-FROM rust:bookworm AS builder
+FROM rust:trixie AS builder
 WORKDIR /src
 # Only the crate inputs. Dependencies, including agent-first-data, resolve from
 # crates.io per Cargo.lock.
@@ -44,7 +44,7 @@ RUN cargo build --release --bin afhttp \
     && cp target/release/afhttp /usr/local/bin/afhttp
 
 # ── Source stage B: download the matching prebuilt release ──
-FROM debian:bookworm-slim AS downloader
+FROM debian:trixie-slim AS downloader
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
@@ -68,7 +68,7 @@ RUN set -eu; \
 FROM ${AFHTTP_BIN_FROM} AS afhttp_bin
 
 # ── Runtime image (single source of truth for the host) ──
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -77,10 +77,11 @@ ENV DEBIAN_FRONTEND=noninteractive
 # reap the browser's child processes (afhttp host is PID 1).
 #
 # The font set is deliberately broad. Font enumeration is a standard
-# fingerprinting dimension, and a browser that can see a couple of dozen
-# families reads as a bare server image rather than a desktop: this list takes
-# the image from ~46 resolvable fonts to ~486. It also stops CJK and emoji text
-# from rendering as tofu in captured screenshots.
+# fingerprinting dimension, and a browser that can see a handful of families
+# reads as a bare server image rather than a desktop: this list takes the image
+# from ~8 resolvable fonts to ~473. It also stops CJK and emoji text from
+# rendering as tofu in captured screenshots. (Both figures measured on trixie;
+# on bookworm the bare image resolved ~46, so the list matters more here.)
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -121,7 +122,13 @@ RUN apt-get update \
 COPY container/docker/install-backends.sh /usr/local/bin/install-backends.sh
 RUN chmod +x /usr/local/bin/install-backends.sh
 
-ARG WITH_CHROME_HEADLESS_SHELL=0
+# Suppresses the "unsupported command-line flag" bar the sandbox flags raise
+# over the takeover display. Applies to every backend, so it runs regardless of
+# which optional ones are built in.
+COPY container/docker/install-browser-policy.sh /usr/local/bin/install-browser-policy.sh
+RUN chmod +x /usr/local/bin/install-browser-policy.sh \
+    && install-browser-policy.sh
+
 ARG WITH_LIGHTPANDA=0
 ARG WITH_FINGERPRINT_CHROMIUM=0
 ARG WITH_CAMOUFOX=0
@@ -129,7 +136,6 @@ ARG WITH_CHROME=0
 ARG WITH_BRAVE=0
 ARG WITH_KASMVNC=0
 
-RUN if [ "$WITH_CHROME_HEADLESS_SHELL" = "1" ]; then install-backends.sh chrome-headless-shell; fi
 RUN if [ "$WITH_LIGHTPANDA" = "1" ]; then install-backends.sh lightpanda; fi
 RUN if [ "$WITH_FINGERPRINT_CHROMIUM" = "1" ]; then install-backends.sh fingerprint-chromium; fi
 RUN if [ "$WITH_CAMOUFOX" = "1" ]; then install-backends.sh camoufox; fi

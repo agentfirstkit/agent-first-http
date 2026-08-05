@@ -588,11 +588,7 @@ struct Backend {
     build_arg: &'static str,
 }
 
-const BACKENDS: [Backend; 7] = [
-    Backend {
-        name: "chrome-headless-shell",
-        build_arg: "WITH_CHROME_HEADLESS_SHELL",
-    },
+const BACKENDS: [Backend; 6] = [
     Backend {
         name: "lightpanda",
         build_arg: "WITH_LIGHTPANDA",

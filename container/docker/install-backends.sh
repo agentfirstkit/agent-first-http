@@ -10,14 +10,13 @@
 # on other architectures (the matching afhttp backend then simply stays
 # unavailable, and its tests self-skip).
 #
-#   install-backends.sh chrome-headless-shell | lightpanda | fingerprint-chromium
-#                       | camoufox | chrome | brave | kasmvnc
+#   install-backends.sh lightpanda | fingerprint-chromium | camoufox
+#                       | chrome | brave | kasmvnc
 set -euo pipefail
 
 # Pinned versions for direct-download backends — bump these (and re-verify both
 # images build) together. Apt-backed Chrome and Brave track their vendors'
 # stable repositories.
-CHROME_FOR_TESTING_VERSION="151.0.7922.71"
 FINGERPRINT_CHROMIUM_VERSION="148.0.7778.215"
 CAMOUFOX_RELEASE="v152.0.4-beta.28"
 CAMOUFOX_X86_BUILD="152.0.4-beta.28"
@@ -34,19 +33,6 @@ download() {
     rm -f "$output"
     curl -fL --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 20 \
         --speed-time 60 --speed-limit 1024 --progress-bar -o "$output" "$url"
-}
-
-install_chrome_headless_shell() {
-    # Chrome-for-Testing publishes linux64 only (no arm64 as of this writing).
-    case "$arch" in
-        x86_64) cft_arch="linux64" ;;
-        *) echo "skipping chrome-headless-shell on unsupported arch $arch"; return 0 ;;
-    esac
-    download /tmp/chs.zip \
-        "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_FOR_TESTING_VERSION}/${cft_arch}/chrome-headless-shell-${cft_arch}.zip"
-    unzip -q /tmp/chs.zip -d /opt/
-    ln -sf "/opt/chrome-headless-shell-${cft_arch}/chrome-headless-shell" /usr/local/bin/chrome-headless-shell
-    rm /tmp/chs.zip
 }
 
 install_lightpanda() {
@@ -174,18 +160,17 @@ install_kasmvnc() {
     apt-get update
     apt-get install -y --no-install-recommends matchbox-window-manager
     download /tmp/kasmvnc.deb \
-        "https://github.com/kasmtech/KasmVNC/releases/download/v${KASMVNC_VERSION}/kasmvncserver_bookworm_${KASMVNC_VERSION}_${deb_arch}.deb"
+        "https://github.com/kasmtech/KasmVNC/releases/download/v${KASMVNC_VERSION}/kasmvncserver_trixie_${KASMVNC_VERSION}_${deb_arch}.deb"
     apt-get install -y --no-install-recommends /tmp/kasmvnc.deb
     rm -rf /var/lib/apt/lists/* /tmp/kasmvnc.deb
 }
 
 case "${1:-}" in
-    chrome-headless-shell) install_chrome_headless_shell ;;
     lightpanda)            install_lightpanda ;;
     fingerprint-chromium)  install_fingerprint_chromium ;;
     camoufox)              install_camoufox ;;
     chrome)                install_chrome ;;
     brave)                 install_brave ;;
     kasmvnc)               install_kasmvnc ;;
-    *) echo "usage: $0 {chrome-headless-shell|lightpanda|fingerprint-chromium|camoufox|chrome|brave|kasmvnc}" >&2; exit 2 ;;
+    *) echo "usage: $0 {lightpanda|fingerprint-chromium|camoufox|chrome|brave|kasmvnc}" >&2; exit 2 ;;
 esac

@@ -370,7 +370,6 @@ fn resolve_browser_bin(args: &HostArgs) -> Result<PathBuf, Error> {
     let candidates: Vec<&str> = match args.browser {
         BrowserChoice::Lightpanda => vec!["lightpanda"],
         BrowserChoice::Chrome => vec!["google-chrome", "google-chrome-stable", "chrome"],
-        BrowserChoice::ChromeShell => vec!["chrome-headless-shell"],
         BrowserChoice::FingerprintChromium => vec!["fingerprint-chromium"],
         BrowserChoice::Edge => vec!["microsoft-edge", "edge"],
         BrowserChoice::Brave => vec!["brave-browser", "brave"],

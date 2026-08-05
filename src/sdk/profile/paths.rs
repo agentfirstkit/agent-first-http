@@ -13,7 +13,6 @@ use crate::shared::error::{Error, ErrorCode};
 pub const KNOWN_BACKENDS: &[&str] = &[
     "chromium",
     "chrome",
-    "chrome-headless-shell",
     "fingerprint-chromium",
     "edge",
     "brave",

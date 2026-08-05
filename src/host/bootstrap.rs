@@ -98,7 +98,6 @@ pub enum BrowserChoice {
     Auto,
     Chromium,
     Chrome,
-    ChromeShell,
     FingerprintChromium,
     Edge,
     Brave,
@@ -117,7 +116,6 @@ impl std::str::FromStr for BrowserChoice {
             "auto" => Self::Auto,
             "chromium" => Self::Chromium,
             "chrome" => Self::Chrome,
-            "chrome_shell" | "chrome-headless-shell" => Self::ChromeShell,
             "fingerprint_chromium" | "fingerprint-chromium" => Self::FingerprintChromium,
             "edge" => Self::Edge,
             "brave" => Self::Brave,
@@ -135,7 +133,6 @@ impl BrowserChoice {
         match self {
             Self::Auto | Self::Chromium => "chromium",
             Self::Chrome => "chrome",
-            Self::ChromeShell => "chrome-headless-shell",
             Self::FingerprintChromium => "fingerprint-chromium",
             Self::Edge => "edge",
             Self::Brave => "brave",
@@ -186,15 +183,13 @@ mod tests {
             "chrome".parse::<BrowserChoice>().unwrap(),
             BrowserChoice::Chrome
         );
-        // Both spellings of the headless-shell and fingerprint backends.
-        assert_eq!(
-            "chrome_shell".parse::<BrowserChoice>().unwrap(),
-            BrowserChoice::ChromeShell
-        );
-        assert_eq!(
-            "chrome-headless-shell".parse::<BrowserChoice>().unwrap(),
-            BrowserChoice::ChromeShell
-        );
+        // chrome-headless-shell was removed as a backend: same engine and CDP
+        // surface as chromium, which the image always installs, so it added a
+        // version pin and an x86-only asymmetry for no capability of its own.
+        // Both spellings must now be rejected rather than silently aliased.
+        assert!("chrome-headless-shell".parse::<BrowserChoice>().is_err());
+        assert!("chrome_shell".parse::<BrowserChoice>().is_err());
+        // Both spellings of the fingerprint backend.
         assert_eq!(
             "fingerprint_chromium".parse::<BrowserChoice>().unwrap(),
             BrowserChoice::FingerprintChromium

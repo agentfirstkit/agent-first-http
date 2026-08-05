@@ -1,6 +1,6 @@
 # Test image for agent-first-http.
 #
-# Built on top of rust:bookworm (Debian 12 + recent stable Rust) so the spore's
+# Built on top of rust:trixie (Debian 13 + recent stable Rust) so the spore's
 # build/test/clippy cycle runs in a container with chromium preinstalled
 # instead of polluting the host with browser packages and chromiumoxide native deps.
 #
@@ -8,7 +8,7 @@
 # spore root as the build context). Source is mounted as a volume; cargo registry
 # + target dirs live in named volumes so iteration is fast.
 
-FROM rust:bookworm
+FROM rust:trixie
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -54,7 +54,6 @@ RUN apt-get update \
 COPY container/docker/install-backends.sh /usr/local/bin/install-backends.sh
 ARG AFHTTP_TEST_INSTALL_CAMOUFOX=0
 RUN chmod +x /usr/local/bin/install-backends.sh \
-    && install-backends.sh chrome-headless-shell \
     && install-backends.sh lightpanda \
     && install-backends.sh fingerprint-chromium \
     && if [ "$AFHTTP_TEST_INSTALL_CAMOUFOX" = "1" ]; then install-backends.sh camoufox; else echo "skipping camoufox in test image; set AFHTTP_TEST_INSTALL_CAMOUFOX=1 to include it"; fi \
@@ -62,11 +61,16 @@ RUN chmod +x /usr/local/bin/install-backends.sh \
     && install-backends.sh brave \
     && install-backends.sh kasmvnc
 
+# Same managed policy as the runtime image, so a takeover test sees the same
+# browser chrome a deployed host does.
+COPY container/docker/install-browser-policy.sh /usr/local/bin/install-browser-policy.sh
+RUN chmod +x /usr/local/bin/install-browser-policy.sh \
+    && install-browser-policy.sh
+
 # Cargo caches live on named volumes so docker rebuilds don't redownload crates.
 ENV CARGO_HOME=/cargo-home \
     CARGO_TARGET_DIR=/cargo-target \
     AFHTTP_TEST_BROWSER_BIN=/usr/bin/chromium \
-    AFHTTP_TEST_CHROME_SHELL_BIN=/usr/local/bin/chrome-headless-shell \
     AFHTTP_TEST_LIGHTPANDA_BIN=/usr/local/bin/lightpanda \
     AFHTTP_TEST_FINGERPRINT_CHROMIUM_BIN=/usr/local/bin/fingerprint-chromium \
     AFHTTP_TEST_FOXBRIDGE_BIN=/usr/local/bin/foxbridge \

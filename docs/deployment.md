@@ -30,11 +30,19 @@ isolated and disposable:
 - on a private network — never host networking with the port exposed publicly.
 
 `--no-sandbox` is not a fingerprinting concern, so do not trade the container's
-posture away chasing one: it is invisible to page JavaScript, and Chromium 151
-shows no "unsupported command-line flag" warning for it (measured — the browser
-chrome is the same height with the sandbox on and off). Enabling Chromium's own
-sandbox inside the container would mean handing it `--cap-add=SYS_ADMIN`, which
-gives away more isolation than it buys back.
+posture away chasing one: it is invisible to page JavaScript. Enabling Chromium's
+own sandbox inside the container would mean handing it `--cap-add=SYS_ADMIN`,
+which gives away more isolation than it buys back.
+
+It *is* visible to the human on the takeover display. An earlier revision of this
+paragraph claimed Chromium 151 shows no "unsupported command-line flag" warning
+for `--no-sandbox`; that was wrong. Chromium 151 and Brave both raise the bar,
+and it names `--disable-setuid-sandbox` first only because Chromium reports a
+single offending flag — remove that one and the bar returns naming
+`--no-sandbox`. The image suppresses it with a managed policy
+(`container/docker/install-browser-policy.sh`), which changes no launch flag and
+no sandbox posture. Do not try `--test-type` for this: it makes Brave abort on
+startup.
 
 ### Timezone
 
@@ -95,7 +103,7 @@ selecting a stage that **downloads the prebuilt release binary** matching the
 driver's own version and the image architecture (`x86_64-unknown-linux-gnu` for
 Docker on Intel, `aarch64-unknown-linux-gnu` for Apple `container` and arm64
 Docker). BuildKit skips the unused `builder` (Rust) stage, so the image stays a
-slim `debian:bookworm-slim` with no toolchain and needs no source tree. The
+slim `debian:trixie-slim` with no toolchain and needs no source tree. The
 version is hard-pinned: if no release asset exists for this version/arch (e.g. a
 dev build of an unreleased version), the build fails with a pointer to the
 from-source path below — it never installs a different version.
@@ -199,7 +207,6 @@ build time and arch-guarded (several upstreams ship x86_64-only Linux builds):
 
 | Build arg | Adds backend(s) | Arch |
 | --- | --- | --- |
-| `WITH_CHROME_HEADLESS_SHELL=1` | `chrome-headless-shell` | x86_64 |
 | `WITH_LIGHTPANDA=1` | `lightpanda` | x86_64 + arm64 |
 | `WITH_FINGERPRINT_CHROMIUM=1` | `fingerprint-chromium` | x86_64 |
 | `WITH_CAMOUFOX=1` | `camoufox` (+ foxbridge) | x86_64 + arm64 |
