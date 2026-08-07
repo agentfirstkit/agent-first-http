@@ -3,8 +3,10 @@
 
 pub mod args;
 pub mod cmd;
+pub mod connect;
 pub mod output;
 pub mod spec;
+pub mod token_source;
 
 use std::process::ExitCode;
 
@@ -174,6 +176,7 @@ async fn dispatch(command: args::Command) -> Result<(), Error> {
         args::Command::Capabilities(a) => cmd::capabilities::run(a).await,
         args::Command::Profile(a) => cmd::profile::run(a).await,
         args::Command::Tabs(a) => cmd::tabs::run(a).await,
+        args::Command::Ui(a) => cmd::ui::run(a).await,
         args::Command::Skill(a) => cmd::skill::run(a).await,
         args::Command::Container(a) => cmd::container::run(a).await,
     };

@@ -153,6 +153,11 @@ pub fn cli_spec() -> Result<BuiltCliSpec, CliSpecError> {
         )
         .command(tabs_list_command())
         .command(tabs_close_command())
+        .command(
+            CommandSpec::new(["ui"])
+                .about("Hand a running host to a person in a window, and wait for them."),
+        )
+        .command(ui_takeover_command())
         .command(CommandSpec::new(["skill"]).about(
             "Manage the Agent-First HTTP skill for Codex, Claude Code, opencode, and Hermes.",
         ))
@@ -189,13 +194,29 @@ pub fn cli_spec() -> Result<BuiltCliSpec, CliSpecError> {
 // ── shared arguments ────────────────────────────────────────────────────────
 
 fn endpoint_arg() -> ArgSpec {
-    ArgSpec::option("--endpoint-url", "URL")
-        .about("CDP endpoint of a running host; falls back to AFHTTP_ENDPOINT_URL")
+    ArgSpec::option("--endpoint-url", "URL").about(
+        "CDP endpoint of a running host; falls back to AFHTTP_ENDPOINT_URL, then to the local afhttp-host container",
+    )
 }
 
+/// The syntax is the source set's to render; this says only what the value is
+/// and where it falls back to.
 fn token_arg() -> ArgSpec {
-    ArgSpec::option("--token-secret", "TOKEN")
-        .about("Bearer token for a protected host; falls back to AFHTTP_TOKEN_SECRET")
+    ArgSpec::option("--token-secret", "SOURCE")
+        .about(
+            "Token for a protected host; falls back to AFHTTP_TOKEN_SECRET, then to the discovered host's own token",
+        )
+        .sources(crate::cli::token_source::set())
+}
+
+/// `host` is the other side of the same flag: the token it will *require*, not
+/// one to go find. Same sources, no fallback — a host that started without one
+/// is unprotected, which is a decision, not a default to inherit from the
+/// environment.
+fn host_token_arg() -> ArgSpec {
+    ArgSpec::option("--token-secret", "SOURCE")
+        .about("Token this host requires from callers")
+        .sources(crate::cli::token_source::set())
 }
 
 fn profile_root_arg() -> ArgSpec {
@@ -553,7 +574,7 @@ fn host_command() -> CommandSpec {
                 .about("Browser backend"),
         )
         .arg(ArgSpec::option("--browser-bin", "PATH").about("Override the browser binary path"))
-        .arg(token_arg())
+        .arg(host_token_arg())
         .arg(
             ArgSpec::flag("--no-health")
                 .about("Stop serving /health and /capabilities, which are on by default"),
@@ -771,6 +792,46 @@ fn tabs_close_command() -> CommandSpec {
                 .required(["tab"])
                 .optional(["endpoint_url", "token_secret"])
                 .output(protocol_output()),
+        )
+}
+
+// ── ui ──────────────────────────────────────────────────────────────────────
+
+/// `ui takeover`, as two shapes.
+///
+/// Minting a credential needs a host to mint it; opening one that already
+/// exists needs only the URL that carries it, and reaching for a host there
+/// would be a second, pointless handoff. Registering that as two shapes rather
+/// than one shape plus a runtime check means the illegal mix — a URL *and* an
+/// endpoint, with nothing to say which wins — is rejected by the parser.
+fn ui_takeover_command() -> CommandSpec {
+    CommandSpec::new(["ui", "takeover"])
+        .about(
+            "Open the takeover panel in an isolated window and block until the person closes it.",
+        )
+        .arg(endpoint_arg())
+        .arg(token_arg())
+        .arg(
+            ArgSpec::option("--takeover-url-secret", "URL")
+                .about("Panel URL a previous `panel` or `fetch --takeover` already minted"),
+        )
+        .arg(ArgSpec::flag("--takeover-no-window").about(
+            "Publish the panel for `afui session list` and wait, instead of opening a window",
+        ))
+        .combination(
+            Combination::new("ui-takeover")
+                .action("ui_takeover")
+                .about("Mint a fresh panel credential from a running host, then open it")
+                .optional(["endpoint_url", "token_secret", "takeover_no_window"])
+                .output(stream_output()),
+        )
+        .combination(
+            Combination::new("ui-takeover-url")
+                .action("ui_takeover")
+                .about("Open a panel URL that was already minted; needs no host of its own")
+                .required(["takeover_url_secret"])
+                .optional(["takeover_no_window"])
+                .output(stream_output()),
         )
 }
 

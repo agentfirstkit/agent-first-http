@@ -394,6 +394,32 @@ Unauthenticated public health, when enabled, returns only `status`.
 
 Capabilities describe support; they do not guarantee a later page-specific artifact capture will succeed.
 
+## UI Takeover Events
+
+`afhttp ui takeover` holds the panel open and blocks, so it is a stream of two
+events rather than one result. It emits a `progress` event once the panel is
+resolved and announced, immediately before it starts waiting:
+
+```json
+{"kind":"progress","progress":{"code":"ui_takeover","panel_url":"http://127.0.0.1:9222/takeover/panel","session":"watch","delivery":"window","session_id":"59ba685afa343877acf945613eebedad","takeover_url_expires_at_rfc3339":"2026-06-11T00:15:00Z","takeover_url_ttl_s":900},"trace":{}}
+```
+
+and one terminal `result` when the session ends:
+
+```json
+{"kind":"result","result":{"code":"ui_takeover","panel_url":"http://127.0.0.1:9222/takeover/panel","session":"watch","delivery":"window","outcome":"closed","open_s":184},"trace":{}}
+```
+
+| Field | Description |
+| --- | --- |
+| `panel_url` | Where the panel is served, without the query. The credential reaches the window and appears in no event. |
+| `session` | Always `watch`. A VNC canvas has no submit control, so there is nothing for the person to confirm and no typed result to collect. |
+| `delivery` | `window` for a window on this machine, `listed` under `--takeover-no-window`. |
+| `session_id` | What `afui session list` calls this panel. The panel is announced there for as long as the command runs, so an agent can point a person at the right one without ever handling the credential. Absent only when the panel could not be announced at all, which a window delivery survives and `--takeover-no-window` does not: no `session_id` means the window is open and nothing else can see it. |
+| `outcome` | `closed` when the person closed the window; under `--takeover-no-window`, `expired` when the credential's deadline arrived and `stopped` when the command was interrupted. |
+| `open_s` | How long the session was open. |
+| `takeover_url_expires_at_rfc3339`, `takeover_url_ttl_s` | Present on `progress` only when this run minted the credential; absent when `--takeover-url-secret` supplied one, since its deadline was reported when it was minted. |
+
 ## External Runtime Dependencies
 
 The distributed afhttp binary does not bundle browser engines or KasmVNC. It locates external tools on `PATH` (or explicit flags where available) and spawns them as separate processes:

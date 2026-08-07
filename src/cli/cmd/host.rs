@@ -3,6 +3,9 @@
 
 use std::path::PathBuf;
 
+use agent_first_data::ValueSource;
+
+use crate::cli::token_source;
 use crate::host::bootstrap::{
     BrowserChoice, DisplayMode, HealthPublic, HostArgs, ProfileChoice, Takeover,
 };
@@ -20,7 +23,10 @@ pub struct Args {
     pub takeover_quality_percent: u8,
     pub browser: BrowserChoice,
     pub browser_bin: Option<PathBuf>,
-    pub token: Option<String>,
+    /// The token this host will require of its callers, still unread: a host
+    /// that keeps its token in a config file should not have to put it on argv
+    /// or in the environment to start.
+    pub token: Option<ValueSource>,
     pub no_health: bool,
     pub health_public: HealthPublic,
     pub engine_envs: Vec<String>,
@@ -30,7 +36,13 @@ pub struct Args {
 }
 
 pub async fn run(args: Args) -> Result<(), Error> {
-    enforce_listen_auth(&args.listen, args.token.as_deref())?;
+    let token = args.token.as_ref().map(token_source::read).transpose()?;
+    enforce_listen_auth(
+        &args.listen,
+        token
+            .as_ref()
+            .map(agent_first_data::value_source::SecretString::expose_secret),
+    )?;
     let profile_raw = args.profile.trim();
     if profile_raw.is_empty() || profile_raw.contains(',') {
         return Err(Error::new(
@@ -61,7 +73,7 @@ pub async fn run(args: Args) -> Result<(), Error> {
         display_quality: args.takeover_quality_percent,
         browser: args.browser,
         browser_bin: args.browser_bin,
-        token: args.token,
+        token: token.map(|token| token.expose_secret().to_string()),
         takeover_enabled,
         health_enabled,
         health_public: args.health_public,

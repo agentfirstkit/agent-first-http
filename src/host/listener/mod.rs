@@ -10,11 +10,12 @@ pub mod profile;
 pub mod recent_requests;
 pub mod takeover_routes;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
+use agent_first_ui::{UiAccessToken, UiExpiry};
 use axum::Extension;
 use axum::Router;
 use axum::extract::State;
@@ -87,7 +88,13 @@ pub struct AppState {
     /// Real-display takeover proxy target and provider process keepalive.
     pub takeover: Option<TakeoverProxyState>,
     /// Short-lived URL capabilities for browser handoff into `/takeover/*`.
-    handoffs: Arc<RwLock<HashMap<String, HandoffEntry>>>,
+    ///
+    /// A list rather than a map keyed by secret: authorization asks every live
+    /// credential in constant time (`UiAccessToken::authorize`) instead of
+    /// hashing the supplied secret and looking it up, which leaks the secret
+    /// through timing. Live credentials are few — one per minted panel URL,
+    /// dropped as soon as they expire or are revoked — so the scan is cheap.
+    handoffs: Arc<RwLock<Vec<UiAccessToken>>>,
 }
 
 impl AppState {
@@ -107,7 +114,8 @@ impl AppState {
     /// concurrent switches can't race. The previous profile's browser (and its
     /// on-disk profile lock) is torn down once the last in-flight request
     /// holding it finishes; an in-progress human takeover on the old profile is
-    /// ended by the switch.
+    /// ended by the switch, and every takeover credential minted against it is
+    /// revoked with it.
     pub async fn ensure_profile(&self, name: &str) -> Result<(), Error> {
         if self.get_profile().is_some_and(|p| p.name == name) {
             return Ok(());
@@ -139,8 +147,27 @@ impl AppState {
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .replace(entry);
+        // Every panel URL handed out so far pointed at the browser that just
+        // went away. Revoking after the swap rather than before means a failed
+        // relaunch (which returns above, leaving the old profile in place)
+        // never kills a panel that still works.
+        self.revoke_takeover_handoffs();
         drop(old);
         Ok(())
+    }
+
+    /// Revoke every live takeover credential, so any panel still open on it
+    /// stops authorizing on its next request. Returns how many were revoked.
+    ///
+    /// Called when the browser those credentials pointed at is torn down: a
+    /// runtime profile switch, and host shutdown.
+    pub fn revoke_takeover_handoffs(&self) -> usize {
+        let mut handoffs = self.handoffs.write().unwrap_or_else(|e| e.into_inner());
+        let revoked = handoffs.len();
+        for token in handoffs.drain(..) {
+            token.revoke();
+        }
+        revoked
     }
 }
 
@@ -185,16 +212,13 @@ struct AuthInfo {
     authenticated: bool,
 }
 
-#[derive(Clone)]
-struct HandoffEntry {
-    expires_at: Instant,
-    expires_at_system: SystemTime,
-    scope: &'static str,
-}
-
+/// One authorized `/takeover/*` request, and what its response cookie should
+/// carry forward.
 #[derive(Clone)]
 struct HandoffAuth {
-    token: String,
+    /// The secret the request supplied, re-issued as a cookie so the panel's
+    /// own asset and websocket requests carry it without the query string.
+    secret: String,
     remaining_s: u64,
     secure_cookie: bool,
 }
@@ -203,8 +227,6 @@ struct HandoffAuth {
 struct HandoffRequest {
     #[serde(default)]
     ttl_s: Option<u64>,
-    #[serde(default)]
-    tab_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -261,7 +283,7 @@ impl AppState {
             })),
             recent_requests: recent,
             takeover,
-            handoffs: Arc::new(RwLock::new(HashMap::new())),
+            handoffs: Arc::new(RwLock::new(Vec::new())),
         })
     }
 
@@ -270,11 +292,16 @@ impl AppState {
     /// only on `cfg(unix)`.
     pub async fn serve(self, listen_addr: &str) -> Result<(), Error> {
         let app = build_router(self.clone());
-        match parse_listen(listen_addr)? {
+        let served = match parse_listen(listen_addr)? {
             ListenAddr::Tcp(addr) => serve_tcp(app, addr).await,
             #[cfg(unix)]
             ListenAddr::Unix(path) => serve_unix(app, path).await,
-        }
+        };
+        // Shutdown takes the browser with it, so every panel URL still in
+        // someone's hands is now pointed at nothing. Revoking says so rather
+        // than leaving a credential that outlives what it authorized.
+        self.revoke_takeover_handoffs();
+        served
     }
 }
 
@@ -382,59 +409,53 @@ pub enum ListenAddr {
 }
 
 impl AppState {
-    fn issue_takeover_handoff(
-        &self,
-        ttl_s: u64,
-        _tab_id: Option<String>,
-    ) -> (String, HandoffEntry) {
-        self.prune_expired_handoffs();
-        let token = uuid::Uuid::new_v4().to_string();
-        let ttl = Duration::from_secs(ttl_s);
-        let entry = HandoffEntry {
-            expires_at: Instant::now() + ttl,
-            expires_at_system: SystemTime::now() + ttl,
-            scope: TAKEOVER_HANDOFF_SCOPE,
-        };
-        self.handoffs
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(token.clone(), entry.clone());
-        (token, entry)
+    /// Mint one takeover credential with a fixed lifetime measured from now.
+    ///
+    /// `UiExpiry::After` rather than `Idle`: the caller was promised an
+    /// absolute deadline (`takeover_url_expires_at_rfc3339`), so a panel left
+    /// open must not extend it by polling.
+    fn issue_takeover_handoff(&self, ttl_s: u64) -> Result<UiAccessToken, Error> {
+        let token =
+            UiAccessToken::issue(UiExpiry::After(Duration::from_secs(ttl_s))).map_err(|error| {
+                Error::new(
+                    ErrorCode::InternalError,
+                    format!("takeover handoff: could not mint a credential: {error}"),
+                )
+            })?;
+        let mut handoffs = self.handoffs.write().unwrap_or_else(|e| e.into_inner());
+        handoffs.retain(is_live);
+        handoffs.push(token.clone());
+        Ok(token)
     }
 
     fn takeover_handoff_auth(&self, req: &axum::extract::Request) -> Option<HandoffAuth> {
-        let token = query_handoff(req).or_else(|| cookie_handoff(req))?;
-        let now = Instant::now();
-        let entry = {
-            let guard = self.handoffs.read().unwrap_or_else(|e| e.into_inner());
-            guard.get(&token).cloned()
+        let secret = query_handoff(req).or_else(|| cookie_handoff(req))?;
+        // Dead credentials are dropped on every authorization attempt as well
+        // as on every mint, so a host that mints once and then serves a panel
+        // for an hour does not hold the expired credential for that whole hour.
+        let token = {
+            let mut handoffs = self.handoffs.write().unwrap_or_else(|e| e.into_inner());
+            handoffs.retain(is_live);
+            handoffs
+                .iter()
+                .find(|token| token.authorize(&secret))
+                .cloned()
         }?;
-        if entry.expires_at <= now || entry.scope != TAKEOVER_HANDOFF_SCOPE {
-            self.handoffs
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&token);
-            return None;
-        }
-        let remaining_s = entry
-            .expires_at
-            .saturating_duration_since(now)
-            .as_secs()
-            .max(1);
+        // `After` always has a deadline, so `None` here cannot happen; treating
+        // it as unauthorized keeps that unreachable case from inventing a TTL.
+        let remaining_s = token.remaining_ttl()?.as_secs().max(1);
         Some(HandoffAuth {
-            token,
+            secret,
             remaining_s,
             secure_cookie: request_is_https(req.headers(), req.uri()),
         })
     }
+}
 
-    fn prune_expired_handoffs(&self) {
-        let now = Instant::now();
-        self.handoffs
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .retain(|_, entry| entry.expires_at > now);
-    }
+/// A credential worth keeping in the list: still within its lifetime, and not
+/// revoked by a profile switch or host shutdown.
+fn is_live(token: &UiAccessToken) -> bool {
+    !token.is_expired() && !token.is_revoked()
 }
 
 async fn takeover_handoff_handler(
@@ -467,7 +488,17 @@ async fn takeover_handoff_handler(
         .into_response();
     }
 
-    let (token, entry) = state.issue_takeover_handoff(ttl_s, body.tab_id);
+    let token = match state.issue_takeover_handoff(ttl_s) {
+        Ok(token) => token,
+        Err(err) => {
+            let body = crate::shared::afdata::error_value(
+                err.error_code.as_str(),
+                &err.detail,
+                err.retryable,
+            );
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response();
+        }
+    };
     let mut takeover_url = match takeover_panel_url_from_request(&headers, &uri) {
         Ok(url) => url,
         Err(err) => {
@@ -481,13 +512,13 @@ async fn takeover_handoff_handler(
     };
     takeover_url
         .query_pairs_mut()
-        .append_pair("handoff_secret", &token);
+        .append_pair("handoff_secret", token.secret().expose_secret());
+    let expires_at = SystemTime::now() + Duration::from_secs(ttl_s);
     let response = HandoffResponse {
         takeover_url_secret: takeover_url.to_string(),
-        takeover_url_expires_at_rfc3339: humantime::format_rfc3339_seconds(entry.expires_at_system)
-            .to_string(),
+        takeover_url_expires_at_rfc3339: humantime::format_rfc3339_seconds(expires_at).to_string(),
         takeover_url_ttl_s: ttl_s,
-        takeover_url_scope: entry.scope,
+        takeover_url_scope: TAKEOVER_HANDOFF_SCOPE,
     };
     let value = serde_json::to_value(response).unwrap_or_else(|_| serde_json::json!({}));
     Json(crate::shared::afdata::result_value_revealing_takeover(
@@ -679,7 +710,7 @@ async fn token_middleware(
             let mut response = next.run(request).await;
             set_takeover_handoff_cookie(
                 &mut response,
-                &handoff.token,
+                &handoff.secret,
                 handoff.remaining_s,
                 handoff.secure_cookie,
             );
@@ -828,7 +859,7 @@ pub fn test_state(token: Option<&str>, health_public: HealthPublic) -> AppState 
         launch_ctx: None,
         recent_requests: None,
         takeover: None,
-        handoffs: Arc::new(RwLock::new(HashMap::new())),
+        handoffs: Arc::new(RwLock::new(Vec::new())),
     }
 }
 

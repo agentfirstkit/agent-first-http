@@ -26,62 +26,18 @@ use agent_first_http::host::bootstrap::{
 use agent_first_http::host::browser::BrowserHandle;
 use agent_first_http::host::listener::{AppState, router_for_tests, test_state};
 use agent_first_http::shared::error::ErrorCode;
-use axum::extract::ws::{Message, WebSocketUpgrade};
-use axum::http::{HeaderMap, Uri};
-use axum::response::IntoResponse;
-use axum::routing::get;
 use futures::{SinkExt, StreamExt};
 use serde_json::json;
 use tokio::net::TcpListener;
 
-async fn spawn_fake_kasm() -> u16 {
-    let app = axum::Router::new()
-        .route("/", get(|| async { "fake kasmvnc" }))
-        .route("/echo", get(echo_request))
-        .route("/ws", get(fake_ws));
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind fake");
-    let port = listener.local_addr().expect("addr").port();
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    tokio::time::sleep(Duration::from_millis(20)).await;
-    port
-}
+use support::takeover_host::{
+    handoff_secret_of, mint_panel_url as takeover_handoff_url,
+    spawn_fake_provider as spawn_fake_kasm, spawn_host as spawn_display_router,
+    spawn_host_with_state as spawn_display_router_with_state,
+};
 
-async fn echo_request(uri: Uri, headers: HeaderMap) -> impl IntoResponse {
-    axum::Json(json!({
-        "path_and_query": uri.path_and_query().map(|pq| pq.as_str()).unwrap_or(""),
-        "saw_cookie": headers.get(axum::http::header::COOKIE).is_some(),
-        "saw_authorization": headers.get(axum::http::header::AUTHORIZATION).is_some(),
-    }))
-}
-
-async fn fake_ws(ws: WebSocketUpgrade) -> impl IntoResponse {
-    // Mirror KasmVNC/websockify: agree to the `binary` subprotocol the proxy
-    // now requests on the upstream leg.
-    ws.protocols(["binary"]).on_upgrade(|socket| async move {
-        let (mut tx, mut rx) = socket.split();
-        while let Some(Ok(msg)) = rx.next().await {
-            if let Message::Text(text) = msg {
-                let _ = tx.send(Message::Text(format!("echo:{text}").into())).await;
-            }
-        }
-    })
-}
-
-async fn spawn_display_router(token: Option<&str>, upstream_port: u16) -> String {
-    support::ensure_rustls_provider();
-    let state = test_state(token, HealthPublic::Off).with_takeover_for_tests(upstream_port);
-    let app = router_for_tests(state);
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind host");
-    let addr = listener.local_addr().expect("addr");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    tokio::time::sleep(Duration::from_millis(20)).await;
-    format!("http://{addr}")
-}
-
+/// A host with no display provider at all — the one shape the shared helper
+/// deliberately cannot build, because every other test needs a provider.
 async fn spawn_screencast_only_router(token: Option<&str>) -> String {
     support::ensure_rustls_provider();
     let state = test_state(token, HealthPublic::Off);
@@ -93,31 +49,6 @@ async fn spawn_screencast_only_router(token: Option<&str>) -> String {
     });
     tokio::time::sleep(Duration::from_millis(20)).await;
     format!("http://{addr}")
-}
-
-async fn takeover_handoff_url(base: &str, token: &str) -> String {
-    let body = reqwest::Client::new()
-        .post(format!("{base}/takeover/handoff"))
-        .bearer_auth(token)
-        .json(&json!({}))
-        .send()
-        .await
-        .expect("handoff send")
-        .json::<serde_json::Value>()
-        .await
-        .expect("handoff json");
-    agent_first_data::validate_protocol_event(&body, true).expect("strict AFDATA event");
-    let url = body["result"]["takeover_url_secret"]
-        .as_str()
-        .expect("takeover_url_secret");
-    assert!(url.contains("handoff_secret="), "{body}");
-    assert!(
-        body["result"]["takeover_url_ttl_s"]
-            .as_u64()
-            .unwrap_or_default()
-            > 0
-    );
-    url.to_string()
 }
 
 #[tokio::test]
@@ -157,34 +88,13 @@ async fn display_proxy_rewrites_paths_strips_auth_and_accepts_takeover_cookie() 
         .expect("client");
     let takeover_url = takeover_handoff_url(&base, "secret").await;
 
-    let redirected = no_redirect
+    let landing = no_redirect
         .get(&takeover_url)
         .send()
         .await
-        .expect("redirect");
-    assert_eq!(redirected.status(), reqwest::StatusCode::TEMPORARY_REDIRECT);
-    // The redirect seeds noVNC's `path` (so its websocket targets the proxied
-    // prefix instead of a root-level `/websockify`) and `resize` settings,
-    // appends quality params, and drops the one-time handoff query after
-    // setting the takeover cookie.
-    let location = redirected
-        .headers()
-        .get(reqwest::header::LOCATION)
-        .and_then(|v| v.to_str().ok())
-        .expect("location header");
-    assert!(
-        location.starts_with("/takeover/panel/?path=takeover/panel/websockify&resize=scale"),
-        "unexpected redirect target: {location}"
-    );
-    assert!(
-        location.contains("&max_video_resolution_x="),
-        "missing quality params: {location}"
-    );
-    assert!(
-        !location.contains("handoff_secret=") && !location.contains("handoff="),
-        "handoff capability leaked: {location}"
-    );
-    let cookie = redirected
+        .expect("landing");
+    assert_eq!(landing.status(), reqwest::StatusCode::OK);
+    let cookie = landing
         .headers()
         .get(reqwest::header::SET_COOKIE)
         .and_then(|v| v.to_str().ok())
@@ -194,6 +104,35 @@ async fn display_proxy_rewrites_paths_strips_auth_and_accepts_takeover_cookie() 
         .expect("cookie pair")
         .to_string();
     assert!(cookie.starts_with("afhttp_handoff="));
+    let bootstrap = landing.text().await.expect("landing body");
+    // The landing page seeds noVNC's `resize` and quality settings and drops
+    // the one-time handoff query, having just set the takeover cookie.
+    assert!(
+        bootstrap.contains("&resize=scale"),
+        "missing resize setting: {bootstrap}"
+    );
+    assert!(
+        bootstrap.contains("&max_video_resolution_x="),
+        "missing quality params: {bootstrap}"
+    );
+    assert!(
+        !bootstrap.contains("handoff_secret=") && !bootstrap.contains("handoff="),
+        "handoff capability leaked: {bootstrap}"
+    );
+    // noVNC roots its WebSocket URL at the origin, so `path` must name wherever
+    // this panel is publicly served from — and that is the one thing the
+    // listener cannot know, because a proxy framing the panel elsewhere
+    // forwards nothing that says so. It is derived in the browser instead, and
+    // an absolute panel path baked in here is exactly the regression that made
+    // the canvas unreachable through `afui session serve`.
+    assert!(
+        bootstrap.contains("location.pathname"),
+        "the websocket path must be derived from where the browser is: {bootstrap}"
+    );
+    assert!(
+        !bootstrap.contains("path=takeover/panel/websockify"),
+        "the websocket path must not be hardcoded to this listener's own prefix: {bootstrap}"
+    );
 
     let through_cookie = reqwest::Client::new()
         .get(format!("{base}/takeover/panel/echo?x=1"))
@@ -208,12 +147,7 @@ async fn display_proxy_rewrites_paths_strips_auth_and_accepts_takeover_cookie() 
     assert_eq!(through_cookie["saw_cookie"], false);
     assert_eq!(through_cookie["saw_authorization"], false);
 
-    let handoff = url::Url::parse(&takeover_url)
-        .expect("parse takeover URL")
-        .query_pairs()
-        .find(|(k, _)| k == "handoff_secret")
-        .map(|(_, v)| v.into_owned())
-        .expect("handoff query");
+    let handoff = handoff_secret_of(&takeover_url);
     let stripped_query = reqwest::Client::new()
         .get(format!(
             "{base}/takeover/panel/echo?handoff_secret={handoff}&x=2"
@@ -225,6 +159,135 @@ async fn display_proxy_rewrites_paths_strips_auth_and_accepts_takeover_cookie() 
         .await
         .expect("json");
     assert_eq!(stripped_query["path_and_query"], "/echo?x=2");
+}
+
+/// A panel framed somewhere else is served, not corrected.
+///
+/// Once the browser has answered "here is where I am", the listener has no
+/// opinion about it: a `path` naming a prefix that is not this listener's own
+/// is passed to the display client unchanged, and the landing page is not
+/// bootstrapped a second time. Bootstrapping again would loop, and rewriting
+/// `path` would put the canvas back on a prefix only the direct delivery has.
+#[tokio::test]
+async fn a_panel_framed_under_a_foreign_prefix_keeps_the_prefix_the_browser_reported() {
+    let upstream_port = spawn_fake_kasm().await;
+    let base = spawn_display_router(Some("secret"), upstream_port).await;
+    let handoff = handoff_secret_of(&takeover_handoff_url(&base, "secret").await);
+    // What `afui session serve` produces: the browser is at `/s/<credential>/`,
+    // so that is the prefix it reports, and the framing listener adds the
+    // announced credential back on to every upstream request.
+    let framed = "s%2F0123456789abcdef%2Fwebsockify";
+
+    let landed = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("client")
+        .get(format!(
+            "{base}/takeover/panel/?handoff_secret={handoff}&path={framed}&resize=scale"
+        ))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(
+        landed.status(),
+        reqwest::StatusCode::OK,
+        "a settled landing page must be served, not bootstrapped again"
+    );
+    let seen = landed.json::<serde_json::Value>().await.expect("json");
+    assert_eq!(
+        seen["path_and_query"],
+        format!("/?path={framed}&resize=scale"),
+        "the client's own prefix must reach the display unchanged"
+    );
+}
+
+/// Revocation, which the handoff map this replaced had no way to express: the
+/// only way to end a live panel used to be shutting the whole host down. A
+/// profile switch tore the browser out from under a panel someone still had
+/// open, and every credential minted for it kept authorizing.
+#[tokio::test]
+async fn revoking_takeover_credentials_ends_a_panel_that_is_still_open() {
+    let upstream_port = spawn_fake_kasm().await;
+    let (base, state) = spawn_display_router_with_state(Some("secret"), upstream_port).await;
+    let takeover_url = takeover_handoff_url(&base, "secret").await;
+    let secret = handoff_secret_of(&takeover_url);
+    let panel = format!("{base}/takeover/panel/echo?handoff_secret={secret}");
+
+    let live = reqwest::Client::new()
+        .get(&panel)
+        .send()
+        .await
+        .expect("before revoke");
+    assert_eq!(live.status(), reqwest::StatusCode::OK);
+    let cookie = live
+        .headers()
+        .get(reqwest::header::SET_COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .expect("set-cookie")
+        .split(';')
+        .next()
+        .expect("cookie pair")
+        .to_string();
+
+    // What `ensure_profile` and host shutdown call.
+    assert_eq!(state.revoke_takeover_handoffs(), 1);
+
+    let by_query = reqwest::Client::new()
+        .get(&panel)
+        .send()
+        .await
+        .expect("after revoke");
+    assert_eq!(by_query.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // The cookie the browser already holds is the same credential, so it dies
+    // with it — otherwise the panel's own asset requests would outlive revoke.
+    let by_cookie = reqwest::Client::new()
+        .get(format!("{base}/takeover/panel/echo"))
+        .header(reqwest::header::COOKIE, cookie)
+        .send()
+        .await
+        .expect("after revoke, by cookie");
+    assert_eq!(by_cookie.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // A credential minted after the switch works: revoke ends the live ones, it
+    // does not disable the route.
+    let reminted = takeover_handoff_url(&base, "secret").await;
+    let again = reqwest::Client::new()
+        .get(format!(
+            "{base}/takeover/panel/echo?handoff_secret={}",
+            handoff_secret_of(&reminted)
+        ))
+        .send()
+        .await
+        .expect("after remint");
+    assert_eq!(again.status(), reqwest::StatusCode::OK);
+}
+
+/// A credential is only ever accepted by the host that minted it, and only in
+/// its exact form. The map this replaced compared secrets with a hash lookup;
+/// `UiAccessToken::authorize` compares them in constant time, and a wrong
+/// secret of the right length must still be rejected.
+#[tokio::test]
+async fn a_near_miss_credential_is_rejected() {
+    let upstream_port = spawn_fake_kasm().await;
+    let base = spawn_display_router(Some("secret"), upstream_port).await;
+    let secret = handoff_secret_of(&takeover_handoff_url(&base, "secret").await);
+
+    // Flip the last character to something else in the same alphabet: same
+    // length, same shape, one byte different.
+    let mut near_miss = secret.clone();
+    let last = near_miss.pop().expect("non-empty secret");
+    near_miss.push(if last == '0' { '1' } else { '0' });
+    assert_ne!(near_miss, secret);
+
+    let resp = reqwest::Client::new()
+        .get(format!(
+            "{base}/takeover/panel/echo?handoff_secret={near_miss}"
+        ))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -244,12 +307,7 @@ async fn display_proxy_forwards_websocket_upgrades_behind_token() {
     let upstream_port = spawn_fake_kasm().await;
     let base = spawn_display_router(Some("secret"), upstream_port).await;
     let takeover_url = takeover_handoff_url(&base, "secret").await;
-    let handoff = url::Url::parse(&takeover_url)
-        .expect("parse takeover URL")
-        .query_pairs()
-        .find(|(k, _)| k == "handoff_secret")
-        .map(|(_, v)| v.into_owned())
-        .expect("handoff query");
+    let handoff = handoff_secret_of(&takeover_url);
     let ws_url = base.replacen("http://", "ws://", 1).to_string()
         + &format!("/takeover/panel/ws?handoff_secret={handoff}");
 

@@ -2,8 +2,8 @@
 
 use serde_json::Value;
 
+use crate::cli::connect::Connection;
 use crate::cli::output;
-use crate::sdk::Client;
 use crate::shared::error::{Error, ErrorCode};
 
 #[derive(Debug)]
@@ -19,15 +19,13 @@ pub enum TabsSub {
 
 #[derive(Debug)]
 pub struct EndpointArgs {
-    pub endpoint: String,
-    pub token: Option<String>,
+    pub connection: Connection,
 }
 
 #[derive(Debug)]
 pub struct CloseArgs {
     pub tab: String,
-    pub endpoint: String,
-    pub token: Option<String>,
+    pub connection: Connection,
 }
 
 pub async fn run(args: Args) -> Result<(), Error> {
@@ -37,16 +35,8 @@ pub async fn run(args: Args) -> Result<(), Error> {
     }
 }
 
-fn build_client(endpoint: &str, token: Option<String>) -> Result<Client, Error> {
-    let mut client = Client::connect(endpoint)?;
-    if let Some(t) = token {
-        client = client.with_token(t);
-    }
-    Ok(client)
-}
-
 async fn list(args: EndpointArgs) -> Result<(), Error> {
-    let client = build_client(&args.endpoint, args.token)?;
+    let client = args.connection.client().await?;
     let response = client.cdp("Target.getTargets").send().await?;
     // `Client.cdp(...).send()` unwraps the JSON-RPC `result` envelope, so
     // `response` is the inner method result and we read `targetInfos`
@@ -69,7 +59,7 @@ async fn close(args: CloseArgs) -> Result<(), Error> {
             "tabs close: target id must not be empty",
         ));
     }
-    let client = build_client(&args.endpoint, args.token)?;
+    let client = args.connection.client().await?;
     let response = client
         .cdp("Target.closeTarget")
         .params(serde_json::json!({ "targetId": args.tab }))

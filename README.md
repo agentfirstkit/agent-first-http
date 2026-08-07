@@ -90,7 +90,7 @@ afhttp splits into two roles that are independently locatable:
 | Role | Command | What it does |
 | --- | --- | --- |
 | **browser-host** | `afhttp host` | Long-running foreground process. Holds Chromium + a profile. Exposes a CDP endpoint and optional real-display takeover. |
-| **agent-driver** | `afhttp fetch`, `afhttp upload`, `afhttp cdp`, `afhttp panel`, `afhttp health`, `afhttp capabilities`, `afhttp profile`, `afhttp tabs`, or the Rust SDK | Short-lived client. Connects to a host's endpoint when needed, does work, writes artifacts locally. |
+| **agent-driver** | `afhttp fetch`, `afhttp upload`, `afhttp cdp`, `afhttp panel`, `afhttp ui`, `afhttp health`, `afhttp capabilities`, `afhttp profile`, `afhttp tabs`, or the Rust SDK | Short-lived client. Connects to a host's endpoint when needed, does work, writes artifacts locally. |
 
 Run the host where the browser needs to be (residential IP, GUI machine,
 datacenter); run the driver wherever the agent runs. Connectivity is your mesh's
@@ -108,11 +108,16 @@ For state that outlives a single fetch — a reused login, a warmed profile, hum
 afhttp container install
 ```
 
+Once it is running, nothing has to be said about it again: every command that
+needs a host — `fetch --takeover`, `fetch --profile`, `cdp`, `tabs`, `upload`,
+`health`, `capabilities`, `panel` — discovers the standard local `afhttp-host`
+and reads its token from the container when `--endpoint-url` is omitted. No
+environment variable, no `docker exec … cat`.
+
 `container install` is takeover-ready by default (Brave + KasmVNC + an
-ephemeral initial profile + a 2g `/dev/shm`). A takeover fetch auto-discovers
-the standard local `afhttp-host`, switches to a persistent per-site profile
-derived from the URL, and lets a human clear a wall on the same browser the
-agent drives:
+ephemeral initial profile + a 2g `/dev/shm`). A takeover fetch switches to a
+persistent per-site profile derived from the URL, and lets a human clear a wall
+on the same browser the agent drives:
 
 ```bash
 afhttp fetch "$URL" --takeover
@@ -151,6 +156,8 @@ Unsupported per-artifact operations return per-artifact warnings (`backend_unsup
 ## Human takeover: a person drives the same browser when a step needs it
 
 When a fetch hits a login, captcha, or 2FA wall, `afhttp fetch <url> --takeover` keeps a persistent tab open on a takeover-ready host and hands back a complete short-lived `takeover_url_secret` a human opens to drive the *same* browser the agent is using, via real-display takeover backed by KasmVNC. Once the human is past the wall, the agent re-fetches the same tab to continue. Without `--profile`, takeover switches to a persistent profile derived from the URL's registrable domain. The worked example below shows the full `next_action` payload.
+
+Handing over a URL leaves the agent guessing when the person is finished. Where a window can open on the agent's own machine, `afhttp ui takeover` opens the panel itself and blocks until they close it, so "done" is an event rather than a guess.
 
 ## Worked examples
 
@@ -192,12 +199,16 @@ For real workflows: start one `afhttp host`, drive it from anywhere.
 # A non-loopback listener (anything other than 127.0.0.1 / a unix: socket) serves
 # full browser control over /cdp, so a --token-secret is required — the host refuses to
 # bind otherwise:
-export AFHTTP_TOKEN_SECRET=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n')
+mkdir -p ~/.afhttp && printf '{"work":{"token_secret":"%s"}}\n' \
+  "$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n')" > ~/.afhttp/hosts.json
 afhttp host --listen tcp:0.0.0.0:9222 --profile work --display headless \
-            --token-secret "$AFHTTP_TOKEN_SECRET"
+            --token-secret file:$HOME/.afhttp/hosts.json#work.token_secret
 
-# From the agent's machine:
-afhttp fetch --endpoint-url ws://host.mesh.internal:9222 --token-secret "$AFHTTP_TOKEN_SECRET" \
+# From the agent's machine. --token-secret names where the token is — a config
+# file, an environment variable (env:NAME), or a local container
+# (container:NAME) — so the secret never goes through the shell:
+afhttp fetch --endpoint-url ws://host.mesh.internal:9222 \
+             --token-secret file:$HOME/.afhttp/hosts.json#work.token_secret \
              --render auto --wait auto \
              --want rendered_html --want observation --want screenshot \
              --want network --want console \
@@ -212,11 +223,18 @@ The token secret gates `/cdp`, display takeover, and `/profile`; bind `tcp:127.0
 When `fetch` is not enough — for example, evaluating arbitrary JavaScript in the target page:
 
 ```bash
+# Against the local afhttp-host container, which is found rather than named:
 afhttp cdp Runtime.evaluate \
-  --endpoint-url ws://host.mesh.internal:9222 \
   --tab abc123 \
   --params '{"expression":"document.querySelectorAll(\"a\").length","returnByValue":true}'
 # {"result":{"type":"number","value":42}}
+
+# Against a host elsewhere:
+afhttp cdp Runtime.evaluate \
+  --endpoint-url ws://host.mesh.internal:9222 \
+  --token-secret file:$HOME/.afhttp/hosts.json#work.token_secret \
+  --tab abc123 \
+  --params '{"expression":"document.querySelectorAll(\"a\").length","returnByValue":true}'
 ```
 
 No `click` / `type` / `navigate` wrappers. The agent talks raw CDP; afhttp only forwards.

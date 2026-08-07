@@ -132,6 +132,14 @@ command tabs close
   arg endpoint_url --endpoint-url
   arg token_secret --token-secret
   shape tabs-close -> tabs_close
+command ui
+command ui takeover
+  arg endpoint_url --endpoint-url
+  arg token_secret --token-secret
+  arg takeover_url_secret --takeover-url-secret
+  arg takeover_no_window --takeover-no-window
+  shape ui-takeover -> ui_takeover
+  shape ui-takeover-url -> ui_takeover
 command skill
 command skill status
   arg agent --agent <all|codex|claude-code|opencode|hermes> =all

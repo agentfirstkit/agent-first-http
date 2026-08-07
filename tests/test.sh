@@ -44,6 +44,7 @@ case "$MODE" in
       --test proxy_tls \
       --test env_isolation \
       --test display_takeover \
+      --test ui_takeover \
       --test host_extras \
       --test network_artifact \
       --test storage_artifact \

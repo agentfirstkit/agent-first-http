@@ -75,14 +75,25 @@ DOCKER_FLAGS+=(-e CARGO_HOME=/cargo-home -e CARGO_TARGET_DIR=/cargo-target)
 if [ -n "${AFHTTP_DOCKER_USER:-}" ]; then
   DOCKER_FLAGS+=(--user "$AFHTTP_DOCKER_USER")
 fi
-AFDATA_MOUNT=()
-if [ -d "$SPORE_DIR/../agent-first-data" ]; then
-  AFDATA_MOUNT=(-v "$SPORE_DIR/../agent-first-data:/agent-first-data")
-fi
+# Sibling spores reachable at a local path from inside the container. Each is
+# mounted where `/workspace/../<name>` resolves, so the same relative path works
+# inside the container; absent siblings are skipped, which is what a standalone
+# clone (where .cargo/config.toml does not ship) looks like.
+#
+# The first two are what this spore's own .cargo/config.toml patches.
+# agent-first-slug is here for agent-first-ui's: tests/takeover-in-workbench.sh
+# builds that crate's `afui` inside this container, and it patches its own
+# siblings the same way.
+SIBLING_MOUNTS=()
+for sibling in agent-first-data agent-first-ui agent-first-slug; do
+  if [ -d "$SPORE_DIR/../$sibling" ]; then
+    SIBLING_MOUNTS+=(-v "$SPORE_DIR/../$sibling:/$sibling")
+  fi
+done
 
 exec docker run "${DOCKER_FLAGS[@]}" \
   -v "$SPORE_DIR:/workspace" \
-  "${AFDATA_MOUNT[@]}" \
+  "${SIBLING_MOUNTS[@]}" \
   -v afhttp-cargo-home:/cargo-home \
   -v afhttp-cargo-target:/cargo-target \
   -w /workspace \

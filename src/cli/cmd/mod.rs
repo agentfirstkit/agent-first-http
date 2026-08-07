@@ -12,6 +12,7 @@ pub mod panel;
 pub mod profile;
 pub mod skill;
 pub mod tabs;
+pub mod ui;
 pub mod upload;
 
 #[cfg(test)]
@@ -25,10 +26,21 @@ mod tests {
     use tokio_tungstenite::tungstenite::Message;
 
     use super::*;
+    use crate::cli::connect::Connection;
     use crate::shared::error::ErrorCode;
+    use agent_first_data::ValueSource;
 
     fn ensure_rustls_provider() {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    }
+
+    /// A host these tests name outright: every one of them spawns its own
+    /// server, so nothing here may fall back to discovery.
+    fn host_at(endpoint: &str, token: Option<&str>) -> Connection {
+        Connection::new(
+            Some(endpoint.to_string()),
+            token.map(|token| ValueSource::Literal(token.to_string())),
+        )
     }
 
     async fn spawn_http_host() -> String {
@@ -198,15 +210,13 @@ mod tests {
         let base = spawn_http_host().await;
 
         health::run(health::Args {
-            endpoint: base.clone(),
-            token: Some("token".into()),
+            connection: host_at(&base, Some("token")),
         })
         .await
         .unwrap();
 
         capabilities::run(capabilities::Args {
-            endpoint: base,
-            token: Some("token".into()),
+            connection: host_at(&base, Some("token")),
         })
         .await
         .unwrap();
@@ -218,8 +228,7 @@ mod tests {
 
         cdp::run(cdp::Args {
             method: "Runtime.evaluate".into(),
-            endpoint,
-            token: Some("a+b&c%20".into()),
+            connection: host_at(&endpoint, Some("a+b&c%20")),
             tab: "tab-1".into(),
             params: Some(json!({"expression": "1 + 1"}).to_string()),
             wait: Some("Test.event:1s".into()),
@@ -232,8 +241,7 @@ mod tests {
     async fn cdp_command_validates_json_and_wait_specs() {
         let err = cdp::run(cdp::Args {
             method: "Runtime.evaluate".into(),
-            endpoint: "ws://127.0.0.1:1".into(),
-            token: None,
+            connection: host_at("ws://127.0.0.1:1", None),
             tab: "tab-1".into(),
             params: Some("{".into()),
             wait: None,
@@ -245,8 +253,7 @@ mod tests {
 
         let err = cdp::run(cdp::Args {
             method: "Runtime.evaluate".into(),
-            endpoint: "ws://127.0.0.1:1".into(),
-            token: None,
+            connection: host_at("ws://127.0.0.1:1", None),
             tab: "tab-1".into(),
             params: Some("{}".into()),
             wait: Some("missing-timeout".into()),
@@ -263,8 +270,7 @@ mod tests {
 
         tabs::run(tabs::Args {
             sub: tabs::TabsSub::List(tabs::EndpointArgs {
-                endpoint: endpoint.clone(),
-                token: Some("token".into()),
+                connection: host_at(&endpoint, Some("token")),
             }),
         })
         .await
@@ -273,8 +279,7 @@ mod tests {
         tabs::run(tabs::Args {
             sub: tabs::TabsSub::Close(tabs::CloseArgs {
                 tab: "tab-1".into(),
-                endpoint: endpoint.clone(),
-                token: None,
+                connection: host_at(&endpoint, None),
             }),
         })
         .await
@@ -283,8 +288,7 @@ mod tests {
         let err = tabs::run(tabs::Args {
             sub: tabs::TabsSub::Close(tabs::CloseArgs {
                 tab: " ".into(),
-                endpoint: "ws://127.0.0.1:1".into(),
-                token: None,
+                connection: host_at("ws://127.0.0.1:1", None),
             }),
         })
         .await
@@ -301,8 +305,7 @@ mod tests {
         tokio::fs::write(&file, b"hello").await.unwrap();
 
         upload::run(upload::Args {
-            endpoint,
-            token: Some("token".into()),
+            connection: host_at(&endpoint, Some("token")),
             tab: "tab-1".into(),
             selector: "input[type=file]".into(),
             file,

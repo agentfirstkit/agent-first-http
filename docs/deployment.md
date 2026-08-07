@@ -179,11 +179,19 @@ docker run --rm -p 9222:9222 --shm-size=1g -v afhttp-profile:/data afhttp-host
 docker compose -f container/docker/compose.yaml up --build
 ```
 
-Then, from wherever the agent runs (the driver needs no container):
+On the machine running the container, the standard `afhttp-host` is found
+without being named — its endpoint and token are read from the container itself:
+
+```bash
+afhttp fetch https://example.com
+```
+
+From anywhere else, name the host and where its token is (see
+[CLI Reference](cli.md) for every source):
 
 ```bash
 afhttp fetch https://example.com \
-  --endpoint-url ws://<host>:9222 --token-secret "<host-token>"
+  --endpoint-url wss://<host>:9222 --token-secret file:$HOME/.afhttp/hosts.json#box.token_secret
 ```
 
 ## Security

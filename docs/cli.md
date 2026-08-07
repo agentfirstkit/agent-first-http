@@ -47,6 +47,7 @@ A **shape** is one legal set of arguments that may appear together, under a stab
 - [`afhttp skill uninstall`](#afhttp-skill-uninstall) — Remove an afhttp-managed Agent-First HTTP skill.
 - [`afhttp tabs close`](#afhttp-tabs-close) — Close one CDP target by its target id.
 - [`afhttp tabs list`](#afhttp-tabs-list) — List the CDP targets currently attached to a host.
+- [`afhttp ui takeover`](#afhttp-ui-takeover) — Open the takeover panel in an isolated window and block until the person closes it.
 - [`afhttp upload`](#afhttp-upload) — Upload a local file into a browser tab's file input via DOM.setFileInputFiles.
 
 ### `afhttp capabilities`
@@ -54,27 +55,27 @@ A **shape** is one legal set of arguments that may appear together, under a stab
 Query a host's /capabilities endpoint.
 
 ```
-afhttp capabilities [--endpoint-url <URL>] [--token-secret <TOKEN>]
+afhttp capabilities [--endpoint-url <URL>] [--token-secret <SOURCE>]
 ```
 
 | Argument | Meaning |
 |---|---|
-| `--endpoint-url` | CDP endpoint of a running host; falls back to AFHTTP_ENDPOINT_URL |
-| `--token-secret` | Bearer token for a protected host; falls back to AFHTTP_TOKEN_SECRET |
+| `--endpoint-url` | CDP endpoint of a running host; falls back to AFHTTP_ENDPOINT_URL, then to the local afhttp-host container |
+| `--token-secret` | Token for a protected host; falls back to AFHTTP_TOKEN_SECRET, then to the discovered host's own token (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, container:NAME, literal:VALUE) |
 
 ### `afhttp cdp`
 
 Send one raw CDP method to a tab and return its result.
 
 ```
-afhttp cdp <METHOD> [--endpoint-url <URL>] [--token-secret <TOKEN>] --tab <TARGET_ID> [--params <JSON|@->] [--wait-event <EVENT:TIMEOUT>]
+afhttp cdp <METHOD> [--endpoint-url <URL>] [--token-secret <SOURCE>] --tab <TARGET_ID> [--params <JSON|@->] [--wait-event <EVENT:TIMEOUT>]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `METHOD` | CDP method name |
-| `--endpoint-url` | CDP endpoint of a running host; falls back to AFHTTP_ENDPOINT_URL |
-| `--token-secret` | Bearer token for a protected host; falls back to AFHTTP_TOKEN_SECRET |
+| `--endpoint-url` | CDP endpoint of a running host; falls back to AFHTTP_ENDPOINT_URL, then to the local afhttp-host container |
+| `--token-secret` | Token for a protected host; falls back to AFHTTP_TOKEN_SECRET, then to the discovered host's own token (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, container:NAME, literal:VALUE) |
 | `--tab` | CDP target id to drive |
 | `--params` | Method parameters as a JSON literal, or @- to read them from stdin |
 | `--wait-event` | Wait for a CDP event before exiting, for example Page.loadEventFired:5s |
@@ -178,37 +179,37 @@ Fetch a URL over HTTP or a real browser and write the requested artifacts.
 #### `fetch` — Fetch with no request body
 
 ```
-afhttp fetch <URL> [--endpoint-url <URL>] [--token-secret <TOKEN>] [--browser <auto|chromium|chrome|fingerprint-chromium|edge|brave|lightpanda|camoufox>] [--browser-bin <PATH>] [--render <none|auto|always>] [--tab <new|<id>>] [--profile <NAME>] [--wait <SPEC>] [--header <NAME:VALUE>...] [--cookie <NAME=VALUE>...] [--user-agent <UA>] [--evaluate-after-wait <JS>...] [--want <body|rendered_html|text|content|content_json|screenshot|network|console|observation|storage>...] [--method <METHOD>] [--network-bodies <off|xhr|all>] [--network-body-max-bytes <BYTES>] [--readiness-idle-ms <MS>] [--readiness-stable-ms <MS>] [--readiness-min-text-bytes <BYTES>] [--no-network-redact] [--out <DIR>] [--cookie-jar <PATH>] [--no-cookie-jar] [--observe-main-wait-ms <MS>] [--max-response-bytes <BYTES>] [--retry <N>] [--backoff-ms <MS>] [--proxy-url <URL>] [--ca-cert <PATH>] [--tls-insecure] [--timeout-ms <MS>] [--capture-ws] [--capture-sse]
+afhttp fetch <URL> [--endpoint-url <URL>] [--token-secret <SOURCE>] [--browser <auto|chromium|chrome|fingerprint-chromium|edge|brave|lightpanda|camoufox>] [--browser-bin <PATH>] [--render <none|auto|always>] [--tab <new|<id>>] [--profile <NAME>] [--wait <SPEC>] [--header <NAME:VALUE>...] [--cookie <NAME=VALUE>...] [--user-agent <UA>] [--evaluate-after-wait <JS>...] [--want <body|rendered_html|text|content|content_json|screenshot|network|console|observation|storage>...] [--method <METHOD>] [--network-bodies <off|xhr|all>] [--network-body-max-bytes <BYTES>] [--readiness-idle-ms <MS>] [--readiness-stable-ms <MS>] [--readiness-min-text-bytes <BYTES>] [--no-network-redact] [--out <DIR>] [--cookie-jar <PATH>] [--no-cookie-jar] [--observe-main-wait-ms <MS>] [--max-response-bytes <BYTES>] [--retry <N>] [--backoff-ms <MS>] [--proxy-url <URL>] [--ca-cert <PATH>] [--tls-insecure] [--timeout-ms <MS>] [--capture-ws] [--capture-sse]
 ```
 
 #### `fetch-data` — Fetch with a raw request body from --data
 
 ```
-afhttp fetch <URL> [--endpoint-url <URL>] [--token-secret <TOKEN>] [--browser <auto|chromium|chrome|fingerprint-chromium|edge|brave|lightpanda|camoufox>] [--browser-bin <PATH>] [--render <none|auto|always>] [--tab <new|<id>>] [--profile <NAME>] [--wait <SPEC>] [--header <NAME:VALUE>...] [--cookie <NAME=VALUE>...] [--user-agent <UA>] [--evaluate-after-wait <JS>...] [--want <body|rendered_html|text|content|content_json|screenshot|network|console|observation|storage>...] [--method <METHOD>] --data <STRING|@FILE> [--network-bodies <off|xhr|all>] [--network-body-max-bytes <BYTES>] [--readiness-idle-ms <MS>] [--readiness-stable-ms <MS>] [--readiness-min-text-bytes <BYTES>] [--no-network-redact] [--out <DIR>] [--cookie-jar <PATH>] [--no-cookie-jar] [--observe-main-wait-ms <MS>] [--max-response-bytes <BYTES>] [--retry <N>] [--backoff-ms <MS>] [--proxy-url <URL>] [--ca-cert <PATH>] [--tls-insecure] [--timeout-ms <MS>] [--capture-ws] [--capture-sse]
+afhttp fetch <URL> [--endpoint-url <URL>] [--token-secret <SOURCE>] [--browser <auto|chromium|chrome|fingerprint-chromium|edge|brave|lightpanda|camoufox>] [--browser-bin <PATH>] [--render <none|auto|always>] [--tab <new|<id>>] [--profile <NAME>] [--wait <SPEC>] [--header <NAME:VALUE>...] [--cookie <NAME=VALUE>...] [--user-agent <UA>] [--evaluate-after-wait <JS>...] [--want <body|rendered_html|text|content|content_json|screenshot|network|console|observation|storage>...] [--method <METHOD>] --data <STRING|@FILE> [--network-bodies <off|xhr|all>] [--network-body-max-bytes <BYTES>] [--readiness-idle-ms <MS>] [--readiness-stable-ms <MS>] [--readiness-min-text-bytes <BYTES>] [--no-network-redact] [--out <DIR>] [--cookie-jar <PATH>] [--no-cookie-jar] [--observe-main-wait-ms <MS>] [--max-response-bytes <BYTES>] [--retry <N>] [--backoff-ms <MS>] [--proxy-url <URL>] [--ca-cert <PATH>] [--tls-insecure] [--timeout-ms <MS>] [--capture-ws] [--capture-sse]
 ```
 
 #### `fetch-form` — Fetch with URL-encoded fields from --form
 
 ```
-afhttp fetch <URL> [--endpoint-url <URL>] [--token-secret <TOKEN>] [--browser <auto|chromium|chrome|fingerprint-chromium|edge|brave|lightpanda|camoufox>] [--browser-bin <PATH>] [--render <none|auto|always>] [--tab <new|<id>>] [--profile <NAME>] [--wait <SPEC>] [--header <NAME:VALUE>...] [--cookie <NAME=VALUE>...] [--user-agent <UA>] [--evaluate-after-wait <JS>...] [--want <body|rendered_html|text|content|content_json|screenshot|network|console|observation|storage>...] [--method <METHOD>] --form <NAME=VALUE>... [--network-bodies <off|xhr|all>] [--network-body-max-bytes <BYTES>] [--readiness-idle-ms <MS>] [--readiness-stable-ms <MS>] [--readiness-min-text-bytes <BYTES>] [--no-network-redact] [--out <DIR>] [--cookie-jar <PATH>] [--no-cookie-jar] [--observe-main-wait-ms <MS>] [--max-response-bytes <BYTES>] [--retry <N>] [--backoff-ms <MS>] [--proxy-url <URL>] [--ca-cert <PATH>] [--tls-insecure] [--timeout-ms <MS>] [--capture-ws] [--capture-sse]
+afhttp fetch <URL> [--endpoint-url <URL>] [--token-secret <SOURCE>] [--browser <auto|chromium|chrome|fingerprint-chromium|edge|brave|lightpanda|camoufox>] [--browser-bin <PATH>] [--render <none|auto|always>] [--tab <new|<id>>] [--profile <NAME>] [--wait <SPEC>] [--header <NAME:VALUE>...] [--cookie <NAME=VALUE>...] [--user-agent <UA>] [--evaluate-after-wait <JS>...] [--want <body|rendered_html|text|content|content_json|screenshot|network|console|observation|storage>...] [--method <METHOD>] --form <NAME=VALUE>... [--network-bodies <off|xhr|all>] [--network-body-max-bytes <BYTES>] [--readiness-idle-ms <MS>] [--readiness-stable-ms <MS>] [--readiness-min-text-bytes <BYTES>] [--no-network-redact] [--out <DIR>] [--cookie-jar <PATH>] [--no-cookie-jar] [--observe-main-wait-ms <MS>] [--max-response-bytes <BYTES>] [--retry <N>] [--backoff-ms <MS>] [--proxy-url <URL>] [--ca-cert <PATH>] [--tls-insecure] [--timeout-ms <MS>] [--capture-ws] [--capture-sse]
 ```
 
 #### `fetch-takeover` — Hand a wall to a human, with no request body
 
 ```
-afhttp fetch <URL> [--endpoint-url <URL>] [--token-secret <TOKEN>] [--browser <auto|chromium|chrome|fingerprint-chromium|edge|brave|lightpanda|camoufox>] [--browser-bin <PATH>] [--render <auto|always>] [--tab <new|<id>>] --takeover [--profile <NAME>] [--wait <SPEC>] [--header <NAME:VALUE>...] [--cookie <NAME=VALUE>...] [--user-agent <UA>] [--evaluate-after-wait <JS>...] [--want <body|rendered_html|text|content|content_json|screenshot|network|console|observation|storage>...] [--method <METHOD>] [--network-bodies <off|xhr|all>] [--network-body-max-bytes <BYTES>] [--readiness-idle-ms <MS>] [--readiness-stable-ms <MS>] [--readiness-min-text-bytes <BYTES>] [--no-network-redact] [--out <DIR>] [--cookie-jar <PATH>] [--no-cookie-jar] [--observe-main-wait-ms <MS>] [--max-response-bytes <BYTES>] [--retry <N>] [--backoff-ms <MS>] [--proxy-url <URL>] [--ca-cert <PATH>] [--tls-insecure] [--timeout-ms <MS>] [--capture-ws] [--capture-sse]
+afhttp fetch <URL> [--endpoint-url <URL>] [--token-secret <SOURCE>] [--browser <auto|chromium|chrome|fingerprint-chromium|edge|brave|lightpanda|camoufox>] [--browser-bin <PATH>] [--render <auto|always>] [--tab <new|<id>>] --takeover [--profile <NAME>] [--wait <SPEC>] [--header <NAME:VALUE>...] [--cookie <NAME=VALUE>...] [--user-agent <UA>] [--evaluate-after-wait <JS>...] [--want <body|rendered_html|text|content|content_json|screenshot|network|console|observation|storage>...] [--method <METHOD>] [--network-bodies <off|xhr|all>] [--network-body-max-bytes <BYTES>] [--readiness-idle-ms <MS>] [--readiness-stable-ms <MS>] [--readiness-min-text-bytes <BYTES>] [--no-network-redact] [--out <DIR>] [--cookie-jar <PATH>] [--no-cookie-jar] [--observe-main-wait-ms <MS>] [--max-response-bytes <BYTES>] [--retry <N>] [--backoff-ms <MS>] [--proxy-url <URL>] [--ca-cert <PATH>] [--tls-insecure] [--timeout-ms <MS>] [--capture-ws] [--capture-sse]
 ```
 
 #### `fetch-takeover-data` — Hand a wall to a human, with a raw request body from --data
 
 ```
-afhttp fetch <URL> [--endpoint-url <URL>] [--token-secret <TOKEN>] [--browser <auto|chromium|chrome|fingerprint-chromium|edge|brave|lightpanda|camoufox>] [--browser-bin <PATH>] [--render <auto|always>] [--tab <new|<id>>] --takeover [--profile <NAME>] [--wait <SPEC>] [--header <NAME:VALUE>...] [--cookie <NAME=VALUE>...] [--user-agent <UA>] [--evaluate-after-wait <JS>...] [--want <body|rendered_html|text|content|content_json|screenshot|network|console|observation|storage>...] [--method <METHOD>] --data <STRING|@FILE> [--network-bodies <off|xhr|all>] [--network-body-max-bytes <BYTES>] [--readiness-idle-ms <MS>] [--readiness-stable-ms <MS>] [--readiness-min-text-bytes <BYTES>] [--no-network-redact] [--out <DIR>] [--cookie-jar <PATH>] [--no-cookie-jar] [--observe-main-wait-ms <MS>] [--max-response-bytes <BYTES>] [--retry <N>] [--backoff-ms <MS>] [--proxy-url <URL>] [--ca-cert <PATH>] [--tls-insecure] [--timeout-ms <MS>] [--capture-ws] [--capture-sse]
+afhttp fetch <URL> [--endpoint-url <URL>] [--token-secret <SOURCE>] [--browser <auto|chromium|chrome|fingerprint-chromium|edge|brave|lightpanda|camoufox>] [--browser-bin <PATH>] [--render <auto|always>] [--tab <new|<id>>] --takeover [--profile <NAME>] [--wait <SPEC>] [--header <NAME:VALUE>...] [--cookie <NAME=VALUE>...] [--user-agent <UA>] [--evaluate-after-wait <JS>...] [--want <body|rendered_html|text|content|content_json|screenshot|network|console|observation|storage>...] [--method <METHOD>] --data <STRING|@FILE> [--network-bodies <off|xhr|all>] [--network-body-max-bytes <BYTES>] [--readiness-idle-ms <MS>] [--readiness-stable-ms <MS>] [--readiness-min-text-bytes <BYTES>] [--no-network-redact] [--out <DIR>] [--cookie-jar <PATH>] [--no-cookie-jar] [--observe-main-wait-ms <MS>] [--max-response-bytes <BYTES>] [--retry <N>] [--backoff-ms <MS>] [--proxy-url <URL>] [--ca-cert <PATH>] [--tls-insecure] [--timeout-ms <MS>] [--capture-ws] [--capture-sse]
 ```
 
 #### `fetch-takeover-form` — Hand a wall to a human, with URL-encoded fields from --form
 
 ```
-afhttp fetch <URL> [--endpoint-url <URL>] [--token-secret <TOKEN>] [--browser <auto|chromium|chrome|fingerprint-chromium|edge|brave|lightpanda|camoufox>] [--browser-bin <PATH>] [--render <auto|always>] [--tab <new|<id>>] --takeover [--profile <NAME>] [--wait <SPEC>] [--header <NAME:VALUE>...] [--cookie <NAME=VALUE>...] [--user-agent <UA>] [--evaluate-after-wait <JS>...] [--want <body|rendered_html|text|content|content_json|screenshot|network|console|observation|storage>...] [--method <METHOD>] --form <NAME=VALUE>... [--network-bodies <off|xhr|all>] [--network-body-max-bytes <BYTES>] [--readiness-idle-ms <MS>] [--readiness-stable-ms <MS>] [--readiness-min-text-bytes <BYTES>] [--no-network-redact] [--out <DIR>] [--cookie-jar <PATH>] [--no-cookie-jar] [--observe-main-wait-ms <MS>] [--max-response-bytes <BYTES>] [--retry <N>] [--backoff-ms <MS>] [--proxy-url <URL>] [--ca-cert <PATH>] [--tls-insecure] [--timeout-ms <MS>] [--capture-ws] [--capture-sse]
+afhttp fetch <URL> [--endpoint-url <URL>] [--token-secret <SOURCE>] [--browser <auto|chromium|chrome|fingerprint-chromium|edge|brave|lightpanda|camoufox>] [--browser-bin <PATH>] [--render <auto|always>] [--tab <new|<id>>] --takeover [--profile <NAME>] [--wait <SPEC>] [--header <NAME:VALUE>...] [--cookie <NAME=VALUE>...] [--user-agent <UA>] [--evaluate-after-wait <JS>...] [--want <body|rendered_html|text|content|content_json|screenshot|network|console|observation|storage>...] [--method <METHOD>] --form <NAME=VALUE>... [--network-bodies <off|xhr|all>] [--network-body-max-bytes <BYTES>] [--readiness-idle-ms <MS>] [--readiness-stable-ms <MS>] [--readiness-min-text-bytes <BYTES>] [--no-network-redact] [--out <DIR>] [--cookie-jar <PATH>] [--no-cookie-jar] [--observe-main-wait-ms <MS>] [--max-response-bytes <BYTES>] [--retry <N>] [--backoff-ms <MS>] [--proxy-url <URL>] [--ca-cert <PATH>] [--tls-insecure] [--timeout-ms <MS>] [--capture-ws] [--capture-sse]
 ```
 
 Arguments across every shape above:
@@ -216,8 +217,8 @@ Arguments across every shape above:
 | Argument | Meaning |
 |---|---|
 | `URL` | URL to fetch |
-| `--endpoint-url` | CDP endpoint of a running host; falls back to AFHTTP_ENDPOINT_URL |
-| `--token-secret` | Bearer token for a protected host; falls back to AFHTTP_TOKEN_SECRET |
+| `--endpoint-url` | CDP endpoint of a running host; falls back to AFHTTP_ENDPOINT_URL, then to the local afhttp-host container |
+| `--token-secret` | Token for a protected host; falls back to AFHTTP_TOKEN_SECRET, then to the discovered host's own token (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, container:NAME, literal:VALUE) |
 | `--browser` | Browser backend for the inline host; ignored when --endpoint-url is set |
 | `--browser-bin` | Browser binary for the inline host when auto-discovery cannot find one |
 | `--render` | Render strategy: none is the HTTP fast path, auto escalates on failure, always uses the browser |
@@ -258,13 +259,13 @@ Arguments across every shape above:
 Query a host's /health endpoint.
 
 ```
-afhttp health [--endpoint-url <URL>] [--token-secret <TOKEN>]
+afhttp health [--endpoint-url <URL>] [--token-secret <SOURCE>]
 ```
 
 | Argument | Meaning |
 |---|---|
-| `--endpoint-url` | CDP endpoint of a running host; falls back to AFHTTP_ENDPOINT_URL |
-| `--token-secret` | Bearer token for a protected host; falls back to AFHTTP_TOKEN_SECRET |
+| `--endpoint-url` | CDP endpoint of a running host; falls back to AFHTTP_ENDPOINT_URL, then to the local afhttp-host container |
+| `--token-secret` | Token for a protected host; falls back to AFHTTP_TOKEN_SECRET, then to the discovered host's own token (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, container:NAME, literal:VALUE) |
 
 ### `afhttp host`
 
@@ -273,13 +274,13 @@ Run the browser host: launch a backend browser and serve /cdp for clients.
 #### `host` — Serve no takeover surface; --display picks headless or headful
 
 ```
-afhttp host --listen <tcp:HOST:PORT|unix:PATH> [--profile <NAME>] [--display <headless|headful>] [--takeover-provider off] [--browser <auto|chromium|chrome|fingerprint-chromium|edge|brave|lightpanda|camoufox>] [--browser-bin <PATH>] [--token-secret <TOKEN>] [--no-health] [--health-public <off|minimal>] [--engine-env <NAME=VALUE>...] [--browser-arg <FLAG>...] [--proxy-url <URL>] [--recent-requests-cap <N>]
+afhttp host --listen <tcp:HOST:PORT|unix:PATH> [--profile <NAME>] [--display <headless|headful>] [--takeover-provider off] [--browser <auto|chromium|chrome|fingerprint-chromium|edge|brave|lightpanda|camoufox>] [--browser-bin <PATH>] [--token-secret <SOURCE>] [--no-health] [--health-public <off|minimal>] [--engine-env <NAME=VALUE>...] [--browser-arg <FLAG>...] [--proxy-url <URL>] [--recent-requests-cap <N>]
 ```
 
 #### `host-takeover` — Serve a KasmVNC real-display takeover, which is always headful
 
 ```
-afhttp host --listen <tcp:HOST:PORT|unix:PATH> [--profile <NAME>] --takeover-provider kasmvnc [--takeover-quality-percent <PERCENT>] [--browser <auto|chromium|chrome|fingerprint-chromium|edge|brave|lightpanda|camoufox>] [--browser-bin <PATH>] [--token-secret <TOKEN>] [--no-health] [--health-public <off|minimal>] [--engine-env <NAME=VALUE>...] [--browser-arg <FLAG>...] [--proxy-url <URL>] [--recent-requests-cap <N>]
+afhttp host --listen <tcp:HOST:PORT|unix:PATH> [--profile <NAME>] --takeover-provider kasmvnc [--takeover-quality-percent <PERCENT>] [--browser <auto|chromium|chrome|fingerprint-chromium|edge|brave|lightpanda|camoufox>] [--browser-bin <PATH>] [--token-secret <SOURCE>] [--no-health] [--health-public <off|minimal>] [--engine-env <NAME=VALUE>...] [--browser-arg <FLAG>...] [--proxy-url <URL>] [--recent-requests-cap <N>]
 ```
 
 Output: protocol events; `--output` json (default `json`), `--output-to` split/stdout/stderr (default `stdout`); redirect with `--stdout-file` or `--stderr-file`.
@@ -295,7 +296,7 @@ Arguments across every shape above:
 | `--takeover-quality-percent` | Takeover image quality from 0 to 100; lower trades clarity for bandwidth |
 | `--browser` | Browser backend |
 | `--browser-bin` | Override the browser binary path |
-| `--token-secret` | Bearer token for a protected host; falls back to AFHTTP_TOKEN_SECRET |
+| `--token-secret` | Token this host requires from callers (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, container:NAME, literal:VALUE) |
 | `--no-health` | Stop serving /health and /capabilities, which are on by default |
 | `--health-public` | Serve /health unauthenticated with a minimal payload |
 | `--engine-env` | Environment variable for the browser subprocess; all others are scrubbed |
@@ -308,13 +309,13 @@ Arguments across every shape above:
 Mint a short-lived takeover URL for a running takeover-ready host.
 
 ```
-afhttp panel [--endpoint-url <URL>] [--token-secret <TOKEN>]
+afhttp panel [--endpoint-url <URL>] [--token-secret <SOURCE>]
 ```
 
 | Argument | Meaning |
 |---|---|
-| `--endpoint-url` | CDP endpoint of a running host; falls back to AFHTTP_ENDPOINT_URL |
-| `--token-secret` | Bearer token for a protected host; falls back to AFHTTP_TOKEN_SECRET |
+| `--endpoint-url` | CDP endpoint of a running host; falls back to AFHTTP_ENDPOINT_URL, then to the local afhttp-host container |
+| `--token-secret` | Token for a protected host; falls back to AFHTTP_TOKEN_SECRET, then to the discovered host's own token (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, container:NAME, literal:VALUE) |
 
 ### `afhttp profile cookies`
 
@@ -492,40 +493,67 @@ Arguments across every shape above:
 Close one CDP target by its target id.
 
 ```
-afhttp tabs close --tab <TARGET_ID> [--endpoint-url <URL>] [--token-secret <TOKEN>]
+afhttp tabs close --tab <TARGET_ID> [--endpoint-url <URL>] [--token-secret <SOURCE>]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `--tab` | CDP target id to close |
-| `--endpoint-url` | CDP endpoint of a running host; falls back to AFHTTP_ENDPOINT_URL |
-| `--token-secret` | Bearer token for a protected host; falls back to AFHTTP_TOKEN_SECRET |
+| `--endpoint-url` | CDP endpoint of a running host; falls back to AFHTTP_ENDPOINT_URL, then to the local afhttp-host container |
+| `--token-secret` | Token for a protected host; falls back to AFHTTP_TOKEN_SECRET, then to the discovered host's own token (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, container:NAME, literal:VALUE) |
 
 ### `afhttp tabs list`
 
 List the CDP targets currently attached to a host.
 
 ```
-afhttp tabs list [--endpoint-url <URL>] [--token-secret <TOKEN>]
+afhttp tabs list [--endpoint-url <URL>] [--token-secret <SOURCE>]
 ```
 
 | Argument | Meaning |
 |---|---|
-| `--endpoint-url` | CDP endpoint of a running host; falls back to AFHTTP_ENDPOINT_URL |
-| `--token-secret` | Bearer token for a protected host; falls back to AFHTTP_TOKEN_SECRET |
+| `--endpoint-url` | CDP endpoint of a running host; falls back to AFHTTP_ENDPOINT_URL, then to the local afhttp-host container |
+| `--token-secret` | Token for a protected host; falls back to AFHTTP_TOKEN_SECRET, then to the discovered host's own token (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, container:NAME, literal:VALUE) |
+
+### `afhttp ui takeover`
+
+Open the takeover panel in an isolated window and block until the person closes it.
+
+#### `ui-takeover` — Mint a fresh panel credential from a running host, then open it
+
+```
+afhttp ui takeover [--endpoint-url <URL>] [--token-secret <SOURCE>] [--takeover-no-window]
+```
+
+#### `ui-takeover-url` — Open a panel URL that was already minted; needs no host of its own
+
+```
+afhttp ui takeover --takeover-url-secret <URL> [--takeover-no-window]
+```
+
+Output: protocol events; `--output` json (default `json`), `--output-to` split/stdout/stderr (default `stdout`); redirect with `--stdout-file` or `--stderr-file`.
+
+Arguments across every shape above:
+
+| Argument | Meaning |
+|---|---|
+| `--endpoint-url` | CDP endpoint of a running host; falls back to AFHTTP_ENDPOINT_URL, then to the local afhttp-host container |
+| `--token-secret` | Token for a protected host; falls back to AFHTTP_TOKEN_SECRET, then to the discovered host's own token (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, container:NAME, literal:VALUE) |
+| `--takeover-url-secret` | Panel URL a previous `panel` or `fetch --takeover` already minted |
+| `--takeover-no-window` | Publish the panel for `afui session list` and wait, instead of opening a window |
 
 ### `afhttp upload`
 
 Upload a local file into a browser tab's file input via DOM.setFileInputFiles.
 
 ```
-afhttp upload [--endpoint-url <URL>] [--token-secret <TOKEN>] --tab <TARGET_ID> --selector <CSS> --file <PATH>
+afhttp upload [--endpoint-url <URL>] [--token-secret <SOURCE>] --tab <TARGET_ID> --selector <CSS> --file <PATH>
 ```
 
 | Argument | Meaning |
 |---|---|
-| `--endpoint-url` | CDP endpoint of a running host; falls back to AFHTTP_ENDPOINT_URL |
-| `--token-secret` | Bearer token for a protected host; falls back to AFHTTP_TOKEN_SECRET |
+| `--endpoint-url` | CDP endpoint of a running host; falls back to AFHTTP_ENDPOINT_URL, then to the local afhttp-host container |
+| `--token-secret` | Token for a protected host; falls back to AFHTTP_TOKEN_SECRET, then to the discovered host's own token (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, container:NAME, literal:VALUE) |
 | `--tab` | CDP target id to operate in |
 | `--selector` | CSS selector for the <input type=file> element |
 | `--file` | Local file to upload |

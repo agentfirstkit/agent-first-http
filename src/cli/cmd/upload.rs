@@ -5,15 +5,14 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
+use crate::cli::connect::Connection;
 use crate::cli::output;
-use crate::sdk::Client;
 use crate::shared::error::{Error, ErrorCode};
 use crate::shared::ids::TabId;
 
 #[derive(Debug)]
 pub struct Args {
-    pub endpoint: String,
-    pub token: Option<String>,
+    pub connection: Connection,
     pub tab: String,
     pub selector: String,
     pub file: PathBuf,
@@ -44,10 +43,7 @@ pub async fn run(args: Args) -> Result<(), Error> {
     })?;
     let path_str = abs_path.to_string_lossy().to_string();
 
-    let mut client = Client::connect(&args.endpoint)?;
-    if let Some(t) = args.token.as_deref() {
-        client = client.with_token(t);
-    }
+    let client = args.connection.client().await?;
 
     let conn = client.cdp_connection().await?;
     let tab = TabId::new(args.tab.clone());

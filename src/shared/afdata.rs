@@ -68,6 +68,29 @@ pub fn emit_process_unredacted<T: Serialize>(code: &str, payload: &T) -> Result<
     emit_process_inner(code, payload, RedactionMode::None)
 }
 
+/// Emit a non-terminal progress event through the process-wide route.
+///
+/// A command that blocks on a person has something to say before it can say
+/// how the run ended. Progress is the only event kind that may precede the
+/// terminal one, and on a split route it lands on the diagnostic stream, so a
+/// caller reading only `result` is unaffected.
+pub fn emit_process_progress<T: Serialize>(code: &str, payload: &T) -> Result<(), Error> {
+    let value = prepare_payload(code, payload)?;
+    let event = agent_first_data::json_progress(value).build();
+    let mut emitter = agent_first_data::CliEmitter::from_output_to_with(
+        output_to(),
+        agent_first_data::OutputFormat::Json,
+        output_options(RedactionMode::Default),
+    )
+    .with_strict_protocol();
+    emitter.emit(event).map_err(|error| {
+        Error::new(
+            crate::shared::error::ErrorCode::InternalError,
+            error.to_string(),
+        )
+    })
+}
+
 /// Emit an otherwise-redacted result while intentionally revealing only the
 /// short-lived takeover capability field. The explicit `panel` and
 /// `fetch --takeover` operations are the only callers.

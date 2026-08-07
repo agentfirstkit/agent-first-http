@@ -10,6 +10,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use agent_first_data::value_source::SecretString;
 use serde::Serialize;
 
 use crate::cli::output;
@@ -34,6 +35,11 @@ const MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
 pub(crate) const DEFAULT_CONTAINER_NAME: &str = "afhttp-host";
 pub(crate) const DEFAULT_CONTAINER_PORT: u16 = 9222;
 const IMAGE_REPO: &str = "afhttp-host";
+/// Where the entrypoint persists the host token inside the data volume. The
+/// volume outlives `container install`, so this path is the stable answer to
+/// "what is this host's token" for both discovery and `--token-secret
+/// container:NAME`.
+const HOST_TOKEN_PATH: &str = "/data/afhttp/host-token";
 
 #[derive(Debug)]
 pub struct Args {
@@ -227,7 +233,7 @@ async fn install_result(args: &mut InstallArgs) -> Result<InstallResult, Error> 
         container: args.common.name.clone(),
         endpoint,
         profile,
-        client_command: client_command(args.port),
+        client_command: client_command(&args.common.name, args.port),
         token_available: true,
         token_source: "container_volume",
         token_secret: args.reveal_token_secret.then_some(token),
@@ -339,7 +345,9 @@ async fn status(args: StatusArgs) -> Result<(), Error> {
     } else {
         None
     };
-    let client_command = token.as_ref().map(|_| client_command(args.port));
+    let client_command = token
+        .as_ref()
+        .map(|_| client_command(&args.common.name, args.port));
     let mut host_version = None;
     let mut version_match = None;
     let mut profile_kind = None;
@@ -563,9 +571,19 @@ fn endpoint_url(port: u16) -> String {
     format!("ws://127.0.0.1:{port}")
 }
 
-fn client_command(port: u16) -> String {
+/// The command that uses this container, ready to run rather than a template
+/// with a `<host-token>` for the caller to substitute.
+///
+/// The standard container needs nothing said about it: a client with no
+/// endpoint discovers exactly this one and reads its token. Any other name or
+/// port has to be named, and `container:NAME` is how its token is read without
+/// going through the shell.
+fn client_command(name: &str, port: u16) -> String {
+    if name == DEFAULT_CONTAINER_NAME && port == DEFAULT_CONTAINER_PORT {
+        return "afhttp fetch https://example.com".to_string();
+    }
     format!(
-        "AFHTTP_TOKEN_SECRET=<host-token> afhttp fetch https://example.com --endpoint-url ws://127.0.0.1:{port}"
+        "afhttp fetch https://example.com --endpoint-url ws://127.0.0.1:{port} --token-secret container:{name}"
     )
 }
 
@@ -940,19 +958,19 @@ fn is_hard_site_capabilities(caps: &crate::sdk::capabilities::CapabilitiesRespon
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LocalTakeoverHost {
+pub(crate) struct LocalHost {
     pub(crate) endpoint: String,
-    pub(crate) token_secret: Option<String>,
+    pub(crate) token_secret: Option<SecretString>,
 }
 
-/// Discover the standard local `afhttp-host` container for `fetch --takeover`
-/// when the caller did not pass an endpoint. This is intentionally read-only:
+/// Discover the standard local `afhttp-host` container for any command that
+/// needs a host and was not told where one is. This is intentionally read-only:
 /// it never starts or recreates containers.
-pub(crate) async fn discover_default_takeover_host(
+pub(crate) async fn discover_default_local_host(
     token_override: Option<&str>,
-) -> Result<LocalTakeoverHost, Error> {
+) -> Result<LocalHost, Error> {
     let runtime = resolve_runtime(None).map_err(|e| {
-        local_takeover_error(format!(
+        local_host_error(format!(
             "could not choose a container runtime to inspect `{DEFAULT_CONTAINER_NAME}`: {}",
             e.detail
         ))
@@ -961,34 +979,34 @@ pub(crate) async fn discover_default_takeover_host(
         .map(|s| s.running)
         .unwrap_or_else(|| container_running(runtime, DEFAULT_CONTAINER_NAME));
     if !running {
-        return Err(local_takeover_error(format!(
+        return Err(local_host_error(format!(
             "default local container `{DEFAULT_CONTAINER_NAME}` is not running"
         )));
     }
 
     let token_secret = match token_override {
-        Some(token) => Some(token.to_string()),
-        None => Some(read_token(runtime, DEFAULT_CONTAINER_NAME).await.map_err(|e| {
-            local_takeover_error(format!(
+        Some(token) => Some(SecretString::new(token)),
+        None => Some(read_token(runtime, DEFAULT_CONTAINER_NAME).await.map(SecretString::new).map_err(|e| {
+            local_host_error(format!(
                 "default local container `{DEFAULT_CONTAINER_NAME}` is running, but its token could not be read: {}",
                 e.detail
             ))
         })?),
     };
     let endpoint = endpoint_url(DEFAULT_CONTAINER_PORT);
-    let client = match token_secret.as_deref() {
-        Some(token) => crate::sdk::Client::connect(&endpoint)?.with_token(token.to_string()),
+    let client = match &token_secret {
+        Some(token) => crate::sdk::Client::connect(&endpoint)?.with_token(token.expose_secret()),
         None => crate::sdk::Client::connect(&endpoint)?,
     };
     let health = client.health().await.map_err(|e| {
-        local_takeover_error(format!(
+        local_host_error(format!(
             "default local container `{DEFAULT_CONTAINER_NAME}` at {endpoint} could not be verified: {}",
             e.detail
         ))
         .with_retryable(e.retryable)
     })?;
     if health.version != VERSION {
-        return Err(local_takeover_error(host_version_mismatch_detail(
+        return Err(local_host_error(host_version_mismatch_detail(
             DEFAULT_CONTAINER_NAME,
             &health.version,
         )));
@@ -998,36 +1016,98 @@ pub(crate) async fn discover_default_takeover_host(
             .backend_error
             .map(|e| format!("{}: {}", e.error_code, e.error))
             .unwrap_or_else(|| format!("status={}", health.status));
-        return Err(local_takeover_error(format!(
+        return Err(local_host_error(format!(
             "default local container `{DEFAULT_CONTAINER_NAME}` at {endpoint} is not ready: {detail}"
         )));
     }
+    Ok(LocalHost {
+        endpoint,
+        token_secret,
+    })
+}
+
+/// Discovery for `fetch --takeover`, which needs more than a reachable host:
+/// only a takeover-ready one can put a real browser in front of a person, and
+/// finding that out here beats failing later with a CDP-shaped error.
+pub(crate) async fn discover_default_takeover_host(
+    token_override: Option<&str>,
+) -> Result<LocalHost, Error> {
+    let host = discover_default_local_host(token_override).await?;
+    let endpoint = &host.endpoint;
+    let client = match &host.token_secret {
+        Some(token) => crate::sdk::Client::connect(endpoint)?.with_token(token.expose_secret()),
+        None => crate::sdk::Client::connect(endpoint)?,
+    };
     let caps = client.capabilities().await.map_err(|e| {
-        local_takeover_error(format!(
+        local_host_error(format!(
             "default local container `{DEFAULT_CONTAINER_NAME}` at {endpoint} could not be verified: {}",
             e.detail
         ))
         .with_retryable(e.retryable)
     })?;
     validate_hard_site_capabilities(&caps).map_err(|e| {
-        local_takeover_error(format!(
+        local_host_error(format!(
             "default local container `{DEFAULT_CONTAINER_NAME}` at {endpoint} is not takeover-ready: {}",
             e.detail
         ))
     })?;
-    Ok(LocalTakeoverHost {
-        endpoint,
-        token_secret,
-    })
+    Ok(host)
 }
 
-fn local_takeover_error(detail: String) -> Error {
+/// Read a named container's host token once, for `--token-secret container:NAME`.
+///
+/// Unlike [`read_token`] this does not wait for a container that is still
+/// starting: the caller named an existing host and is about to talk to it, so a
+/// container that cannot answer now is an argument error, not a race to wait out.
+pub(crate) fn read_host_token(name: &str) -> Result<SecretString, Error> {
+    let runtime = resolve_runtime(None).map_err(|e| {
+        container_token_error(
+            name,
+            &format!("no container runtime is available: {}", e.detail),
+        )
+    })?;
+    let argv = vec![
+        "exec".into(),
+        name.to_string(),
+        "cat".into(),
+        HOST_TOKEN_PATH.to_string(),
+    ];
+    let out = capture(runtime.bin(), &argv).map_err(|e| {
+        container_token_error(name, &format!("{} failed: {}", runtime.label(), e.detail))
+    })?;
+    if !out.status.success() {
+        return Err(container_token_error(
+            name,
+            "the container is not running, or holds no host token yet",
+        ));
+    }
+    let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if token.is_empty() {
+        return Err(container_token_error(name, "its host token file is empty"));
+    }
+    Ok(SecretString::new(token))
+}
+
+fn container_token_error(name: &str, detail: &str) -> Error {
     Error::new(
         ErrorCode::InvalidArgument,
         format!(
-            "fetch --takeover did not receive --endpoint-url or AFHTTP_ENDPOINT_URL, and {detail}. \
-             Start one with `afhttp container install`, inspect it with `afhttp container status`, \
-             or pass --endpoint-url/--token-secret explicitly."
+            "--token-secret container:{name} could not read the host token: {detail}. \
+             Check it with `afhttp container status --name {name}`."
+        ),
+    )
+}
+
+fn local_host_error(detail: String) -> Error {
+    // Some details are one sentence and some — the version mismatch — are a
+    // paragraph that already ends in a period. Trim it rather than emit `..`.
+    let detail = detail.trim_end_matches('.');
+    Error::new(
+        ErrorCode::InvalidArgument,
+        format!(
+            "no --endpoint-url or AFHTTP_ENDPOINT_URL was given, so afhttp looked for the default \
+             local host, and {detail}. Start one with `afhttp container install`, inspect it with \
+             `afhttp container status`, or pass --endpoint-url/--token-secret explicitly."
         ),
     )
 }
@@ -1455,7 +1535,7 @@ async fn read_token(runtime: Runtime, name: &str) -> Result<String, Error> {
         "exec".into(),
         name.to_string(),
         "cat".into(),
-        "/data/afhttp/host-token".into(),
+        HOST_TOKEN_PATH.to_string(),
     ];
     for attempt in 0..20 {
         if let Ok(out) = capture(runtime.bin(), &argv)
@@ -1843,13 +1923,35 @@ mod tests {
     }
 
     #[test]
-    fn local_takeover_error_names_autodiscovery_and_manual_commands() {
-        let err =
-            local_takeover_error("default local container `afhttp-host` is not running".into());
+    fn local_host_error_names_autodiscovery_and_manual_commands() {
+        let err = local_host_error("default local container `afhttp-host` is not running".into());
         assert_eq!(err.error_code, ErrorCode::InvalidArgument);
         assert!(err.detail.contains("afhttp-host"));
         assert!(err.detail.contains("afhttp container install"));
         assert!(err.detail.contains("--endpoint-url/--token-secret"));
+        // Every host command discovers now, so the message may not name one.
+        assert!(!err.detail.contains("fetch --takeover"), "{}", err.detail);
+
+        // A detail that is already a paragraph joins as one sentence, not `..`.
+        let err = local_host_error(host_version_mismatch_detail(
+            DEFAULT_CONTAINER_NAME,
+            "0.10.1",
+        ));
+        assert!(!err.detail.contains(".."), "{}", err.detail);
+        assert!(err.detail.contains("0.10.1"), "{}", err.detail);
+    }
+
+    /// The container token source reports which container it tried and how to
+    /// look at it, and never invents a token when the read fails.
+    #[test]
+    fn a_container_token_error_names_the_container_and_the_way_to_inspect_it() {
+        let err = container_token_error("scratch", "the container is not running");
+        assert_eq!(err.error_code, ErrorCode::InvalidArgument);
+        assert!(err.detail.contains("--token-secret container:scratch"));
+        assert!(
+            err.detail
+                .contains("afhttp container status --name scratch")
+        );
     }
 
     #[test]
@@ -2264,12 +2366,24 @@ mod tests {
         assert!(img < br);
     }
 
+    /// The standard container is reached by discovery, so its command carries
+    /// no endpoint and no token at all — that is the whole point of it being
+    /// the standard one.
     #[test]
-    fn client_command_uses_loopback_endpoint() {
-        let cmd = client_command(9333);
-        assert!(cmd.contains("--endpoint-url ws://127.0.0.1:9333"));
-        assert!(cmd.contains("AFHTTP_TOKEN_SECRET=<host-token>"));
-        assert!(!cmd.contains("deadbeef"));
+    fn the_standard_container_needs_no_endpoint_or_token_on_the_command() {
+        let cmd = client_command(DEFAULT_CONTAINER_NAME, DEFAULT_CONTAINER_PORT);
+        assert_eq!(cmd, "afhttp fetch https://example.com");
+    }
+
+    /// Any other container has to be named, and its token is read from it
+    /// rather than pasted through the shell.
+    #[test]
+    fn a_nonstandard_container_names_itself_as_the_token_source() {
+        let cmd = client_command("scratch", 9333);
+        assert!(cmd.contains("--endpoint-url ws://127.0.0.1:9333"), "{cmd}");
+        assert!(cmd.contains("--token-secret container:scratch"), "{cmd}");
+        assert!(!cmd.contains("AFHTTP_TOKEN_SECRET"), "{cmd}");
+        assert!(!cmd.contains("deadbeef"), "{cmd}");
     }
 
     #[test]

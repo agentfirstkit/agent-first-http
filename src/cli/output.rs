@@ -22,3 +22,9 @@ pub fn emit_unredacted<T: Serialize>(code: &str, payload: &T) -> Result<(), Erro
 pub fn emit_revealing_takeover<T: Serialize>(code: &str, payload: &T) -> Result<(), Error> {
     crate::shared::afdata::emit_process_revealing_takeover(code, payload)
 }
+
+/// Emit one non-terminal progress event. Only commands that block on a person
+/// have anything to report before their result.
+pub fn emit_progress<T: Serialize>(code: &str, payload: &T) -> Result<(), Error> {
+    crate::shared::afdata::emit_process_progress(code, payload)
+}

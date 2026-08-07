@@ -18,8 +18,15 @@ cli::spec::tests::a_request_body_is_data_or_form_but_never_both
 cli::args::tests::every_action_has_exactly_one_handler
 cli::cmd::panel::tests::panel_result_exposes_takeover_url_secret_only
 takeover_handoff_is_unavailable_without_display_provider
+revoking_takeover_credentials_ends_a_panel_that_is_still_open
+a_near_miss_credential_is_rejected
 cli_render_none_without_endpoint_does_not_require_browser_env
 secure_cookie_on_http_url_is_skipped_not_invalid
 token_query_parameter_is_percent_decoded
 sdk::fetch::pipeline::browser::download::tests::err_aborted_is_not_a_download_without_cdp_download_event
 sdk::profile::tests::downloads_lists_profile_download_artifacts
+cli::token_source::tests::a_token_does_not_come_from_a_stream
+cli::args::tests::a_token_source_is_classified_but_not_read
+cli::cmd::fetch::tests::a_plain_fetch_needs_no_host_and_discovers_nothing
+cli::cmd::fetch::tests::a_named_endpoint_is_never_second_guessed
+cli::token_source::tests::an_unreadable_source_names_the_flag_and_not_the_value

@@ -5,3 +5,6 @@
 
 # Rust build output
 /target/
+
+# Python bytecode from the workbench e2e
+__pycache__/

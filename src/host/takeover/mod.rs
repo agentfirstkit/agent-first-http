@@ -351,13 +351,11 @@ async fn proxy_kasmvnc(
     uri: Uri,
     request: axum::extract::Request,
 ) -> Response {
-    // noVNC builds its WebSocket URL from the host root (default
-    // `/websockify`), ignoring this `/takeover/panel/` mount prefix — so without
-    // help the client connects to `/websockify` and 404s. Seed noVNC's `path`
-    // setting via query param so it targets the proxied
-    // `/takeover/panel/websockify`. Applied by redirecting the landing page when
-    // the param is absent; the redirect also normalizes the missing trailing
-    // slash (axum's `{*path}` wildcard never matches the bare `/takeover/panel/`).
+    // noVNC builds its WebSocket URL from the *origin root* plus its `path`
+    // setting, ignoring the path of the page it is running on — so without help
+    // the client connects to `/websockify` and 404s. `path` therefore has to
+    // name wherever this panel is publicly served from, and the landing page is
+    // where that gets seeded.
     // `resize=remote` makes the framebuffer (and the WM-maximized browser)
     // track the client window for an exact fit; without a window manager fall
     // back to `resize=scale` (letterboxed) since the browser window can't
@@ -376,30 +374,7 @@ async fn proxy_kasmvnc(
     let want_resize = format!("resize={resize}");
     let resize_ok = q.split('&').any(|p| p == want_resize);
     if is_landing && ws.is_err() && !(has_path && resize_ok) {
-        // Rebuild canonically, dropping stale `path`/`resize` and the one-time
-        // handoff query. Redirecting whenever *either* is
-        // missing also fixes clients that cached a `?path=...` URL from before
-        // `resize` existed. Once both are present the condition is false.
-        let quality = kasmvnc_quality_params(display.quality);
-        let mut location =
-            format!("/takeover/panel/?path=takeover/panel/websockify&resize={resize}{quality}");
-        for pair in q.split('&') {
-            if pair.is_empty()
-                || pair.starts_with("path=")
-                || pair.starts_with("resize=")
-                || pair.starts_with("handoff_secret=")
-                || pair.starts_with("handoff=")
-            {
-                continue;
-            }
-            location.push('&');
-            location.push_str(pair);
-        }
-        return (
-            StatusCode::TEMPORARY_REDIRECT,
-            [(header::LOCATION, location)],
-        )
-            .into_response();
+        return landing_bootstrap(resize, display.quality, q);
     }
 
     let upstream_path = display_upstream_path_and_query(&uri);
@@ -415,6 +390,78 @@ async fn proxy_kasmvnc(
     }
 
     forward_display_http(display.web_addr, upstream_path, request).await
+}
+
+/// The landing page's own bootstrap: a page rather than a redirect, because
+/// only the browser knows where this panel is being served from.
+///
+/// This used to be a `307` to `?path=takeover/panel/websockify`, which assumed
+/// the panel is always reached at afhttp's own absolute path. It is not.
+/// `afui session serve` frames the panel at `/s/<credential>/` on a different
+/// listener so a phone can reach it, and the request that arrives here still
+/// says `/takeover/panel/` — nothing in it says otherwise, because that proxy
+/// deliberately forwards no `Origin`, no `Referer` and no forwarded-prefix
+/// header: where a Provider UI sits is not the Provider's business. A `path`
+/// seeded here would point noVNC's WebSocket at a path the framing listener has
+/// never heard of, and the canvas would never connect.
+///
+/// So the prefix is read where it is actually known. `location.pathname` is the
+/// panel's public base in whatever browser is showing it, and one line turns
+/// that into the `path` setting. Delivered directly it produces exactly the
+/// value that used to be hardcoded, so nothing about the window case changes;
+/// delivered through any prefix at all, it produces that prefix. The trailing
+/// slash is normalized here too (axum's `{*path}` wildcard never matches the
+/// bare `/takeover/panel/`).
+fn landing_bootstrap(resize: &str, quality: u8, query: &str) -> Response {
+    // Everything the client is seeded with except `path`, which is the
+    // browser's to compute. Stale `path`/`resize` and the one-time handoff
+    // query are dropped, so a client that cached a URL from an older build is
+    // rebuilt canonically rather than kept on it.
+    let mut settings = format!("&resize={resize}{}", kasmvnc_quality_params(quality));
+    for pair in query.split('&') {
+        if pair.is_empty()
+            || pair.starts_with("path=")
+            || pair.starts_with("resize=")
+            || pair.starts_with("handoff_secret=")
+            || pair.starts_with("handoff=")
+        {
+            continue;
+        }
+        settings.push('&');
+        settings.push_str(pair);
+    }
+    let body = format!(
+        "<!doctype html>\n<meta charset=\"utf-8\">\n<title>afhttp takeover</title>\n\
+         <noscript>The takeover panel needs JavaScript.</noscript>\n\
+         <script>\n(function () {{\n\
+         \x20 var path = location.pathname;\n\
+         \x20 var base = path.charAt(path.length - 1) === '/' ? path : path + '/';\n\
+         \x20 var websockify = base.replace(/^\\/+/, '') + 'websockify';\n\
+         \x20 location.replace(base + '?path=' + encodeURIComponent(websockify) + {settings});\n\
+         }})();\n</script>\n",
+        settings = js_string(&settings)
+    );
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+/// One JavaScript string literal, safe to paste into a `<script>` element.
+///
+/// The tail of the query is whatever the caller put there, so it is encoded
+/// rather than concatenated. JSON string syntax is a subset of JavaScript's,
+/// which handles quotes, backslashes and control characters; `<` is escaped on
+/// top of that so no value can close the element it is written inside.
+fn js_string(value: &str) -> String {
+    serde_json::to_string(value)
+        .unwrap_or_else(|_| "\"\"".to_string())
+        .replace('<', "\\u003c")
 }
 
 /// KasmVNC client quality settings seeded on the display panel (the client's
@@ -626,7 +673,21 @@ fn should_forward_response_header(name: &header::HeaderName) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::kasmvnc_quality_params;
+    use super::{js_string, kasmvnc_quality_params};
+
+    #[test]
+    fn a_seeded_setting_cannot_close_the_script_it_is_written_in() {
+        // The tail of the landing query is whatever reached the listener, so
+        // the one thing it must never be able to do is escape the element.
+        let escaped = js_string("&x=</script><img src=x onerror=alert(1)>");
+        assert!(!escaped.contains("</script>"), "{escaped}");
+        assert!(
+            escaped.starts_with('"') && escaped.ends_with('"'),
+            "{escaped}"
+        );
+        assert_eq!(js_string("&resize=scale"), "\"&resize=scale\"");
+        assert_eq!(js_string("a\"b\\c"), "\"a\\\"b\\\\c\"");
+    }
 
     #[test]
     fn quality_pct_maps_to_kasmvnc_tiers() {

@@ -96,13 +96,29 @@ These hold across every command (the per-flag reference is generated into
   behavior is enabled with bare `--x` (`--tls-insecure`).
 - `--endpoint-url` accepts `ws://`, `wss://`, `http://`, `https://`, or `unix:`.
   Every driver command (`fetch`/`cdp`/`tabs`/`upload`/`health`/`capabilities`/`panel`)
-  falls back to `AFHTTP_ENDPOINT_URL` when the flag is omitted; the explicit flag
-  wins.
-- `--token-secret` is sent as `Authorization: Bearer <token>` for HTTP
-  control requests. Driver commands fall back to `AFHTTP_TOKEN_SECRET` when the
-  flag is omitted; the explicit flag wins. Human takeover URLs never embed this
-  long-lived token; they carry a short-lived `handoff_secret` capability
-  instead.
+  falls back to `AFHTTP_ENDPOINT_URL` when the flag is omitted, and then to the
+  standard local `afhttp-host` container: it is inspected read-only for its
+  token and verified over `/health` before anything is sent. Discovery never
+  starts or recreates a container, and `fetch` without a profile or a takeover
+  still needs no host at all — it runs inline.
+- `--token-secret` is sent as `Authorization: Bearer <token>` for HTTP control
+  requests, and the flag names a *source* rather than only a value:
+  `env:NAME`, `file:PATH#DOT_PATH` (any JSON/TOML/YAML/dotenv/INI config, read
+  through AFDATA's size-capped document reader), `container:NAME`, or
+  `literal:TOKEN`; a bare value is the token itself. The grammar, and every
+  source but `container:`, is AFDATA's `SourceSet` — the registry declares
+  which sources this argument accepts, renders that syntax into `--help` and
+  `--docs`, and rejects an unaccepted one with the other argv errors at exit 2,
+  before anything is opened. `container:NAME` is afhttp's own: the host token
+  lives in a named volume no path on this machine addresses.
+  Driver commands fall back to `AFHTTP_TOKEN_SECRET`, then to the discovered
+  host's own token; an explicit source always wins, including over a discovered
+  host. `afhttp host` takes the same sources for the token it will *require*,
+  with no fallback. A resolved token is an AFDATA `SecretString`: it reaches the
+  `Authorization` header through `expose_secret` and renders as `***`
+  everywhere else, including a `{:?}` on whatever holds it. Human takeover URLs
+  never embed the long-lived token; they carry a short-lived `handoff_secret`
+  capability instead.
 - Every command emits AFDATA protocol-v1 JSON events, and results are JSON
   only — `--output` accepts no other format for a command result, though
   `--help`/`--version` also render `plain` and `yaml`. With the default
@@ -408,7 +424,20 @@ The driver-side entry point is `afhttp fetch <url> --takeover` against such a ho
 
 **Risk-control honesty.** Real-display takeover drives a real X display through KasmVNC, so the human's pointer/keyboard input reaches the browser as native OS input events rather than synthesized CDP events. This is the strongest takeover fidelity afhttp offers (full input realism, IME/CJK input, real handedness/timing), but it does **not** by itself bypass captcha reputation systems or the headless/browser fingerprint surface. When real-display takeover still fails, the likely remaining causes are IP/network reputation, account state, or site policy — not the takeover surface. Takeover uses the host's active profile; by default `fetch --takeover` switches to a persistent per-site profile derived from the URL. KasmVNC stays an external GPLv2 process located on `PATH`; afhttp does not link or bundle it.
 
-**Multi-attach.** Display takeover is a VNC/X client; the agent (via `afhttp fetch` or `afhttp cdp`) remains a CDP client. CDP supports multiple flattened sessions, so the agent stays attached while the human drives the display. Whichever side sends input is the one acting. There is no handoff protocol; coordination between agent and human is the agent's concern.
+**Multi-attach.** Display takeover is a VNC/X client; the agent (via `afhttp fetch` or `afhttp cdp`) remains a CDP client. CDP supports multiple flattened sessions, so the agent stays attached while the human drives the display. Whichever side sends input is the one acting. Nothing negotiates *what* the human did — that stays the agent's concern — but there is a signal for *when they are finished*: see "Knowing when the human is done" below.
+
+**Panel credentials.** The panel is reached with a short-lived credential minted by `POST /takeover/handoff`, not with the host's long-lived token. Each one is an [`agent-first-ui`](https://github.com/agentfirstkit/agent-first-ui) `UiAccessToken`: it is compared in constant time (the same standard the host token is already held to), it carries a fixed deadline measured from issue (default 900s, clamped 60–3600) that a busy panel cannot slide forward, and it is *revocable*. The host revokes every live panel credential when the browser those credentials pointed at goes away — a runtime profile switch, and host shutdown — so a panel someone still has open stops authorizing instead of silently outliving what it showed.
+
+**Knowing when the human is done.** `afhttp panel` and `fetch --takeover` hand back a `takeover_url_secret` and exit; whether anyone opened it, and whether they are finished, is left for the agent to guess. `afhttp ui takeover` is the other half: it holds the session open and returns when it ends. That is a *watch*-shaped session: a VNC canvas has no submit control, so there is nothing to confirm and no typed result to collect. It also accepts `--takeover-url-secret` so it can open a panel an earlier `fetch --takeover` already minted.
+
+There are two deliveries of that one session, because the person is not always at this machine.
+
+- **A window here.** The default: an isolated, disposable-profile window (`agent-first-ui`'s `UiWindow` — never an afhttp-managed profile, so the isolation invariant holds). Closing it is the ending. It needs a display, so it is for an agent running where a person can see a window.
+- **A listing, with `--takeover-no-window`.** No window opens; the panel is announced to `agent-first-ui`'s cross-process session registry, so `afui session list` sees it and `afui session open` can put a window onto it from wherever a display actually is. This is what a headless container has instead of the first delivery, and the ending is the credential's own deadline or the command being stopped.
+
+The panel is announced either way. What that announcement hands over is the *listing* and nothing else: afhttp minted the credential in that URL, afhttp's TTL governs it, and afhttp revokes it on a profile switch or shutdown — `agent-first-ui` holds no token for it and structurally cannot revoke one. Ending the command withdraws the entry, and a reader prunes it if the command dies instead.
+
+**Where the panel is served from is the browser's answer, not the listener's.** The display client builds its WebSocket URL from the origin root plus a `path` setting, ignoring the path of the page it is on — so `path` has to name the panel's public prefix. Behind a reverse proxy that prefix is not `/takeover/panel/`, and nothing in the request says what it is (a proxy worth trusting forwards no `Origin`, no `Referer` and no forwarded-prefix header). So the landing page computes it in the browser from `location.pathname`. Delivered directly that produces the same value it always did; delivered under any prefix at all, it produces that prefix.
 
 ## 10. Backends
 

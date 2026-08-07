@@ -2,8 +2,8 @@
 
 use serde::Serialize;
 
+use crate::cli::connect::Connection;
 use crate::cli::output;
-use crate::sdk::Client;
 use crate::shared::error::{Error, ErrorCode};
 use crate::shared::ids::TabId;
 use crate::shared::time::parse_duration;
@@ -16,18 +16,14 @@ struct CdpResult {
 #[derive(Debug)]
 pub struct Args {
     pub method: String,
-    pub endpoint: String,
-    pub token: Option<String>,
+    pub connection: Connection,
     pub tab: String,
     pub params: Option<String>,
     pub wait: Option<String>,
 }
 
 pub async fn run(args: Args) -> Result<(), Error> {
-    let mut client = Client::connect(&args.endpoint)?;
-    if let Some(t) = args.token.as_deref() {
-        client = client.with_token(t);
-    }
+    let client = args.connection.client().await?;
     let params = if let Some(raw) = args.params {
         if raw == "@-" {
             use std::io::Read;

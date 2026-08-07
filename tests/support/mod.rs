@@ -14,6 +14,8 @@
 
 pub mod env;
 pub mod fixture_server;
+#[cfg(feature = "host")]
+pub mod takeover_host;
 
 use std::sync::OnceLock;
 

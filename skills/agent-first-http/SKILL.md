@@ -121,6 +121,28 @@ afhttp fetch "$URL" --takeover
 After the human finishes, run the returned `next_action.recommended_command` to
 read the same tab before summarizing.
 
+When you are running where the user can see a window on this machine, do not
+hand over a URL and guess when they are done — open the panel and wait:
+
+```sh
+afhttp ui takeover --takeover-url-secret "$TAKEOVER_URL"
+```
+
+It blocks until they close the window, and the result is the signal that they
+have finished. Do not poll or re-fetch while it is blocked.
+
+Where there is no display — a headless container, a remote session — add
+`--takeover-no-window`. Nothing opens here; the panel is announced instead, so
+`afui session list` sees it and the person can open it from a machine that has a
+screen. That trades one ending for two weaker ones: the credential's deadline,
+or you stopping the command. Neither says the person finished, so still wait for
+them to say so before re-fetching. Do not reach for it when a window can open.
+
+Do not promise that panel will work inside `afui session serve`. It is a KasmVNC
+client and needs same-origin browser storage, which a framed session does not
+have; the frame shows KasmVNC's own error instead. Hand over the panel URL, or
+have them use `afui session open`.
+
 ## Bot Walls And Human Takeover
 
 If afhttp reports a `next_action.kind: "human_takeover"` (or only `page_kind:
@@ -147,8 +169,15 @@ warmed profile already reaches the target it returns the content directly (no
 `next_action.kind: "human_takeover"`, give/open the complete
 `next_action.takeover_url_secret` (it normally expires after about 15 minutes),
 ask the user to complete or confirm the visible browser state, then stop and
-wait. Only after the user explicitly confirms should you run
-`next_action.recommended_command` (a re-fetch of the same `--tab`).
+wait. Where a window can open on this machine, `afhttp ui takeover
+--takeover-url-secret` replaces that wait with a real ending: it returns when
+the user closes the panel. Only after the user closes the panel or explicitly
+confirms should you run `next_action.recommended_command` (a re-fetch of the
+same `--tab`).
+
+A panel dies with the browser it showed. Switching profiles on the host, or
+restarting it, revokes every panel credential — if you did either, mint a fresh
+one rather than resending the old URL.
 
 Check what the challenge actually offered before handing its URL to anyone. A
 challenge stuck on "Verifying..." that never produces a checkbox is a silent
@@ -178,3 +207,18 @@ persistent profile storage is scoped by backend, so `work` under Brave and
 
 Use `afhttp health`, `afhttp capabilities`, `afhttp tabs`, or `afhttp cdp` only
 when the task needs that detail; check the relevant `--help` before doing so.
+
+## Reaching A Host
+
+Do not read a host token out of a container and pass it through the shell. Every
+command that needs a host finds the standard local `afhttp-host` on its own when
+`--endpoint-url` is omitted, and reads that container's token itself — a
+`docker exec … cat`, an `AFHTTP_TOKEN_SECRET=…` prefix, or a token pasted into
+an argument are all signs you are working around the tool rather than using it.
+
+For a host that is not the standard local one, name the endpoint and tell
+`--token-secret` where the token lives instead of putting the secret on the
+command line: `container:NAME` for another local container, `file:PATH#DOT_PATH`
+for a config file, `env:NAME` for an environment variable. A source is read
+inside the process, so the secret stays out of argv, the environment, and shell
+history.

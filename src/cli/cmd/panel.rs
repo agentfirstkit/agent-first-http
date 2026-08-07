@@ -2,14 +2,13 @@
 
 use serde::Serialize;
 
+use crate::cli::connect::Connection;
 use crate::cli::output;
-use crate::sdk::Client;
 use crate::shared::error::Error;
 
 #[derive(Debug)]
 pub struct Args {
-    pub endpoint: String,
-    pub token: Option<String>,
+    pub connection: Connection,
 }
 
 #[derive(Serialize)]
@@ -24,15 +23,12 @@ struct PanelResult {
 }
 
 pub async fn run(args: Args) -> Result<(), Error> {
-    let result = build_result(&args.endpoint, args.token.as_deref()).await?;
+    let result = build_result(&args.connection).await?;
     output::emit_revealing_takeover("panel", &result)
 }
 
-async fn build_result(endpoint: &str, token: Option<&str>) -> Result<PanelResult, Error> {
-    let mut client = Client::connect(endpoint)?;
-    if let Some(token) = token {
-        client = client.with_token(token);
-    }
+async fn build_result(connection: &Connection) -> Result<PanelResult, Error> {
+    let client = connection.client().await?;
     let handoff = client.takeover_handoff(None, None).await?;
     let mut warnings = Vec::new();
     let mut provider = None;

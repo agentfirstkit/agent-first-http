@@ -3,7 +3,9 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::cli::connect::{Connection, Resolved};
 use crate::cli::output;
+use crate::cli::token_source;
 use crate::host::bootstrap::BrowserChoice;
 use crate::sdk::fetch::{FetchCookie, NetworkBodies, RenderMode, Wait};
 use crate::sdk::{Client, InlineConfig};
@@ -16,8 +18,7 @@ use crate::shared::ids::TabId;
 #[derive(Debug)]
 pub struct Args {
     pub url: String,
-    pub endpoint: Option<String>,
-    pub token: Option<String>,
+    pub connection: Connection,
     pub browser: BrowserChoice,
     pub browser_bin: Option<PathBuf>,
     pub render: RenderMode,
@@ -65,13 +66,9 @@ pub async fn run(args: Args) -> Result<(), Error> {
     }
 }
 
-async fn run_inner(mut args: Args) -> Result<(), FetchRunError> {
+async fn run_inner(args: Args) -> Result<(), FetchRunError> {
     let render = args.render;
-    let endpoint_was_preconfigured = args.endpoint.is_some();
-    prepare_takeover_connection(&mut args, |token| async move {
-        crate::cli::cmd::container::discover_default_takeover_host(token.as_deref()).await
-    })
-    .await?;
+    let endpoint_was_preconfigured = args.connection.is_explicit();
     // Resolve the host profile: explicit --profile wins; otherwise --takeover
     // derives the URL's registrable domain (eTLD+1) for per-domain isolation.
     let explicit_profile = args.profile.clone();
@@ -82,18 +79,36 @@ async fn run_inner(mut args: Args) -> Result<(), FetchRunError> {
     } else {
         None
     };
-    if resolved_profile.is_some() && args.endpoint.is_none() {
-        return Err(Error::new(
-            ErrorCode::InvalidArgument,
-            "--profile (and --takeover profile derivation) switch the host's active profile and require a host; pass --endpoint-url or set AFHTTP_ENDPOINT_URL",
+    // A takeover needs a host a person can see, a profile needs one whose
+    // browser state persists, and neither is what the inline ephemeral browser
+    // is. Both used to be the caller's job to supply; now only naming a
+    // *different* host is.
+    let host = if args.takeover {
+        prepare_host(
+            &args.connection,
+            true,
+            resolved_profile.as_deref(),
+            |token| async move {
+                crate::cli::cmd::container::discover_default_takeover_host(token.as_deref()).await
+            },
         )
-        .into());
-    }
+        .await?
+    } else {
+        prepare_host(
+            &args.connection,
+            false,
+            resolved_profile.as_deref(),
+            |token| async move {
+                crate::cli::cmd::container::discover_default_local_host(token.as_deref()).await
+            },
+        )
+        .await?
+    };
     let takeover = args.takeover;
-    let takeover_endpoint = args.endpoint.clone();
+    let takeover_endpoint = host.as_ref().map(|host| host.endpoint.clone());
     let recommended_endpoint =
         takeover_recommended_endpoint(takeover_endpoint.as_deref(), endpoint_was_preconfigured);
-    let takeover_token = args.token.clone();
+    let takeover_token = host.as_ref().and_then(|host| host.token.clone());
     let wait = Wait::parse(&args.wait)?;
     let timeout = Duration::from_millis(args.timeout_ms);
     let network_bodies = args.network_bodies;
@@ -101,7 +116,7 @@ async fn run_inner(mut args: Args) -> Result<(), FetchRunError> {
 
     let body_bytes = resolve_body(&args).await?;
     let want = resolve_want(&args.want);
-    let mut client = build_client(&args, render).await?;
+    let mut client = build_client(&args, host.as_ref(), render).await?;
     if let Some(profile) = &resolved_profile {
         client = client.with_profile(profile.clone());
     }
@@ -194,8 +209,8 @@ async fn run_inner(mut args: Args) -> Result<(), FetchRunError> {
                 && let Some(endpoint) = takeover_endpoint.as_deref()
             {
                 let mut handoff_client = Client::connect(endpoint)?;
-                if let Some(token) = takeover_token.as_deref() {
-                    handoff_client = handoff_client.with_token(token);
+                if let Some(token) = &takeover_token {
+                    handoff_client = handoff_client.with_token(token.expose_secret());
                 }
                 let tab_id = result.tab_id.as_ref().map(|t| t.as_str().to_string());
                 let handoff = handoff_client
@@ -235,27 +250,48 @@ async fn run_inner(mut args: Args) -> Result<(), FetchRunError> {
     }
 }
 
-/// Fill in the host `--takeover` needs when the caller did not name one.
+/// The host this fetch talks to, or `None` when it needs none — a plain fetch
+/// with no profile and no takeover runs against the inline ephemeral browser,
+/// which is the fast path and stays the default.
+///
+/// `discover` is only called when a host is needed and the caller named none.
+/// An explicit `--token-secret` outranks the discovered host's own token: a
+/// caller who supplies a credential means it.
 ///
 /// That `--takeover` requires a browser render is not checked here: the
 /// registry's takeover shapes pin `--render` to the modes that reach one, so an
 /// unusable mix never becomes an invocation.
-async fn prepare_takeover_connection<D, Fut>(args: &mut Args, discover: D) -> Result<(), Error>
+async fn prepare_host<D, Fut>(
+    connection: &Connection,
+    takeover: bool,
+    profile: Option<&str>,
+    discover: D,
+) -> Result<Option<Resolved>, Error>
 where
     D: FnOnce(Option<String>) -> Fut,
-    Fut: std::future::Future<Output = Result<crate::cli::cmd::container::LocalTakeoverHost, Error>>,
+    Fut: std::future::Future<Output = Result<crate::cli::cmd::container::LocalHost, Error>>,
 {
-    if !args.takeover {
-        return Ok(());
+    let token = connection
+        .token
+        .as_ref()
+        .map(token_source::read)
+        .transpose()?;
+    if let Some(endpoint) = connection.endpoint.clone() {
+        return Ok(Some(Resolved { endpoint, token }));
     }
-    if args.endpoint.is_none() {
-        let discovered = discover(args.token.clone()).await?;
-        args.endpoint = Some(discovered.endpoint);
-        if args.token.is_none() {
-            args.token = discovered.token_secret;
-        }
+    if !takeover && profile.is_none() {
+        return Ok(None);
     }
-    Ok(())
+    let discovered = discover(
+        token
+            .as_ref()
+            .map(|token| token.expose_secret().to_string()),
+    )
+    .await?;
+    Ok(Some(Resolved {
+        endpoint: discovered.endpoint,
+        token: token.or(discovered.token_secret),
+    }))
 }
 
 fn takeover_recommended_endpoint(
@@ -365,15 +401,13 @@ fn resolve_want(want: &[String]) -> Option<std::collections::BTreeSet<Artifact>>
 /// Construct the SDK client for this fetch: a remote connection when
 /// `--endpoint-url` is set, the HTTP-only client for `--render none`, or an
 /// inline ephemeral host otherwise (lazy for `auto`, eager for `always`).
-async fn build_client(args: &Args, render: RenderMode) -> Result<Client, Error> {
-    match args.endpoint.as_deref() {
-        Some(ep) => {
-            let mut c = Client::connect(ep)?;
-            if let Some(t) = args.token.as_deref() {
-                c = c.with_token(t);
-            }
-            Ok(c)
-        }
+async fn build_client(
+    args: &Args,
+    host: Option<&Resolved>,
+    render: RenderMode,
+) -> Result<Client, Error> {
+    match host {
+        Some(host) => host.client(),
         None if matches!(render, RenderMode::None) => Client::http_only(),
         None => {
             let cfg = InlineConfig {
@@ -445,104 +479,116 @@ fn parse_cookie_arg(raw: &str) -> Result<FetchCookie, Error> {
 mod tests {
     use super::*;
 
-    use crate::sdk::fetch::DEFAULT_NETWORK_BODY_MAX_BYTES;
+    /// A resolved token is a `SecretString`, so a test that asserts on one has
+    /// to say so — the same friction production code gets.
+    fn exposed(token: &Option<agent_first_data::value_source::SecretString>) -> Option<&str> {
+        token
+            .as_ref()
+            .map(agent_first_data::value_source::SecretString::expose_secret)
+    }
 
-    fn base_args(url: &str) -> Args {
-        Args {
-            url: url.to_string(),
-            endpoint: None,
-            token: None,
-            browser: BrowserChoice::Auto,
-            browser_bin: None,
-            render: RenderMode::Auto,
-            tab: "new".into(),
-            takeover: false,
-            profile: None,
-            wait: "auto".into(),
-            headers: Vec::new(),
-            cookies: Vec::new(),
-            user_agent: None,
-            evaluate_after_wait: Vec::new(),
-            want: Vec::new(),
-            method: "GET".into(),
-            data: None,
-            form: Vec::new(),
-            network_bodies: NetworkBodies::Off,
-            network_body_max_bytes: DEFAULT_NETWORK_BODY_MAX_BYTES,
-            readiness_idle_ms: 800,
-            readiness_stable_ms: 500,
-            readiness_min_text_bytes: 32,
-            no_network_redact: false,
-            out: None,
-            cookie_jar: None,
-            no_cookie_jar: false,
-            observe_main_wait_ms: 500,
-            max_response_bytes: 1_073_741_824,
-            retry: 0,
-            backoff_ms: 250,
-            proxy: None,
-            ca_cert: None,
-            tls_insecure: false,
-            timeout_ms: 30_000,
-            capture_ws: false,
-            capture_sse: false,
+    fn discovered(token_secret: Option<&str>) -> crate::cli::cmd::container::LocalHost {
+        crate::cli::cmd::container::LocalHost {
+            endpoint: "ws://127.0.0.1:9222".into(),
+            token_secret: token_secret.map(agent_first_data::value_source::SecretString::new),
         }
     }
 
+    /// The unreached case: a plain fetch has no host, which is what keeps the
+    /// inline ephemeral browser the default rather than a container.
     #[tokio::test]
-    async fn takeover_autodiscovery_fills_missing_endpoint_and_token() {
-        let mut args = base_args("https://contabo.com");
-        args.takeover = true;
-        prepare_takeover_connection(&mut args, |token| async move {
-            assert_eq!(token, None);
-            Ok(crate::cli::cmd::container::LocalTakeoverHost {
-                endpoint: "ws://127.0.0.1:9222".into(),
-                token_secret: Some("secret".into()),
-            })
+    async fn a_plain_fetch_needs_no_host_and_discovers_nothing() {
+        let host = prepare_host(&Connection::default(), false, None, |_| async {
+            panic!("a plain fetch must not discover a host");
         })
         .await
-        .unwrap();
-
-        assert_eq!(args.endpoint.as_deref(), Some("ws://127.0.0.1:9222"));
-        assert_eq!(args.token.as_deref(), Some("secret"));
+        .expect("no host is not an error");
+        assert!(host.is_none());
     }
 
     #[tokio::test]
-    async fn takeover_autodiscovery_preserves_existing_token() {
-        let mut args = base_args("https://contabo.com");
-        args.takeover = true;
-        args.token = Some("env-token".into());
-        prepare_takeover_connection(&mut args, |token| async move {
-            assert_eq!(token.as_deref(), Some("env-token"));
-            Ok(crate::cli::cmd::container::LocalTakeoverHost {
-                endpoint: "ws://127.0.0.1:9222".into(),
-                token_secret: Some("container-token".into()),
-            })
+    async fn autodiscovery_fills_missing_endpoint_and_token() {
+        let host = prepare_host(
+            &Connection::default(),
+            true,
+            Some("contabo.com"),
+            |token| async move {
+                assert_eq!(token, None);
+                Ok(discovered(Some("secret")))
+            },
+        )
+        .await
+        .expect("discovery succeeds")
+        .expect("takeover needs a host");
+
+        assert_eq!(host.endpoint, "ws://127.0.0.1:9222");
+        assert_eq!(exposed(&host.token), Some("secret"));
+    }
+
+    /// A profile switches the host's active browser state, so it needs a host
+    /// just as a takeover does — this used to be an error telling the caller to
+    /// pass `--endpoint-url`.
+    #[tokio::test]
+    async fn a_profile_alone_discovers_a_host() {
+        let host = prepare_host(&Connection::default(), false, Some("work"), |_| async {
+            Ok(discovered(Some("secret")))
         })
         .await
-        .unwrap();
-
-        assert_eq!(args.endpoint.as_deref(), Some("ws://127.0.0.1:9222"));
-        assert_eq!(args.token.as_deref(), Some("env-token"));
+        .expect("discovery succeeds")
+        .expect("a profile needs a host");
+        assert_eq!(host.endpoint, "ws://127.0.0.1:9222");
     }
 
     #[tokio::test]
-    async fn takeover_autodiscovery_surfaces_failure() {
-        let mut args = base_args("https://contabo.com");
-        args.takeover = true;
-        let err = prepare_takeover_connection(&mut args, |_| async {
-            Err(Error::new(
-                ErrorCode::InvalidArgument,
-                "default local container `afhttp-host` is not running",
-            ))
+    async fn autodiscovery_preserves_an_explicit_token() {
+        let connection = Connection::new(
+            None,
+            Some(agent_first_data::ValueSource::Literal("argv-token".into())),
+        );
+        let host = prepare_host(&connection, true, Some("contabo.com"), |token| async move {
+            assert_eq!(token.as_deref(), Some("argv-token"));
+            Ok(discovered(Some("container-token")))
         })
         .await
-        .err()
-        .unwrap();
+        .expect("discovery succeeds")
+        .expect("takeover needs a host");
+
+        assert_eq!(host.endpoint, "ws://127.0.0.1:9222");
+        assert_eq!(exposed(&host.token), Some("argv-token"));
+    }
+
+    #[tokio::test]
+    async fn autodiscovery_surfaces_failure() {
+        let err = prepare_host(
+            &Connection::default(),
+            true,
+            Some("contabo.com"),
+            |_| async {
+                Err(Error::new(
+                    ErrorCode::InvalidArgument,
+                    "default local container `afhttp-host` is not running",
+                ))
+            },
+        )
+        .await
+        .expect_err("a missing container is an error");
 
         assert_eq!(err.error_code, ErrorCode::InvalidArgument);
         assert!(err.detail.contains("afhttp-host"));
-        assert!(args.endpoint.is_none());
+    }
+
+    /// A named endpoint is used as given, and nothing is discovered behind it.
+    #[tokio::test]
+    async fn a_named_endpoint_is_never_second_guessed() {
+        let connection = Connection::new(Some("ws://box:9222".into()), None);
+        let host = prepare_host(&connection, true, Some("contabo.com"), |_| async {
+            panic!("an explicit endpoint must not discover");
+        })
+        .await
+        .expect("explicit host resolves")
+        .expect("takeover needs a host");
+        assert_eq!(host.endpoint, "ws://box:9222");
+        assert!(host.token.is_none());
     }
 
     /// Every value the registry lets `--want` carry names a real artifact, so

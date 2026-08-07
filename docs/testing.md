@@ -123,6 +123,16 @@ authenticated listener, and reports `display_takeover: true` in `/capabilities`.
 These run in the nightly takeover workflow because the provider startup is
 timing-sensitive and version-dependent.
 
+`tests/takeover-in-workbench.sh` is the other half, and is deliberately not a
+gate. It takes a real takeover — Xvnc, a headful browser on its display, a real
+`afhttp ui takeover --takeover-no-window` — and puts it behind
+`agent-first-ui`'s `afui session serve`, then drives the result with a real
+Chromium over CDP. It reports what it observed (HTTP statuses, the first RFB
+frame off the WebSocket, what each browser document says about its own origin
+and storage) rather than only whether it passed, and it writes screenshots to
+`target/`. It needs a checkout of agent-first-ui beside this repository and
+refuses to run without one, which is why it stays out of `tests/test.sh`.
+
 ## What is not tested
 
 - **Anti-detection effectiveness**. Whether a specific site classifies a

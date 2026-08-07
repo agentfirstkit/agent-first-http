@@ -7,12 +7,19 @@
 //! fallbacks the registry cannot see (`AFHTTP_ENDPOINT_URL` and
 //! `AFHTTP_TOKEN_SECRET`), and narrowing registry integers to the unsigned
 //! ranges the domain types use.
+//!
+//! Projection stays pure. A `--token-secret` source is classified here but read
+//! later, and a missing endpoint is carried here but discovered later, so
+//! nothing in this file opens a file, spawns a container runtime, or reaches a
+//! host — argv is either legal or it is not, before any of that can happen.
 
 use std::path::PathBuf;
 
-use agent_first_data::{CliValue, ResolvedInvocation};
+use agent_first_data::{CliValue, ResolvedInvocation, ValueSource};
 
 use crate::cli::cmd;
+use crate::cli::connect::Connection;
+use crate::cli::token_source;
 use crate::host::bootstrap::{
     BrowserChoice, DisplayMode, HealthPublic, Takeover, TakeoverProviderKind,
 };
@@ -33,6 +40,7 @@ pub enum Command {
     Capabilities(cmd::capabilities::Args),
     Profile(cmd::profile::Args),
     Tabs(cmd::tabs::Args),
+    Ui(cmd::ui::Args),
     Skill(cmd::skill::Args),
     Container(cmd::container::Args),
 }
@@ -46,7 +54,7 @@ type Handler = fn(&ResolvedInvocation) -> Projected;
 
 /// Exactly one handler per action id in the registry; `bind_actions` proves the
 /// two sets match at startup.
-pub fn handlers() -> [(&'static str, Handler); 23] {
+pub fn handlers() -> [(&'static str, Handler); 24] {
     [
         ("fetch", fetch as Handler),
         ("host", host),
@@ -64,6 +72,7 @@ pub fn handlers() -> [(&'static str, Handler); 23] {
         ("profile_prune", profile_prune),
         ("tabs_list", tabs_list),
         ("tabs_close", tabs_close),
+        ("ui_takeover", ui_takeover),
         ("skill_status", skill_status),
         ("skill_install", skill_install),
         ("skill_uninstall", skill_uninstall),
@@ -150,20 +159,24 @@ fn endpoint(invocation: &ResolvedInvocation) -> Option<String> {
     from_env(opt_string(invocation, "endpoint_url"), ENDPOINT_ENV)
 }
 
-fn token(invocation: &ResolvedInvocation) -> Option<String> {
-    from_env(opt_string(invocation, "token_secret"), TOKEN_ENV)
+/// `--token-secret` names where the token is, so an environment variable is one
+/// source among several rather than the only alternative to typing the secret.
+/// `AFHTTP_TOKEN_SECRET` stays a fallback and holds the value itself.
+fn token(invocation: &ResolvedInvocation) -> Result<Option<ValueSource>, Error> {
+    match opt_string(invocation, "token_secret") {
+        Some(raw) => token_source::parse(&raw).map(Some),
+        None => Ok(std::env::var(TOKEN_ENV)
+            .ok()
+            .filter(|value| !value.is_empty())
+            .map(ValueSource::Literal)),
+    }
 }
 
-/// Commands that only talk to an already-running host cannot invent one.
-fn required_endpoint(invocation: &ResolvedInvocation) -> Result<String, Error> {
-    endpoint(invocation).ok_or_else(missing_endpoint_error)
-}
-
-fn missing_endpoint_error() -> Error {
-    Error::new(
-        ErrorCode::InvalidArgument,
-        format!("this command needs a running host: pass --endpoint-url or set {ENDPOINT_ENV}"),
-    )
+/// The host a client command talks to. Neither half is required on argv: an
+/// absent endpoint means the standard local container, discovered at connect
+/// time, and an absent token means whatever that host's own token is.
+fn connection(invocation: &ResolvedInvocation) -> Result<Connection, Error> {
+    Ok(Connection::new(endpoint(invocation), token(invocation)?))
 }
 
 fn browser(invocation: &ResolvedInvocation) -> BrowserChoice {
@@ -232,8 +245,7 @@ fn container_port(invocation: &ResolvedInvocation) -> Result<u16, Error> {
 fn fetch(invocation: &ResolvedInvocation) -> Projected {
     Ok(Command::Fetch(Box::new(cmd::fetch::Args {
         url: string(invocation, "url"),
-        endpoint: endpoint(invocation),
-        token: token(invocation),
+        connection: connection(invocation)?,
         browser: browser(invocation),
         browser_bin: opt_path(invocation, "browser_bin"),
         render: render(invocation),
@@ -319,7 +331,12 @@ fn host(invocation: &ResolvedInvocation) -> Projected {
         )? as u8,
         browser: browser(invocation),
         browser_bin: opt_path(invocation, "browser_bin"),
-        token: opt_string(invocation, "token_secret"),
+        // The token this host will require of its callers, not one to go find:
+        // no environment fallback, but the same sources, so the secret can come
+        // from a config file instead of the process environment.
+        token: opt_string(invocation, "token_secret")
+            .map(|raw| token_source::parse(&raw))
+            .transpose()?,
         no_health: flag(invocation, "no_health"),
         health_public: match opt_string(invocation, "health_public").as_deref() {
             Some("minimal") => HealthPublic::Minimal,
@@ -339,8 +356,7 @@ fn host(invocation: &ResolvedInvocation) -> Projected {
 
 fn upload(invocation: &ResolvedInvocation) -> Projected {
     Ok(Command::Upload(cmd::upload::Args {
-        endpoint: required_endpoint(invocation)?,
-        token: token(invocation),
+        connection: connection(invocation)?,
         tab: string(invocation, "tab"),
         selector: string(invocation, "selector"),
         file: PathBuf::from(string(invocation, "file")),
@@ -350,8 +366,7 @@ fn upload(invocation: &ResolvedInvocation) -> Projected {
 fn cdp(invocation: &ResolvedInvocation) -> Projected {
     Ok(Command::Cdp(cmd::cdp::Args {
         method: string(invocation, "method"),
-        endpoint: required_endpoint(invocation)?,
-        token: token(invocation),
+        connection: connection(invocation)?,
         tab: string(invocation, "tab"),
         params: opt_string(invocation, "params"),
         wait: opt_string(invocation, "wait_event"),
@@ -360,22 +375,19 @@ fn cdp(invocation: &ResolvedInvocation) -> Projected {
 
 fn panel(invocation: &ResolvedInvocation) -> Projected {
     Ok(Command::Panel(cmd::panel::Args {
-        endpoint: required_endpoint(invocation)?,
-        token: token(invocation),
+        connection: connection(invocation)?,
     }))
 }
 
 fn health(invocation: &ResolvedInvocation) -> Projected {
     Ok(Command::Health(cmd::health::Args {
-        endpoint: required_endpoint(invocation)?,
-        token: token(invocation),
+        connection: connection(invocation)?,
     }))
 }
 
 fn capabilities(invocation: &ResolvedInvocation) -> Projected {
     Ok(Command::Capabilities(cmd::capabilities::Args {
-        endpoint: required_endpoint(invocation)?,
-        token: token(invocation),
+        connection: connection(invocation)?,
     }))
 }
 
@@ -433,8 +445,7 @@ fn profile_prune(invocation: &ResolvedInvocation) -> Projected {
 fn tabs_list(invocation: &ResolvedInvocation) -> Projected {
     Ok(Command::Tabs(cmd::tabs::Args {
         sub: cmd::tabs::TabsSub::List(cmd::tabs::EndpointArgs {
-            endpoint: required_endpoint(invocation)?,
-            token: token(invocation),
+            connection: connection(invocation)?,
         }),
     }))
 }
@@ -443,9 +454,31 @@ fn tabs_close(invocation: &ResolvedInvocation) -> Projected {
     Ok(Command::Tabs(cmd::tabs::Args {
         sub: cmd::tabs::TabsSub::Close(cmd::tabs::CloseArgs {
             tab: string(invocation, "tab"),
-            endpoint: required_endpoint(invocation)?,
-            token: token(invocation),
+            connection: connection(invocation)?,
         }),
+    }))
+}
+
+/// Both `ui takeover` shapes, told apart by the one argument only the second
+/// declares. An already-minted URL carries its own credential, so that shape
+/// never reaches for a host — no environment fallback, and no discovery, which
+/// would otherwise make a stray variable or a stray container look load-bearing.
+fn ui_takeover(invocation: &ResolvedInvocation) -> Projected {
+    let takeover = match opt_string(invocation, "takeover_url_secret") {
+        Some(takeover_url_secret) => cmd::ui::TakeoverArgs::Open {
+            takeover_url_secret,
+        },
+        None => cmd::ui::TakeoverArgs::Mint {
+            connection: connection(invocation)?,
+        },
+    };
+    Ok(Command::Ui(cmd::ui::Args {
+        sub: cmd::ui::UiSub::Takeover(takeover),
+        delivery: if flag(invocation, "takeover_no_window") {
+            cmd::ui::Delivery::Listed
+        } else {
+            cmd::ui::Delivery::Window
+        },
     }))
 }
 
@@ -576,20 +609,83 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_endpoint_names_both_ways_to_supply_one() {
-        let error = missing_endpoint_error();
-        assert_eq!(error.error_code, ErrorCode::InvalidArgument);
-        assert!(error.detail.contains("--endpoint-url"), "{}", error.detail);
-        assert!(error.detail.contains(ENDPOINT_ENV), "{}", error.detail);
-    }
-
-    #[test]
     fn an_explicit_endpoint_reaches_the_command() {
         let projected = project(&["afhttp", "health", "--endpoint-url", "ws://127.0.0.1:9222"]);
         let Ok(Command::Health(args)) = projected else {
             panic!("health must project to a health command");
         };
-        assert_eq!(args.endpoint, "ws://127.0.0.1:9222");
+        assert_eq!(
+            args.connection.endpoint.as_deref(),
+            Some("ws://127.0.0.1:9222")
+        );
+        assert!(args.connection.is_explicit());
+    }
+
+    /// A command that needs a host no longer refuses argv that omits one: the
+    /// endpoint is carried absent and answered by discovery at connect time,
+    /// which is what makes the local case a bare command.
+    #[test]
+    fn a_missing_endpoint_is_left_for_discovery_rather_than_rejected() {
+        let Ok(Command::Health(args)) = project(&["afhttp", "health"]) else {
+            panic!("health must project without an endpoint");
+        };
+        assert!(!args.connection.is_explicit());
+    }
+
+    /// The registry now owns the source grammar, so a malformed one is refused
+    /// while argv is resolved — beside the other usage errors, at exit 2 — and
+    /// a legal one reaches projection classified but unread. Nothing on this
+    /// path opens a file or spawns a container runtime.
+    #[test]
+    fn a_token_source_is_classified_but_not_read() {
+        let Ok(Command::Cdp(args)) = project(&[
+            "afhttp",
+            "cdp",
+            "Page.enable",
+            "--tab",
+            "T1",
+            "--token-secret",
+            "container:afhttp-host",
+        ]) else {
+            panic!("cdp must project with a container token source");
+        };
+        assert_eq!(
+            args.connection.token,
+            Some(ValueSource::Host {
+                scheme: "container".to_string(),
+                value: "afhttp-host".to_string(),
+            })
+        );
+
+        let cli = cli_spec().expect("registry must build");
+        let app = cli
+            .bind_actions(handlers())
+            .expect("handlers must cover every action");
+        for raw in [
+            // A file source with no dot path…
+            "file:/etc/afhttp/hosts.json",
+            // …and a scheme this argument does not accept.
+            "prompt",
+        ] {
+            let error = app
+                .resolve_from(vec![
+                    "afhttp",
+                    "cdp",
+                    "Page.enable",
+                    "--tab",
+                    "T1",
+                    "--token-secret",
+                    raw,
+                ])
+                .err()
+                .unwrap_or_else(|| panic!("{raw} must be refused"));
+            assert_eq!(
+                error.rule,
+                agent_first_data::CliErrorRule::InvalidArgumentValue,
+                "{raw}"
+            );
+            assert_eq!(error.exit_code(), 2, "{raw}");
+        }
     }
 
     #[test]

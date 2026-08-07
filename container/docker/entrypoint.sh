@@ -31,9 +31,13 @@ echo "  listen:   tcp:0.0.0.0:${AFHTTP_PORT}  (reach it over your private networ
 echo "  profile:  ${AFHTTP_PROFILE}"
 echo "  token_secret: stored at ${TOKEN_FILE}"
 echo ""
-echo "  A driver (run anywhere) connects with:"
+echo "  A driver on this machine needs nothing said about the standard container:"
+echo "    afhttp fetch https://example.com"
+echo ""
+echo "  Any other container, or another machine, names the host and its token source:"
 echo "    afhttp fetch https://example.com \\"
-echo "      --endpoint-url ws://<host>:${AFHTTP_PORT} --token-secret \"\$(cat ${TOKEN_FILE})\""
+echo "      --endpoint-url ws://<host>:${AFHTTP_PORT} --token-secret container:<container-name>"
+echo "    (from elsewhere: --token-secret file:<config-path>#<dot.path>, or env:<NAME>)"
 echo "========================================="
 
 # Extra flags (e.g. --browser camoufox, --takeover-provider kasmvnc) pass through as "$@".

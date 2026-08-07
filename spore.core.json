@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-http",
   "name": "Agent-First HTTP",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "Give your AI agent its own private browser — so it reads the real page, past logins and bot walls, without ever touching yours.",
@@ -13,20 +13,29 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Drop the chrome-headless-shell backend: it shipped the same engine and CDP surface as chromium for an extra pinned download and an x86_64-only asymmetry, so --browser and 'container install --with' no longer accept it",
-    "Move the runtime, builder, downloader, and test container images from Debian bookworm to trixie, including the matching KasmVNC package",
-    "Install a managed browser policy in both container images so Chromium's unsupported-command-line-flag bar stops stealing viewport on the takeover display, changing no launch flag and no sandbox posture",
-    "Fix takeover downloads landing nowhere: profile prefs now suppress the native save dialog and point downloads at the profile's own directory, replacing a host-level Browser.setDownloadBehavior that died with the throwaway connection that set it",
-    "Correct the deployment guide's claim that --no-sandbox raises no warning bar, and record what does and does not suppress it",
-    "Upgrade to agent-first-data 0.31.0, resolving bound registries through BoundOutcome and running invocations off the invocation itself",
-    "Add a CLI test that drives every declared shape through its own handler with strict argument reads, so a handler asking for an id its shape cannot supply fails in test rather than silently projecting an empty string"
+    "Discover the standard local host for every command that needs one rather than only for fetch --takeover: with no --endpoint-url the local host container is inspected read-only, its token read from its own data volume, and /health verified before anything is sent",
+    "Never start or recreate a container while discovering, keep inline the default so a plain fetch needs no host at all, never second-guess an explicit --endpoint-url, and let fetch --profile discover instead of erroring when no endpoint is given",
+    "Let --token-secret name where a token lives rather than only carry it: env:NAME, file:PATH#DOT_PATH, container:NAME and literal:TOKEN, with container:NAME covering the host token in a named volume that no path on the machine can address",
+    "Classify token sources while argv is projected and read them only at connect time, so a rejected invocation never opens a file or spawns a container runtime and no error can echo what it read",
+    "Adopt the shared value-source grammar in place of a private copy, so an unaccepted source is refused as cli_invalid_argument_value at exit 2 while argv resolves, --token-secret prompt answers with what it does accept, and the syntax is rendered from the declaration instead of repeated across every reference row",
+    "Carry a resolved token as a secret-typed value end to end, exposing the bytes only where they are needed and rendering every other debug output as redacted",
+    "Require afhttp host to name the source of the token it demands from callers, with no environment fallback, so a server never inherits what it accepts from an ambient variable",
+    "Replace the private takeover handoff store with an Agent-First UI access token, gaining constant-time comparison and a revoke path the crate never had, and cleanup that no longer runs only when a credential is minted",
+    "Add afhttp ui takeover, which opens the takeover panel in an Agent-First UI window so the window closing is the signal that the person finished instead of the agent guessing",
+    "Emit a runnable client command from container install and status and from the entrypoint banner, instead of an AFHTTP_TOKEN_SECRET=<host-token> template to paste"
   ],
   "bonds": [
     {
       "relation": "depends_on",
-      "uri": "cmn://agentfirstkit.com/b3.7Kf6i6HNpFxooXKQTCzfugkqq89rPCuM1mekg8hsKAQC",
+      "uri": "cmn://agentfirstkit.com/b3.XWoP3CQVfssQGj63azRQnNKkSBEDVmaK5gdNHHAxffc",
       "id": "agent-first-data",
       "reason": "All request/response fields use Agent-First Data suffix conventions, and runtime protocol/log events are emitted on stdout only"
+    },
+    {
+      "relation": "depends_on",
+      "uri": "cmn://agentfirstkit.com/b3.GjeiTGxA14EuCQ4cNGAXEZxFa61k2C3zCZuJT1SW4cNC",
+      "id": "agent-first-ui",
+      "reason": "Every short-lived takeover panel credential is an Agent-First UI access token, and `afhttp ui takeover` opens the panel in an Agent-First UI window"
     }
   ],
   "tree": {
