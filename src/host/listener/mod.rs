@@ -19,6 +19,7 @@ use agent_first_ui::{UiAccessToken, UiExpiry};
 use axum::Extension;
 use axum::Router;
 use axum::extract::State;
+use axum::extract::rejection::JsonRejection;
 use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
@@ -36,6 +37,8 @@ const TAKEOVER_HANDOFF_DEFAULT_TTL_S: u64 = 900;
 const TAKEOVER_HANDOFF_MIN_TTL_S: u64 = 60;
 const TAKEOVER_HANDOFF_MAX_TTL_S: u64 = 3600;
 const TAKEOVER_HANDOFF_SCOPE: &str = "takeover";
+const TAKEOVER_UI_SESSION_IDLE_TIMEOUT_S: u64 = 120;
+const TAKEOVER_UI_SESSION_SCOPE: &str = "takeover_ui_session";
 const TAKEOVER_HANDOFF_COOKIE: &str = "afhttp_handoff";
 
 /// A single running profile with its browser handle.
@@ -237,6 +240,18 @@ struct HandoffResponse {
     takeover_url_scope: &'static str,
 }
 
+/// An internal upstream lease for one AFUI delivery.
+///
+/// This timeout is not the lifetime of a Link or Session. The afhttp process
+/// renews the lease while it owns the AFUI delivery and revokes it on the way
+/// out; the idle bound only cleans up after a crashed owner.
+#[derive(Debug, Serialize)]
+struct TakeoverUiSessionResponse {
+    takeover_url_secret: String,
+    takeover_session_idle_timeout_s: u64,
+    takeover_url_scope: &'static str,
+}
+
 impl AppState {
     /// Launch the host browser and return a complete, ready-to-serve state.
     pub async fn launch(args: &HostArgs) -> Result<Self, Error> {
@@ -414,22 +429,44 @@ impl AppState {
     /// `UiExpiry::After` rather than `Idle`: the caller was promised an
     /// absolute deadline (`takeover_url_expires_at_rfc3339`), so a panel left
     /// open must not extend it by polling.
-    fn issue_takeover_handoff(&self, ttl_s: u64) -> Result<UiAccessToken, Error> {
-        let token =
-            UiAccessToken::issue(UiExpiry::After(Duration::from_secs(ttl_s))).map_err(|error| {
-                Error::new(
-                    ErrorCode::InternalError,
-                    format!("takeover handoff: could not mint a credential: {error}"),
-                )
-            })?;
+    fn issue_takeover_token(&self, expiry: UiExpiry) -> Result<UiAccessToken, Error> {
+        let token = UiAccessToken::issue(expiry).map_err(|error| {
+            Error::new(
+                ErrorCode::InternalError,
+                format!("takeover access: could not mint a credential: {error}"),
+            )
+        })?;
         let mut handoffs = self.handoffs.write().unwrap_or_else(|e| e.into_inner());
         handoffs.retain(is_live);
         handoffs.push(token.clone());
         Ok(token)
     }
 
+    fn issue_takeover_handoff(&self, ttl_s: u64) -> Result<UiAccessToken, Error> {
+        self.issue_takeover_token(UiExpiry::After(Duration::from_secs(ttl_s)))
+    }
+
+    fn issue_takeover_ui_session(&self) -> Result<UiAccessToken, Error> {
+        self.issue_takeover_token(UiExpiry::Idle(Duration::from_secs(
+            TAKEOVER_UI_SESSION_IDLE_TIMEOUT_S,
+        )))
+    }
+
+    fn revoke_takeover_handoff(&self, secret: &str) -> bool {
+        let mut handoffs = self.handoffs.write().unwrap_or_else(|e| e.into_inner());
+        handoffs.retain(is_live);
+        let Some(token) = handoffs.iter().find(|token| token.authorize(secret)) else {
+            return false;
+        };
+        token.revoke();
+        handoffs.retain(is_live);
+        true
+    }
+
     fn takeover_handoff_auth(&self, req: &axum::extract::Request) -> Option<HandoffAuth> {
-        let secret = query_handoff(req).or_else(|| cookie_handoff(req))?;
+        let secret = handoff_header(req.headers())
+            .or_else(|| query_handoff(req))
+            .or_else(|| cookie_handoff(req))?;
         // Dead credentials are dropped on every authorization attempt as well
         // as on every mint, so a host that mints once and then serves a panel
         // for an hour does not hold the expired credential for that whole hour.
@@ -441,8 +478,9 @@ impl AppState {
                 .find(|token| token.authorize(&secret))
                 .cloned()
         }?;
-        // `After` always has a deadline, so `None` here cannot happen; treating
-        // it as unauthorized keeps that unreachable case from inventing a TTL.
+        // Both fixed handoffs and idle UI leases have a current deadline, so
+        // `None` here cannot happen; treating it as unauthorized keeps that
+        // unreachable case from inventing a lifetime.
         let remaining_s = token.remaining_ttl()?.as_secs().max(1);
         Some(HandoffAuth {
             secret,
@@ -462,8 +500,22 @@ async fn takeover_handoff_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
     uri: Uri,
-    axum::Json(body): axum::Json<HandoffRequest>,
+    body: Result<axum::Json<HandoffRequest>, JsonRejection>,
 ) -> Response {
+    let axum::Json(body) = match body {
+        Ok(body) => body,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(crate::shared::afdata::error_value(
+                    "invalid_json",
+                    &error.body_text(),
+                    false,
+                )),
+            )
+                .into_response();
+        }
+    };
     if !state.takeover_enabled || state.takeover.is_none() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -528,6 +580,94 @@ async fn takeover_handoff_handler(
     .into_response()
 }
 
+async fn takeover_ui_session_create(
+    State(state): State<AppState>,
+    handoff: Option<Extension<HandoffAuth>>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
+    if !state.takeover_enabled || state.takeover.is_none() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(crate::shared::afdata::error_value(
+                "backend_unsupported",
+                "display takeover is not enabled",
+                false,
+            )),
+        )
+            .into_response();
+    }
+    let token = match state.issue_takeover_ui_session() {
+        Ok(token) => token,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::shared::afdata::error_value(
+                    error.error_code.as_str(),
+                    &error.detail,
+                    error.retryable,
+                )),
+            )
+                .into_response();
+        }
+    };
+    let mut takeover_url = match takeover_panel_url_from_request(&headers, &uri) {
+        Ok(url) => url,
+        Err(error) => {
+            token.revoke();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(crate::shared::afdata::error_value(
+                    error.error_code.as_str(),
+                    &error.detail,
+                    error.retryable,
+                )),
+            )
+                .into_response();
+        }
+    };
+    takeover_url
+        .query_pairs_mut()
+        .append_pair("handoff_secret", token.secret().expose_secret());
+    let response = TakeoverUiSessionResponse {
+        takeover_url_secret: takeover_url.to_string(),
+        takeover_session_idle_timeout_s: TAKEOVER_UI_SESSION_IDLE_TIMEOUT_S,
+        takeover_url_scope: TAKEOVER_UI_SESSION_SCOPE,
+    };
+    // Exchange means exchange: once a fixed panel handoff has minted this
+    // process-bound lease, the old URL is no longer a second credential for
+    // the same panel. A long-lived host bearer has no HandoffAuth extension and
+    // therefore revokes nothing here.
+    if let Some(Extension(handoff)) = handoff {
+        state.revoke_takeover_handoff(&handoff.secret);
+    }
+    let value = serde_json::to_value(response).unwrap_or_else(|_| serde_json::json!({}));
+    Json(crate::shared::afdata::result_value_revealing_takeover(
+        "takeover_ui_session",
+        value,
+    ))
+    .into_response()
+}
+
+/// Authorization already renewed the idle lease; no domain work is needed.
+async fn takeover_ui_session_keep_alive() -> StatusCode {
+    StatusCode::NO_CONTENT
+}
+
+async fn takeover_ui_session_revoke(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> StatusCode {
+    let Some(secret) = handoff_header(&headers) else {
+        return StatusCode::BAD_REQUEST;
+    };
+    if state.revoke_takeover_handoff(&secret) {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::NOT_FOUND
+    }
+}
+
 fn takeover_panel_url_from_request(headers: &HeaderMap, uri: &Uri) -> Result<url::Url, Error> {
     let scheme = request_scheme(headers, uri);
     let host = headers
@@ -576,6 +716,12 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/takeover/handoff",
             axum::routing::post(takeover_handoff_handler),
+        )
+        .route(
+            "/takeover/ui-session",
+            axum::routing::post(takeover_ui_session_create)
+                .put(takeover_ui_session_keep_alive)
+                .delete(takeover_ui_session_revoke),
         );
     if state.takeover_enabled {
         router = router
@@ -667,13 +813,51 @@ async fn token_middleware(
     mut request: axum::extract::Request,
     next: Next,
 ) -> Response {
+    let path = request.uri().path().to_string();
+    if is_takeover_display_path(&path) {
+        if let Some(expected) = state.token.as_deref()
+            && let Some(token) = bearer_token(&request)
+            && constant_time_eq(token.as_bytes(), expected.as_bytes())
+        {
+            request.extensions_mut().insert(AuthInfo {
+                authenticated: true,
+            });
+            return next.run(request).await;
+        }
+        if let Some(handoff) = state.takeover_handoff_auth(&request) {
+            request.extensions_mut().insert(AuthInfo {
+                authenticated: true,
+            });
+            request.extensions_mut().insert(handoff.clone());
+            let mut response = next.run(request).await;
+            // Only a browser panel needs its query credential carried into
+            // asset and WebSocket requests. Lease maintenance uses a header
+            // and must not leave a browser cookie behind.
+            if path.starts_with("/takeover/panel") {
+                set_takeover_handoff_cookie(
+                    &mut response,
+                    &handoff.secret,
+                    handoff.remaining_s,
+                    handoff.secure_cookie,
+                );
+            }
+            return response;
+        }
+        if state.token.is_some() {
+            return unauthorized();
+        }
+        request.extensions_mut().insert(AuthInfo {
+            authenticated: false,
+        });
+        return next.run(request).await;
+    }
+
     let Some(expected) = state.token.as_deref() else {
         request.extensions_mut().insert(AuthInfo {
             authenticated: false,
         });
         return next.run(request).await;
     };
-    let path = request.uri().path().to_string();
     let public_health = path == "/health" && matches!(state.health_public, HealthPublic::Minimal);
     if public_health {
         let supplied = supplied_long_token(&request, true);
@@ -692,31 +876,6 @@ async fn token_middleware(
                 return next.run(request).await;
             }
         }
-    }
-
-    if is_takeover_display_path(&path) {
-        if let Some(t) = bearer_token(&request)
-            && constant_time_eq(t.as_bytes(), expected.as_bytes())
-        {
-            request.extensions_mut().insert(AuthInfo {
-                authenticated: true,
-            });
-            return next.run(request).await;
-        }
-        if let Some(handoff) = state.takeover_handoff_auth(&request) {
-            request.extensions_mut().insert(AuthInfo {
-                authenticated: true,
-            });
-            let mut response = next.run(request).await;
-            set_takeover_handoff_cookie(
-                &mut response,
-                &handoff.secret,
-                handoff.remaining_s,
-                handoff.secure_cookie,
-            );
-            return response;
-        }
-        return unauthorized();
     }
 
     let supplied = supplied_long_token(&request, true);
@@ -760,6 +919,15 @@ fn query_handoff(req: &axum::extract::Request) -> Option<String> {
     url::form_urlencoded::parse(q.as_bytes())
         .find(|(key, _)| key == "handoff_secret" || key == "handoff")
         .map(|(_, value)| value.into_owned())
+}
+
+fn handoff_header(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Handoff ")
+        .map(str::to_owned)
 }
 
 fn cookie_handoff(req: &axum::extract::Request) -> Option<String> {

@@ -216,10 +216,13 @@ async fn build_per_fetch_http_client(builder: &FetchBuilder) -> Result<reqwest::
         reqwest::Client::builder().user_agent(concat!("afhttp/", env!("CARGO_PKG_VERSION")));
     match &builder.http.proxy {
         Some(url) => {
-            let proxy = reqwest::Proxy::all(url).map_err(|e| {
+            // A proxy URL routinely carries `user:password@`, so the value
+            // never appears in the message — and neither does the underlying
+            // error, which quotes the URL it was handed.
+            let proxy = reqwest::Proxy::all(url).map_err(|_| {
                 Error::new(
                     ErrorCode::InvalidArgument,
-                    format!("--proxy-url {url:?}: {e}"),
+                    "--proxy-url: not a usable proxy URL".to_string(),
                 )
             })?;
             b = b.proxy(proxy);

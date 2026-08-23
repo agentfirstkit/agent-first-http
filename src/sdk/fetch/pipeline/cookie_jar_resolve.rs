@@ -127,7 +127,11 @@ pub(crate) fn persist_set_cookies(
     let mut jar = crate::sdk::profile::cookie_jar::CookieJar::load(jar_path)?;
     for line in set_cookie_lines {
         match cookie::Cookie::parse(line.to_string()) {
-            Ok(c) => jar.merge(c.into_owned(), request_url),
+            // A refusal is the jar declining to store something the
+            // response was not allowed to set; nothing else changes.
+            Ok(c) => {
+                let _accepted = jar.merge(c.into_owned(), request_url);
+            }
             Err(_) => continue,
         }
     }
@@ -165,7 +169,7 @@ pub(crate) async fn sync_browser_cookies_to_jar(
     let mut jar = crate::sdk::profile::cookie_jar::CookieJar::load(jar_path)?;
     for entry in cookies {
         if let Some(c) = cdp_cookie_to_set_cookie(&entry) {
-            jar.merge(c, &final_url_parsed);
+            let _accepted = jar.merge(c, &final_url_parsed);
         }
     }
     jar.persist()

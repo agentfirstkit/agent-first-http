@@ -151,9 +151,11 @@ async fn minting_a_credential_opens_a_window_on_a_reachable_panel_and_waits_for_
     let ready = progress(&events);
     assert_eq!(ready["progress"]["code"], "ui_takeover");
     assert_eq!(ready["progress"]["session"], "watch");
-    assert_eq!(ready["progress"]["delivery"], "window");
-    // Announced while it runs, so a person can be pointed at it by name and an
-    // agent never has to handle the credential to do it.
+    assert_eq!(ready["progress"]["mode"], "window");
+    // Present in every mode, because every delivery is announced: a window is
+    // a registry entry too, best effort, and this is that entry's id. afhttp
+    // used to assemble this event by hand and left the field out here; the
+    // facts AFUI hands back do not have a hole in them for one delivery.
     assert!(
         ready["progress"]["session_id"]
             .as_str()
@@ -164,13 +166,11 @@ async fn minting_a_credential_opens_a_window_on_a_reachable_panel_and_waits_for_
         ready["progress"]["panel_url"],
         Value::String(format!("{base}/takeover/panel"))
     );
-    // This run minted the credential, so it reports the deadline it was given.
-    assert!(ready["progress"]["takeover_url_ttl_s"].as_u64().unwrap() > 0);
+    assert!(ready["progress"].get("takeover_url_ttl_s").is_none());
     assert!(
-        ready["progress"]["takeover_url_expires_at_rfc3339"]
-            .as_str()
-            .is_some_and(|value| value.ends_with('Z')),
-        "{ready}"
+        ready["progress"]
+            .get("takeover_url_expires_at_rfc3339")
+            .is_none()
     );
 
     // The stub exited, so the session ended.
@@ -178,6 +178,7 @@ async fn minting_a_credential_opens_a_window_on_a_reachable_panel_and_waits_for_
     assert_eq!(done["result"]["code"], "ui_takeover");
     assert_eq!(done["result"]["outcome"], "closed");
     assert_eq!(done["result"]["session"], "watch");
+    assert_eq!(done["result"]["mode"], "window");
     assert!(done["result"]["open_s"].is_number(), "{done}");
 
     // The credential reached the window and nothing else.
@@ -187,6 +188,15 @@ async fn minting_a_credential_opens_a_window_on_a_reachable_panel_and_waits_for_
     assert!(
         !emitted.contains("handoff_secret"),
         "credential leaked: {emitted}"
+    );
+
+    let revoked = reqwest::get(&opened)
+        .await
+        .expect("request panel after UI delivery ended");
+    assert_eq!(
+        revoked.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "the private upstream lease outlived the AFUI delivery"
     );
 }
 
@@ -206,10 +216,24 @@ async fn an_already_minted_panel_url_needs_no_host_of_its_own() {
     .await
     .expect("driver thread");
 
-    assert_eq!(opened, panel_url);
+    assert!(
+        opened.starts_with(&format!("{base}/takeover/panel?handoff_secret=")),
+        "{opened}"
+    );
+    assert_ne!(
+        opened, panel_url,
+        "the fixed handoff must be exchanged for a UI lease"
+    );
     assert_eq!(status, "200");
-    // No host call was made, so there is no fresh deadline to report — the one
-    // that mattered was reported when the credential was minted.
+    let spent = reqwest::get(&panel_url)
+        .await
+        .expect("request exchanged fixed handoff");
+    assert_eq!(
+        spent.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "exchange left the fixed handoff usable alongside the UI lease"
+    );
+    // The internal source lease never becomes the delivery's public lifetime.
     let ready = progress(&events);
     assert!(
         ready["progress"].get("takeover_url_ttl_s").is_none(),
@@ -239,15 +263,7 @@ fn a_panel_url_that_is_not_a_url_fails_before_a_window_opens() {
         !stub_dir.path().join("url").exists(),
         "a bad URL must be rejected before anything is launched"
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let event: Value = format!("{stdout}{stderr}")
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .find_map(|line| serde_json::from_str(line).ok())
-        .expect("a protocol error event");
-    assert_eq!(event["kind"], "error");
-    assert_eq!(event["error"]["code"], "invalid_endpoint");
+    assert_eq!(error_event(&output)["error"]["code"], "invalid_endpoint");
 }
 
 /// The delivery for a machine with no screen: no window, a listing instead.
@@ -258,6 +274,12 @@ fn a_panel_url_that_is_not_a_url_fails_before_a_window_opens() {
 /// the announcement is real while the command runs and gone when it is not,
 /// because a listing that outlives its owner is exactly the ownerless zombie
 /// AFUI's session criteria forbid.
+///
+/// Driven through `AFUI_DELIVERY` rather than the flag, because that is the
+/// shape a machine with no screen actually runs in: the variable is set once,
+/// and every takeover under it stops reaching for a window. A `--mode` with a
+/// default of its own would swallow this, and nothing else in this suite would
+/// notice.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_windowless_takeover_announces_the_panel_and_withdraws_it_on_the_way_out() {
@@ -268,13 +290,8 @@ async fn a_windowless_takeover_announces_the_panel_and_withdraws_it_on_the_way_o
     let sessions = registry.path().join("sessions");
 
     let child = Command::new(env!("CARGO_BIN_EXE_afhttp"))
-        .args([
-            "ui",
-            "takeover",
-            "--takeover-url-secret",
-            &panel_url,
-            "--takeover-no-window",
-        ])
+        .args(["ui", "takeover", "--takeover-url-secret", &panel_url])
+        .env("AFUI_DELIVERY", "session")
         .env("AFUI_CONFIG_DIR", registry.path())
         // Nothing may be launched here: the point of this delivery is that
         // there is nowhere to launch it.
@@ -304,9 +321,16 @@ async fn a_windowless_takeover_announces_the_panel_and_withdraws_it_on_the_way_o
 
     assert_eq!(entry["provider_id"], "afhttp");
     assert_eq!(entry["ui_kind"], "takeover");
-    // The announced address is the one that actually works, credential and all
-    // — an entry without it names a URL that answers 401.
-    assert_eq!(entry["access_url_secret"], Value::String(panel_url.clone()));
+    // The fixed handoff was exchanged for a process-bound upstream lease. The
+    // registry holds that private source URL; neither one is emitted.
+    let registered_url = entry["access_url_secret"]
+        .as_str()
+        .expect("registered upstream URL");
+    assert!(
+        registered_url.starts_with(&format!("{base}/takeover/panel?handoff_secret=")),
+        "{registered_url}"
+    );
+    assert_ne!(registered_url, panel_url);
     // The announcing process, which is what bounds this session: its upstream
     // is a host that will still be there afterwards.
     assert_eq!(entry["owner_pid"].as_u64(), Some(u64::from(child.id())));
@@ -326,9 +350,9 @@ async fn a_windowless_takeover_announces_the_panel_and_withdraws_it_on_the_way_o
         .map(|line| serde_json::from_str(line).unwrap_or_else(|e| panic!("{line:?}: {e}")))
         .collect();
     agent_first_data::validate_protocol_stream(&events, true).expect("one well-formed stream");
-    assert_eq!(progress(&events)["progress"]["delivery"], "listed");
+    assert_eq!(progress(&events)["progress"]["mode"], "session");
     let done = result(&events);
-    assert_eq!(done["result"]["delivery"], "listed");
+    assert_eq!(done["result"]["mode"], "session");
     assert_eq!(done["result"]["outcome"], "stopped");
 
     let left_behind: Vec<_> = std::fs::read_dir(&sessions)
@@ -341,14 +365,21 @@ async fn a_windowless_takeover_announces_the_panel_and_withdraws_it_on_the_way_o
 
     let emitted = serde_json::to_string(&events).unwrap();
     assert!(!emitted.contains("handoff_secret"), "leaked: {emitted}");
+
+    let revoked = reqwest::get(registered_url)
+        .await
+        .expect("request panel after Session delivery ended");
+    assert_eq!(
+        revoked.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "the private upstream lease outlived the Session delivery"
+    );
 }
 
 /// A registry that cannot be written must not take the window with it.
 ///
-/// The window is the delivery here; the listing is a bonus. Losing the bonus
-/// silently would be the other failure — an agent believing its panel is
-/// listed when it is not — so the silence is made observable instead: no
-/// `session_id` on the ready event means nothing else can see this panel.
+/// The window is the delivery here; the listing is a best-effort bonus, just
+/// as it is for a Router AFUI serves itself.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_window_still_opens_when_the_panel_cannot_be_announced() {
@@ -380,12 +411,156 @@ async fn a_window_still_opens_when_the_panel_cannot_be_announced() {
         .map(|line| serde_json::from_str(line).unwrap_or_else(|e| panic!("{line:?}: {e}")))
         .collect();
     agent_first_data::validate_protocol_stream(&events, true).expect("one well-formed stream");
+    assert_eq!(progress(&events)["progress"]["mode"], "window");
     assert!(
-        progress(&events)["progress"].get("session_id").is_none(),
-        "an unannounced panel must not claim a session id: {events:?}"
+        progress(&events)["progress"]["session_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
     );
     assert_eq!(result(&events)["result"]["outcome"], "closed");
     // And the window really opened on the panel.
     let opened = std::fs::read_to_string(stub_dir.path().join("url")).unwrap_or_default();
-    assert_eq!(opened, panel_url);
+    assert!(opened.starts_with(&format!("{base}/takeover/panel?handoff_secret=")));
+    assert_ne!(opened, panel_url);
+}
+
+/// A Link is AFUI's one-session page, never the upstream takeover URL.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_link_hands_over_an_afui_owned_page_before_it_blocks() {
+    let upstream = spawn_fake_provider().await;
+    // Loopback is enough for the upstream now: AFUI is the LAN listener and
+    // proxies to this private source itself.
+    let base = spawn_host(Some(HOST_TOKEN), upstream).await;
+    let registry = tempfile::tempdir().expect("tmp");
+    let events_path = registry.path().join("events.jsonl");
+    let events_file = std::fs::File::create(&events_path).expect("event file");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_afhttp"))
+        .args([
+            "ui",
+            "takeover",
+            "--endpoint-url",
+            &base,
+            "--token-secret",
+            HOST_TOKEN,
+            "--mode",
+            "link",
+        ])
+        .env("AFUI_CONFIG_DIR", registry.path())
+        // A link opens nothing here; the device that opens it is elsewhere.
+        .env("AFUI_BROWSER_BINARY", "/nonexistent/browser")
+        .env_remove("AFHTTP_ENDPOINT_URL")
+        .env_remove("AFHTTP_TOKEN_SECRET")
+        .stdout(std::process::Stdio::from(events_file))
+        .spawn()
+        .expect("spawn afhttp ui takeover");
+
+    let ready = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let body = std::fs::read_to_string(&events_path).unwrap_or_default();
+            if let Some(event) = body
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .find(|event| event["kind"] == "progress")
+            {
+                return event;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the AFUI Link is emitted before the command waits");
+
+    assert_eq!(ready["progress"]["mode"], "link");
+    let handed_over = ready["progress"][agent_first_ui::cli::LINK_URL_FIELD]
+        .as_str()
+        .unwrap_or_else(|| panic!("a Link must hand back AFUI's URL: {ready}"));
+    assert!(!handed_over.contains("handoff_secret"), "{handed_over}");
+    assert!(!handed_over.starts_with(&base), "{handed_over}");
+    assert_eq!(ready["progress"]["idle_timeout_s"], 900);
+    assert_eq!(ready["progress"]["grace_period_s"], 300);
+    assert_eq!(
+        ready["progress"]["panel_url"],
+        Value::String(format!("{base}/takeover/panel"))
+    );
+
+    // Connect over loopback while retaining the AFUI capability path. The
+    // advertised LAN host may differ, but the listener itself binds every
+    // interface and the shell must already be answering.
+    let mut local_link = url::Url::parse(handed_over).expect("AFUI Link URL");
+    local_link
+        .set_host(Some("127.0.0.1"))
+        .expect("replace advertised host for local test");
+    let status = reqwest::get(local_link)
+        .await
+        .expect("open AFUI Link page")
+        .status();
+    assert_eq!(status, 200, "the AFUI Link page was not reachable");
+
+    let killed = Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .expect("send SIGTERM");
+    assert!(killed.success());
+    let status = child.wait().expect("wait");
+    assert!(status.success(), "{status:?}");
+
+    let events: Vec<Value> = std::fs::read_to_string(&events_path)
+        .expect("read events")
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).unwrap_or_else(|e| panic!("{line:?}: {e}")))
+        .collect();
+    agent_first_data::validate_protocol_stream(&events, true).expect("one well-formed stream");
+
+    let done = result(&events);
+    assert_eq!(done["result"]["mode"], "link");
+    assert_eq!(done["result"]["outcome"], "stopped");
+    assert!(
+        !serde_json::to_string(done)
+            .unwrap()
+            .contains("handoff_secret"),
+        "{done}"
+    );
+}
+
+/// A delivery word that names no delivery is an argument error, whether it was
+/// typed or left in the environment — never a silent fall back to a window,
+/// which is the one failure `AFUI_DELIVERY` exists to prevent.
+#[test]
+fn a_delivery_word_that_names_no_delivery_is_refused() {
+    let output = Command::new(env!("CARGO_BIN_EXE_afhttp"))
+        .args([
+            "ui",
+            "takeover",
+            "--takeover-url-secret",
+            "http://127.0.0.1:9222/takeover/panel?handoff_secret=deadbeef",
+        ])
+        .env("AFUI_DELIVERY", "lan")
+        .env_remove("AFHTTP_ENDPOINT_URL")
+        .env_remove("AFHTTP_TOKEN_SECRET")
+        .output()
+        .expect("run afhttp ui takeover");
+
+    assert!(!output.status.success());
+    let event = error_event(&output);
+    assert_eq!(event["error"]["code"], "invalid_argument");
+    let detail = event["error"]["message"].as_str().unwrap_or_default();
+    for word in ["window", "link", "session"] {
+        assert!(detail.contains(word), "{detail}");
+    }
+}
+
+/// The one protocol error event a failed run emits, from whichever stream it
+/// landed on.
+fn error_event(output: &std::process::Output) -> Value {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    format!("{stdout}{stderr}")
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .find_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| event["kind"] == "error")
+        .expect("a protocol error event")
 }

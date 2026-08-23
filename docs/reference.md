@@ -401,24 +401,25 @@ events rather than one result. It emits a `progress` event once the panel is
 resolved and announced, immediately before it starts waiting:
 
 ```json
-{"kind":"progress","progress":{"code":"ui_takeover","panel_url":"http://127.0.0.1:9222/takeover/panel","session":"watch","delivery":"window","session_id":"59ba685afa343877acf945613eebedad","takeover_url_expires_at_rfc3339":"2026-06-11T00:15:00Z","takeover_url_ttl_s":900},"trace":{}}
+{"kind":"progress","progress":{"code":"ui_takeover","panel_url":"http://127.0.0.1:9222/takeover/panel","session":"watch","mode":"window"},"trace":{}}
 ```
 
 and one terminal `result` when the session ends:
 
 ```json
-{"kind":"result","result":{"code":"ui_takeover","panel_url":"http://127.0.0.1:9222/takeover/panel","session":"watch","delivery":"window","outcome":"closed","open_s":184},"trace":{}}
+{"kind":"result","result":{"code":"ui_takeover","panel_url":"http://127.0.0.1:9222/takeover/panel","session":"watch","mode":"window","outcome":"closed","open_s":184},"trace":{}}
 ```
 
 | Field | Description |
 | --- | --- |
-| `panel_url` | Where the panel is served, without the query. The credential reaches the window and appears in no event. |
+| `panel_url` | Where the upstream panel is served, without its credential. The takeover credential never appears in these events. |
 | `session` | Always `watch`. A VNC canvas has no submit control, so there is nothing for the person to confirm and no typed result to collect. |
-| `delivery` | `window` for a window on this machine, `listed` under `--takeover-no-window`. |
-| `session_id` | What `afui session list` calls this panel. The panel is announced there for as long as the command runs, so an agent can point a person at the right one without ever handling the credential. Absent only when the panel could not be announced at all, which a window delivery survives and `--takeover-no-window` does not: no `session_id` means the window is open and nothing else can see it. |
-| `outcome` | `closed` when the person closed the window; under `--takeover-no-window`, `expired` when the credential's deadline arrived and `stopped` when the command was interrupted. |
+| `mode` | Which of AFUI's three deliveries this run resolved to: `window`, `link`, or `session`. `--mode` names it; with no flag, `AFUI_DELIVERY` does, and failing that it is `window`. |
+| `link_url` | Present only for `link`: the AFUI-owned one-session LAN page. It is a bearer capability — anyone holding it reaches the panel — published here because handing it to a person is what `link` is for, and published under a name no redactor masks for the same reason. The upstream takeover credential remains private behind AFUI's proxy. |
+| `session_id` | The identity to use with `afui session open`, `serve`, or `close`. |
+| `idle_timeout_s`, `grace_period_s` | Present only for `link`: the global AFUI attention policy applied to that remote page. |
+| `outcome` | `closed` when the local window closed, `expired` when an AFUI Link's attention policy lapsed, and `stopped` when the command was interrupted. A registered Session has no AFUI deadline. |
 | `open_s` | How long the session was open. |
-| `takeover_url_expires_at_rfc3339`, `takeover_url_ttl_s` | Present on `progress` only when this run minted the credential; absent when `--takeover-url-secret` supplied one, since its deadline was reported when it was minted. |
 
 ## External Runtime Dependencies
 

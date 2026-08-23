@@ -75,20 +75,7 @@ pub fn emit_process_unredacted<T: Serialize>(code: &str, payload: &T) -> Result<
 /// terminal one, and on a split route it lands on the diagnostic stream, so a
 /// caller reading only `result` is unaffected.
 pub fn emit_process_progress<T: Serialize>(code: &str, payload: &T) -> Result<(), Error> {
-    let value = prepare_payload(code, payload)?;
-    let event = agent_first_data::json_progress(value).build();
-    let mut emitter = agent_first_data::CliEmitter::from_output_to_with(
-        output_to(),
-        agent_first_data::OutputFormat::Json,
-        output_options(RedactionMode::Default),
-    )
-    .with_strict_protocol();
-    emitter.emit(event).map_err(|error| {
-        Error::new(
-            crate::shared::error::ErrorCode::InternalError,
-            error.to_string(),
-        )
-    })
+    emit_process_progress_value(prepare_payload(code, payload)?, RedactionMode::Default)
 }
 
 /// Emit an otherwise-redacted result while intentionally revealing only the
@@ -97,6 +84,25 @@ pub fn emit_process_progress<T: Serialize>(code: &str, payload: &T) -> Result<()
 pub fn emit_process_revealing_takeover<T: Serialize>(code: &str, payload: &T) -> Result<(), Error> {
     let value = prepare_revealed_takeover_payload(code, payload)?;
     emit_process_value(value, RedactionMode::None)
+}
+
+fn emit_process_progress_value(
+    value: serde_json::Value,
+    redaction: RedactionMode,
+) -> Result<(), Error> {
+    let event = agent_first_data::json_progress(value).build();
+    let mut emitter = agent_first_data::CliEmitter::from_output_to_with(
+        output_to(),
+        agent_first_data::OutputFormat::Json,
+        output_options(redaction),
+    )
+    .with_strict_protocol();
+    emitter.emit(event).map_err(|error| {
+        Error::new(
+            crate::shared::error::ErrorCode::InternalError,
+            error.to_string(),
+        )
+    })
 }
 
 #[derive(Clone, Copy)]

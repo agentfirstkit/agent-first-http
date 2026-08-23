@@ -140,10 +140,12 @@ async fn run_inner(args: Args) -> Result<(), FetchRunError> {
         builder = builder.body(bytes);
     }
     for raw in &args.form {
+        // A form field is as likely to be a password as anything else on this
+        // command line.
         let (k, v) = raw.split_once('=').ok_or_else(|| {
             Error::new(
                 ErrorCode::InvalidArgument,
-                format!("--form: expected key=value, got {raw:?}"),
+                "--form: expected KEY=VALUE, with an equals sign separating them".to_string(),
             )
         })?;
         builder = builder.form_field(k, v);
@@ -439,18 +441,23 @@ fn parse_artifact(token: &str) -> Option<Artifact> {
     })
 }
 
+// The two arguments most likely to be carrying a credential are the two whose
+// parse errors used to quote them back — `--header` holds `Authorization`, and
+// `--cookie` holds a session. `docs/cli.md` already promises that no domain
+// error quotes a raw value, because an error event is routinely logged; these
+// say what was wrong with the shape and nothing about the contents.
 fn parse_header_arg(raw: &str) -> Result<(String, String), Error> {
     let (name, value) = raw.split_once(':').ok_or_else(|| {
         Error::new(
             ErrorCode::InvalidArgument,
-            format!("--header: expected K:V, got {raw:?}"),
+            "--header: expected NAME:VALUE, with a colon separating them".to_string(),
         )
     })?;
     let name = name.trim();
     if name.is_empty() {
         return Err(Error::new(
             ErrorCode::InvalidArgument,
-            format!("--header: header name must not be empty in {raw:?}"),
+            "--header: the header name before the colon must not be empty".to_string(),
         ));
     }
     Ok((name.to_string(), value.trim_start().to_string()))
@@ -460,16 +467,22 @@ fn parse_cookie_arg(raw: &str) -> Result<FetchCookie, Error> {
     if !raw.contains('=') {
         return Err(Error::new(
             ErrorCode::InvalidArgument,
-            format!("--cookie: expected Set-Cookie style name=value, got {raw:?}"),
+            "--cookie: expected Set-Cookie style NAME=VALUE, with an equals sign separating them"
+                .to_string(),
         ));
     }
     let cookie = FetchCookie::parse(raw.to_string())
-        .map_err(|e| Error::new(ErrorCode::InvalidArgument, format!("--cookie: {e}")))?
+        .map_err(|_| {
+            Error::new(
+                ErrorCode::InvalidArgument,
+                "--cookie: not a parseable Set-Cookie value".to_string(),
+            )
+        })?
         .into_owned();
     if cookie.name().trim().is_empty() {
         return Err(Error::new(
             ErrorCode::InvalidArgument,
-            format!("--cookie: cookie name must not be empty in {raw:?}"),
+            "--cookie: the cookie name before the equals sign must not be empty".to_string(),
         ));
     }
     Ok(cookie)
@@ -492,6 +505,43 @@ mod tests {
             endpoint: "ws://127.0.0.1:9222".into(),
             token_secret: token_secret.map(agent_first_data::value_source::SecretString::new),
         }
+    }
+
+    /// `docs/cli.md` promises that no domain error quotes a raw value, because
+    /// error events are routinely logged and these two arguments are where a
+    /// credential lives. Canary values, so a regression is unmistakable.
+    #[test]
+    fn a_malformed_credential_argument_is_never_quoted_back() {
+        const CANARY: &str = "CANARY-SECRET-VALUE";
+
+        let header = parse_header_arg(&format!("Authorization Bearer {CANARY}"))
+            .expect_err("a header with no colon is invalid");
+        assert!(
+            !header.to_string().contains(CANARY),
+            "header error leaked its value: {header}"
+        );
+
+        let empty_name =
+            parse_header_arg(&format!(": {CANARY}")).expect_err("a header with no name is invalid");
+        assert!(!empty_name.to_string().contains(CANARY));
+
+        let engine_env = crate::cli::cmd::host::parse_engine_env(&format!("PROXY{CANARY}"))
+            .expect_err("an engine env with no equals sign is invalid");
+        assert!(
+            !engine_env.to_string().contains(CANARY),
+            "engine env error leaked its value: {engine_env}"
+        );
+
+        let cookie = parse_cookie_arg(&format!("session{CANARY}"))
+            .expect_err("a cookie with no equals sign is invalid");
+        assert!(
+            !cookie.to_string().contains(CANARY),
+            "cookie error leaked its value: {cookie}"
+        );
+
+        let empty_cookie =
+            parse_cookie_arg(&format!("={CANARY}")).expect_err("a cookie with no name is invalid");
+        assert!(!empty_cookie.to_string().contains(CANARY));
     }
 
     /// The unreached case: a plain fetch has no host, which is what keeps the

@@ -2,20 +2,27 @@
 
 This project optimizes for functional correctness and protocol stability, not stress/performance testing.
 
+`tests/test.sh` is the one entrypoint: CI, the monorepo driver, and the release
+gate all call it, so a mode cannot mean one thing locally and another in CI.
+It is written against the [`agent-first-data`](https://github.com/agentfirstkit/agent-first-data)
+Bash kit, so `afdata` has to be on `PATH` (or named by `AFDATA_BIN`) to drive
+the harness — the container it drives needs none of that. Everything cargo
+touches runs inside that container; nothing in this suite is built on the host.
+
 ## Default Gates
 
 Run on every PR.
 
 1. Static checks
-   - `bash tests/test.sh static` (runs `cargo fmt`, `cargo build`, and `cargo clippy` inside Docker)
+   - `bash tests/test.sh static` (runs ShellCheck at the pinned version on the host, then `cargo fmt`, `cargo build`, and `cargo clippy` inside the selected test container)
 
 2. Unit + component tests
-   - `bash tests/test.sh unit` (runs lib/bin tests plus `tests/check_regressions.sh` inside Docker)
+   - `bash tests/test.sh unit` (runs lib/bin tests plus `tests/check_regressions.sh` inside the selected test container)
    - Focus: argument parsing, endpoint URL handling, fetch builder shape, CDP message framing, artifact path resolution, observation/network schema serialization, health/capabilities clients, SDK error mapping.
    - No browser process required.
 
 3. Regression list
-   - Covered by `bash tests/test.sh unit`; it runs `tests/check_regressions.sh` inside Docker.
+   - Covered by `bash tests/test.sh unit`; it runs `tests/check_regressions.sh` inside the selected test container.
    - Every production bug fix adds or updates a regression entry.
 
 ## Browser Integration Suite
@@ -76,11 +83,20 @@ When none is found, the suite is **skipped, not failed**, with a clear log line 
 
 ### Running locally
 
+Native arm64 test images do not need Rosetta. If Apple `container` reports that
+Rosetta is unavailable while creating its builder, set the user configuration
+at `~/.config/container/config.toml` before running the fixed gate:
+
+```toml
+[build]
+rosetta = false
+```
+
 ```bash
-# Default gates only (Docker)
+# Default gates (Apple container on local macOS)
 bash tests/test.sh
 
-# Full integration suite (Docker)
+# Full integration suite (Apple container on local macOS)
 bash tests/test.sh integration
 
 # The integration mode runs real test files including:
@@ -109,6 +125,10 @@ normal desktops:
 The matrix sets `RUST_MIN_STACK=16 MiB` so the deep fetch/host future chain
 doesn't overflow Windows' small default thread stack.
 
+The fixed harness selects Apple `container` on local macOS and Docker in CI.
+`AFHTTP_TEST_CONTAINER_RUNTIME=apple|docker` is available for an explicit
+backend check; ordinary local runs need no override.
+
 The flaky-by-design **display takeover** suite runs in its own non-blocking
 nightly workflow (`.github/workflows/takeover-panel.yml`), not in the gating
 `ci.yml`. The Lightpanda backend is exercised inside `integration-docker` when
@@ -125,7 +145,7 @@ timing-sensitive and version-dependent.
 
 `tests/takeover-in-workbench.sh` is the other half, and is deliberately not a
 gate. It takes a real takeover — Xvnc, a headful browser on its display, a real
-`afhttp ui takeover --takeover-no-window` — and puts it behind
+`afhttp ui takeover --mode session` — and puts it behind
 `agent-first-ui`'s `afui session serve`, then drives the result with a real
 Chromium over CDP. It reports what it observed (HTTP statuses, the first RFB
 frame off the WebSocket, what each browser document says about its own origin

@@ -804,35 +804,45 @@ fn tabs_close_command() -> CommandSpec {
 /// would be a second, pointless handoff. Registering that as two shapes rather
 /// than one shape plus a runtime check means the illegal mix — a URL *and* an
 /// endpoint, with nothing to say which wins — is rejected by the parser.
+///
+/// `--mode` deliberately has no default. AFUI resolves an absent one against
+/// `AFUI_DELIVERY`, and a default here would be indistinguishable from a person
+/// having typed `--mode window` — which is how an unattended machine ends up
+/// popping a window nobody is there to see.
 fn ui_takeover_command() -> CommandSpec {
     CommandSpec::new(["ui", "takeover"])
-        .about(
-            "Open the takeover panel in an isolated window and block until the person closes it.",
-        )
+        .about("Put the takeover panel in front of a person and block until that session ends.")
         .arg(endpoint_arg())
         .arg(token_arg())
         .arg(
             ArgSpec::option("--takeover-url-secret", "URL")
                 .about("Panel URL a previous `panel` or `fetch --takeover` already minted"),
         )
-        .arg(ArgSpec::flag("--takeover-no-window").about(
-            "Publish the panel for `afui session list` and wait, instead of opening a window",
-        ))
+        .arg(delivery_mode_arg())
         .combination(
             Combination::new("ui-takeover")
                 .action("ui_takeover")
-                .about("Mint a fresh panel credential from a running host, then open it")
-                .optional(["endpoint_url", "token_secret", "takeover_no_window"])
+                .about("Mint a fresh panel credential from a running host, then deliver it")
+                .optional(["endpoint_url", "token_secret", "mode"])
                 .output(stream_output()),
         )
         .combination(
             Combination::new("ui-takeover-url")
                 .action("ui_takeover")
-                .about("Open a panel URL that was already minted; needs no host of its own")
+                .about("Deliver a panel URL that was already minted; needs no host of its own")
                 .required(["takeover_url_secret"])
-                .optional(["takeover_no_window"])
+                .optional(["mode"])
                 .output(stream_output()),
         )
+}
+
+/// Which deliveries a takeover panel offers, declared once: this flag and the
+/// plan `cmd::ui` builds come from the same value.
+pub(crate) const PANEL_DELIVERY: agent_first_ui::cli::UiDeliveryOffer =
+    agent_first_ui::cli::UiDeliveryOffer::WithLink;
+
+fn delivery_mode_arg() -> ArgSpec {
+    PANEL_DELIVERY.arg("--mode")
 }
 
 // ── skill ───────────────────────────────────────────────────────────────────

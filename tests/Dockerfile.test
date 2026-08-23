@@ -4,7 +4,7 @@
 # build/test/clippy cycle runs in a container with chromium preinstalled
 # instead of polluting the host with browser packages and chromiumoxide native deps.
 #
-# Usage is via tests/run-in-docker.sh (which builds from this file with the
+# Usage is via tests/run-in-container.sh (which builds from this file with the
 # spore root as the build context). Source is mounted as a volume; cargo registry
 # + target dirs live in named volumes so iteration is fast.
 
@@ -67,7 +67,7 @@ COPY container/docker/install-browser-policy.sh /usr/local/bin/install-browser-p
 RUN chmod +x /usr/local/bin/install-browser-policy.sh \
     && install-browser-policy.sh
 
-# Cargo caches live on named volumes so docker rebuilds don't redownload crates.
+# Cargo caches live on named volumes so image rebuilds do not redownload crates.
 ENV CARGO_HOME=/cargo-home \
     CARGO_TARGET_DIR=/cargo-target \
     AFHTTP_TEST_BROWSER_BIN=/usr/bin/chromium \

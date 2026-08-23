@@ -137,7 +137,7 @@ command ui takeover
   arg endpoint_url --endpoint-url
   arg token_secret --token-secret
   arg takeover_url_secret --takeover-url-secret
-  arg takeover_no_window --takeover-no-window
+  arg mode --mode <window|link|session>
   shape ui-takeover -> ui_takeover
   shape ui-takeover-url -> ui_takeover
 command skill

@@ -21,28 +21,53 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPORE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-IMAGE_TAG="${AFHTTP_DOCKER_IMAGE:-afhttp-test:local}"
+IMAGE_TAG="${AFHTTP_TEST_CONTAINER_IMAGE:-${AFHTTP_DOCKER_IMAGE:-afhttp-test:local}}"
 
-# Reuse run-in-docker.sh's image-build logic so we never duplicate it.
+CONTAINER_RUNTIME="${AFHTTP_TEST_CONTAINER_RUNTIME:-}"
+if [ -z "$CONTAINER_RUNTIME" ]; then
+  if [ "${CI:-}" = "true" ]; then
+    CONTAINER_RUNTIME="docker"
+  elif [ "$(uname -s)" = "Darwin" ]; then
+    CONTAINER_RUNTIME="apple"
+  else
+    CONTAINER_RUNTIME="docker"
+  fi
+fi
+case "$CONTAINER_RUNTIME" in
+  apple) CONTAINER_BIN="container" ;;
+  docker) CONTAINER_BIN="docker" ;;
+  *)
+    echo "AFHTTP_TEST_CONTAINER_RUNTIME must be apple or docker" >&2
+    exit 2
+    ;;
+esac
+
+# Reuse the generic harness's image-build logic so we never duplicate it.
 # Running any trivial command makes it build the image if missing.
-"$SCRIPT_DIR/run-in-docker.sh" bash -c 'true'
+"$SCRIPT_DIR/run-in-container.sh" bash -c 'true'
 
-DOCKER_FLAGS=(--rm)
+CONTAINER_FLAGS=(--rm)
 # Only attach a TTY when stdin/stdout are real terminals — running from
 # CI, a pipe, or a non-interactive shell otherwise dies with
 # "the input device is not a TTY".
 if [ -t 0 ] && [ -t 1 ]; then
-  DOCKER_FLAGS+=(-it)
+  CONTAINER_FLAGS+=(-it)
 fi
-DOCKER_FLAGS+=(-e CARGO_HOME=/cargo-home -e CARGO_TARGET_DIR=/cargo-target)
+if [ "$CONTAINER_RUNTIME" = "apple" ]; then
+  CONTAINER_FLAGS+=(
+    --cpus "${AFHTTP_TEST_CONTAINER_CPUS:-8}"
+    --memory "${AFHTTP_TEST_CONTAINER_MEMORY:-16g}"
+  )
+fi
+CONTAINER_FLAGS+=(-e CARGO_HOME=/cargo-home -e CARGO_TARGET_DIR=/cargo-target)
 # Forward the host port so a Mac browser can hit the in-container listener.
-DOCKER_FLAGS+=(-p 127.0.0.1:9222:9222)
+CONTAINER_FLAGS+=(-p 127.0.0.1:9222:9222)
 AFDATA_MOUNT=()
 if [ -d "$SPORE_DIR/../agent-first-data" ]; then
   AFDATA_MOUNT=(-v "$SPORE_DIR/../agent-first-data:/agent-first-data")
 fi
 
-exec docker run "${DOCKER_FLAGS[@]}" \
+exec "$CONTAINER_BIN" run "${CONTAINER_FLAGS[@]}" \
   -v "$SPORE_DIR:/workspace" \
   "${AFDATA_MOUNT[@]}" \
   -v afhttp-cargo-home:/cargo-home \

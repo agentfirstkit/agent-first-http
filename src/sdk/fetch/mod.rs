@@ -483,6 +483,20 @@ impl FetchBuilder {
     ///
     /// This is what the CLI uses to emit `kind: "error"` events with a
     /// fetch-local `trace` without adding trace fields to the global `Error`.
+    // Boxing the error would not make this `Result` any smaller: `FetchResult`
+    // carries the same `Trace` this error does, plus a couple of dozen fields
+    // more, so the `Ok` variant sizes the whole thing either way. The lint's
+    // premise — that a large `Err` is what is bloating the return — does not
+    // hold here, and the assertion below is what keeps that true.
+    // `allow`, not `expect`: this crate's gate builds in a container whose
+    // toolchain is pinned separately from a developer's, and the two do not
+    // always agree on whether this lint fires. An `expect` is wrong in whichever
+    // one does not emit it. The assertion below is what actually holds the
+    // reasoning, and it does not depend on a clippy version.
+    #[allow(
+        clippy::result_large_err,
+        reason = "FetchResult is the larger variant; see the size assertion in this module"
+    )]
     pub async fn send_detailed(self) -> Result<FetchResult, FetchError> {
         if self.retry.attempts == 0 {
             return execute_once_with_timeout(self).await;
@@ -503,6 +517,19 @@ impl FetchBuilder {
     }
 }
 
+/// The `Ok` variant is the larger of the two, so the error's size does not
+/// decide this `Result`'s. Checked at compile time rather than believed: if
+/// `FetchResult` ever shrinks below `FetchError`, this stops holding and the
+/// `expect` attributes above become wrong.
+const _: () = assert!(
+    std::mem::size_of::<FetchResult>() >= std::mem::size_of::<FetchError>(),
+    "FetchError is now the larger variant; box it instead of allowing result_large_err"
+);
+
+#[allow(
+    clippy::result_large_err,
+    reason = "FetchResult is the larger variant; see the size assertion above"
+)]
 async fn execute_once_with_timeout(builder: FetchBuilder) -> Result<FetchResult, FetchError> {
     let timeout = builder.timeout;
     let render_mode = builder.render.as_trace();

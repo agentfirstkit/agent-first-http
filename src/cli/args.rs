@@ -16,6 +16,7 @@
 use std::path::PathBuf;
 
 use agent_first_data::{CliValue, ResolvedInvocation, ValueSource};
+use agent_first_ui::UiDeliveryMode;
 
 use crate::cli::cmd;
 use crate::cli::connect::Connection;
@@ -463,7 +464,12 @@ fn tabs_close(invocation: &ResolvedInvocation) -> Projected {
 /// declares. An already-minted URL carries its own credential, so that shape
 /// never reaches for a host — no environment fallback, and no discovery, which
 /// would otherwise make a stray variable or a stray container look load-bearing.
+///
+/// The third environment fallback this file applies lives here: an absent
+/// `--mode` is AFUI's to resolve, against `AFUI_DELIVERY` and then a window.
 fn ui_takeover(invocation: &ResolvedInvocation) -> Projected {
+    let explicit = agent_first_ui::cli::delivery_of(invocation, "mode").map_err(delivery_error)?;
+    let delivery = UiDeliveryMode::resolve(explicit).map_err(delivery_error)?;
     let takeover = match opt_string(invocation, "takeover_url_secret") {
         Some(takeover_url_secret) => cmd::ui::TakeoverArgs::Open {
             takeover_url_secret,
@@ -474,12 +480,15 @@ fn ui_takeover(invocation: &ResolvedInvocation) -> Projected {
     };
     Ok(Command::Ui(cmd::ui::Args {
         sub: cmd::ui::UiSub::Takeover(takeover),
-        delivery: if flag(invocation, "takeover_no_window") {
-            cmd::ui::Delivery::Listed
-        } else {
-            cmd::ui::Delivery::Window
-        },
+        delivery,
     }))
+}
+
+/// A delivery word that does not name a delivery — typed, or left in
+/// `AFUI_DELIVERY` — is an argument error, and AFUI's message already names
+/// all three words.
+fn delivery_error(error: agent_first_ui::Error) -> Error {
+    Error::new(ErrorCode::InvalidArgument, error.to_string())
 }
 
 fn skill_status(invocation: &ResolvedInvocation) -> Projected {

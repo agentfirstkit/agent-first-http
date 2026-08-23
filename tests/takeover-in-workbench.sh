@@ -24,4 +24,4 @@ if [ ! -d "$SPORE_DIR/../agent-first-ui" ]; then
   exit 2
 fi
 
-exec "$SCRIPT_DIR/run-in-docker.sh" python3 tests/takeover_in_workbench.py "$@"
+exec "$SCRIPT_DIR/run-in-container.sh" python3 tests/takeover_in_workbench.py "$@"

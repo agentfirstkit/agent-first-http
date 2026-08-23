@@ -8,47 +8,44 @@
 //! carries no submit control, so there is nothing for the person to confirm and
 //! no typed result to collect.
 //!
-//! Two deliveries of that one session, because the person is not always at this
-//! machine. A window is the local one: it opens here, and closing it is the
-//! ending. `--takeover-no-window` is the remote one: the panel is announced to
-//! the cross-process session registry so `afui session list` can see it and
-//! `afui session serve` can frame it on a phone, and the ending is the
-//! credential running out or this command being stopped. The panel is announced
-//! either way — a person at this machine may still want it on their phone.
+//! Three deliveries of that one session, because the person is not always at
+//! this machine, and the way to them is not always this machine's screen.
+//! `--mode` names which, in AFUI's own three words, and an unset flag means
+//! `AFUI_DELIVERY` decides — the variable an unattended runner sets once so
+//! nothing under it pops a window nobody is there to see.
 //!
-//! The credential in that panel URL is the host's, not AFUI's. AFUI is told
-//! where the panel is and lists it; afhttp minted the credential, afhttp's TTL
-//! governs it, and afhttp revokes it on a profile switch or host shutdown.
-//! Ending this command withdraws the listing and nothing else.
+//! * `window` opens the panel here, and closing it is the ending.
+//! * `link` starts AFUI's one-session remote page and hands back that page's
+//!   URL. The takeover credential stays behind AFUI's proxy.
+//! * `session` announces the panel and nothing more, for `afui session serve`
+//!   to frame later.
+//!
+//! All three go through [`agent_first_ui::UiDeliveryPlan`]. The separately
+//! hosted panel uses a short internal lease which this process renews while the
+//! AFUI delivery exists and revokes when it ends. That lease is crash cleanup,
+//! never the user-visible lifetime of a Link or Session.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use agent_first_ui::{UiUpstream, UiWindow, UiWindowConfig};
+use agent_first_ui::{UiDeliveryMode, UiUpstream};
 use serde::Serialize;
 
 use crate::cli::connect::Connection;
 use crate::cli::output;
+use crate::sdk::takeover::TakeoverUiSession;
 use crate::shared::error::{Error, ErrorCode};
 
 #[derive(Debug)]
 pub struct Args {
     pub sub: UiSub,
-    pub delivery: Delivery,
+    /// Already resolved against `AFUI_DELIVERY`, because the flag having no
+    /// default of its own is what lets that variable be reached at all.
+    pub delivery: UiDeliveryMode,
 }
 
 #[derive(Debug)]
 pub enum UiSub {
     Takeover(TakeoverArgs),
-}
-
-/// How the panel is put in front of a person.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Delivery {
-    /// An isolated window on this machine. Closing it ends the session.
-    Window,
-    /// No window: the session is left in the registry for a shell to frame,
-    /// and this command waits.
-    Listed,
 }
 
 #[derive(Debug)]
@@ -60,29 +57,23 @@ pub enum TakeoverArgs {
     Open { takeover_url_secret: String },
 }
 
-/// Emitted before the session blocks.
+/// afhttp's own half of the event AFUI has made reachable.
 ///
-/// `session_id` is absent exactly when the panel could not be announced, which
-/// only a window delivery survives. Absence is the signal: a window is open, and
-/// nothing else can see it.
+/// The delivery half — mode, session identity, the bearer URL when there is
+/// one, the attention intervals — is AFUI's and is merged in rather than
+/// restated here, so afhttp cannot drift from what every other AFUI-delivered
+/// UI reports.
+///
+/// The upstream takeover credential is not in either half and never reaches
+/// output: the URL a `link` publishes is AFUI's own shell URL, which keeps
+/// that credential behind its proxy.
 #[derive(Serialize)]
 struct UiReady {
-    /// Where the panel is served, credential-free — the secret stays out of
-    /// every event this command emits.
+    /// Where the upstream panel is served, credential-free.
     panel_url: String,
     /// No submit control on a VNC canvas: the person watches and acts, and the
     /// session ends without a result.
     session: &'static str,
-    /// How this session is being put in front of a person.
-    delivery: &'static str,
-    /// What `afui session list` calls this panel, so an agent can point a
-    /// person at the right one without ever handling the credential.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    session_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    takeover_url_expires_at_rfc3339: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    takeover_url_ttl_s: Option<u64>,
 }
 
 /// The terminal event: the session is over, so the person is done with it.
@@ -90,12 +81,26 @@ struct UiReady {
 struct UiTakeoverResult {
     panel_url: String,
     session: &'static str,
-    delivery: &'static str,
+    mode: &'static str,
     outcome: &'static str,
     open_s: u64,
 }
 
 const SESSION_KIND: &str = "watch";
+
+/// afhttp's fields and AFUI's delivery facts, as one event.
+fn ready_event<T: Serialize>(
+    facts: &agent_first_ui::UiDeliveryFacts,
+    own: T,
+) -> Result<serde_json::Value, Error> {
+    let own = serde_json::to_value(own).map_err(|error| {
+        Error::new(
+            ErrorCode::InternalError,
+            format!("build takeover UI readiness event: {error}"),
+        )
+    })?;
+    Ok(agent_first_ui::cli::ready_event_revealing_link(facts, own))
+}
 
 /// The Provider and UI identifiers this panel is listed under. `takeover` is
 /// the `ui_kind` an AFUI frontend override would key on, if a panel afhttp did
@@ -109,129 +114,140 @@ pub async fn run(args: Args) -> Result<(), Error> {
     }
 }
 
-async fn takeover_run(args: TakeoverArgs, delivery: Delivery) -> Result<(), Error> {
+async fn takeover_run(args: TakeoverArgs, delivery: UiDeliveryMode) -> Result<(), Error> {
     let panel = resolve_panel(args).await?;
-    let panel_url = credential_free_panel_url(&panel.url)?;
+    let panel_url = credential_free_panel_url(panel.lease.takeover_url_secret())?;
+    // AFUI refuses an https upstream behind `link` or `session` — its remote
+    // shell proxies plain HTTP, and a window needs no proxy because the browser
+    // talks to the panel directly. Saying so here rather than letting that
+    // refusal arrive from `start_upstream` matters because a credential has
+    // already been minted by this point: caught here it is given straight back,
+    // and caught later it is a live capability nobody asked for.
+    if let Err(reason) = window_only_upstream(&panel_url, delivery) {
+        let _revoked = panel.lease.revoke().await;
+        return Err(reason);
+    }
+    let upstream = UiUpstream::new(PROVIDER_ID, UI_KIND, panel.lease.takeover_url_secret())
+        .map_err(delivery_error)?
+        .with_subject(&panel_url);
+    // The same offer the `--mode` flag was built from.
+    let active = crate::cli::spec::PANEL_DELIVERY
+        .resolve(Some(delivery))
+        .map_err(delivery_error)?
+        .start_upstream(upstream)
+        .await
+        .map_err(delivery_error)?;
 
-    // Announced before the wait starts, for both deliveries: a window is where
-    // the person at this machine looks, and the registry is where a person
-    // holding a phone looks. Held for exactly as long as this command runs —
-    // the listing is withdrawn on the way out of this function, and pruned by
-    // whoever reads the registry next if this process dies instead.
-    //
-    // Failing to announce is fatal for one delivery and not the other, because
-    // the deliveries do not depend on it equally: without a window the listing
-    // *is* the delivery, and with one the panel is already in front of the
-    // person. So a window opens anyway — and says so by carrying no
-    // `session_id`, which is the difference an agent can see.
-    let announced = UiUpstream::new(PROVIDER_ID, UI_KIND, &panel.url)
-        .and_then(|upstream| upstream.with_subject(&panel_url).announce());
-    let announced = match (announced, delivery) {
-        (Ok(announced), _) => Some(announced),
-        (Err(error), Delivery::Listed) => {
-            return Err(Error::new(
-                ErrorCode::InternalError,
-                format!(
-                    "could not publish the takeover panel as a UI session: {error}. \
-                     Without a window there is nothing else to deliver it with."
-                ),
-            ));
-        }
-        (Err(_), Delivery::Window) => None,
-    };
-
-    output::emit_progress(
-        "ui_takeover",
-        &UiReady {
+    // The one event whose job is to hand a `link` URL over. AFUI publishes it
+    // under a name the emitter will not mask, so this goes out the ordinary
+    // way — afhttp used to carry an emitter of its own that redacted the event
+    // and then put this one field back.
+    let ready = ready_event(
+        &active.facts(),
+        UiReady {
             panel_url: panel_url.clone(),
             session: SESSION_KIND,
-            delivery: delivery.as_str(),
-            session_id: announced
-                .as_ref()
-                .map(|announced| announced.metadata().session_id.to_string()),
-            takeover_url_expires_at_rfc3339: panel.expires_at_rfc3339,
-            takeover_url_ttl_s: panel.ttl_s,
         },
     )?;
+    output::emit_progress("ui_takeover", &ready)?;
 
     let opened_at = Instant::now();
-    let outcome = match delivery {
-        Delivery::Window => wait_on_window(&panel.url).await?,
-        Delivery::Listed => wait_while_listed(panel.ttl_s).await,
+    // AFUI owns every delivery-specific ending. afhttp contributes only the
+    // process shutdown signal and the private upstream lease maintenance.
+    let ended = {
+        let delivery_wait = active.wait();
+        let keep_alive = panel.lease.keep_alive();
+        tokio::pin!(delivery_wait);
+        tokio::pin!(keep_alive);
+        tokio::select! {
+            result = &mut delivery_wait => result
+                .map(|outcome| outcome.ending())
+                .map_err(delivery_error),
+            () = stop_requested() => Ok("stopped"),
+            result = &mut keep_alive => match result {
+                Err(error) => Err(error),
+                Ok(()) => Err(Error::new(
+                    ErrorCode::InternalError,
+                    "takeover UI session keep-alive ended unexpectedly",
+                )),
+            },
+        }
     };
-    drop(announced);
+    let revoked = panel.lease.revoke().await;
+    let outcome = ended?;
+    revoked?;
 
     output::emit(
         "ui_takeover",
         &UiTakeoverResult {
             panel_url,
             session: SESSION_KIND,
-            delivery: delivery.as_str(),
+            mode: delivery.as_str(),
             outcome,
             open_s: opened_at.elapsed().as_secs(),
         },
     )
 }
 
-impl Delivery {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Window => "window",
-            Self::Listed => "listed",
-        }
+/// Whether this panel can only be delivered as a local window.
+///
+/// A takeover host behind TLS is a perfectly good panel; what it is not is
+/// something AFUI's remote shell can proxy, because that shell speaks plain
+/// HTTP to its upstream. `window` never proxies at all — the browser opens the
+/// panel itself — so it is the one delivery that still works.
+fn window_only_upstream(panel_url: &str, delivery: UiDeliveryMode) -> Result<(), Error> {
+    if delivery == UiDeliveryMode::Window || !panel_url.starts_with("https://") {
+        return Ok(());
     }
+    Err(Error::new(
+        ErrorCode::InvalidEndpoint,
+        format!(
+            "`{}` delivery cannot proxy the https panel at {panel_url}; use `--mode window`, \
+             which opens it directly and needs no proxy",
+            delivery.as_str()
+        ),
+    ))
 }
 
-/// Open the panel here and wait for the person to close it.
-async fn wait_on_window(url_secret: &str) -> Result<&'static str, Error> {
-    // No window is the same failure as no browser: the machine running the
-    // agent has nowhere to show a person the panel. That is the case
-    // `--takeover-no-window` exists for, so the error says so.
-    let mut window = UiWindow::launch(url_secret, &UiWindowConfig::default()).map_err(|error| {
-        Error::new(
-            ErrorCode::BrowserLaunchFailed,
-            format!(
-                "could not open a takeover window: {error}. \
-                 This delivery needs a display and a Chromium-family browser on this machine; \
-                 use `--takeover-no-window` to hand the panel to a phone through \
-                 `afui session serve`, or `afhttp panel` to hand the URL to someone else."
-            ),
-        )
-    })?;
-    window.wait_closed().await.map_err(|error| {
-        Error::new(
-            ErrorCode::InternalError,
-            format!("waiting on the takeover window: {error}"),
-        )
-    })?;
-    Ok("closed")
-}
+/// One AFUI failure, in afhttp's vocabulary.
+///
+/// Keyed on AFUI's own classification rather than on its variants, and
+/// exhaustive over it. The comment here used to claim that a new AFUI variant
+/// "lands in the category it was classified as" — it did not: the arms named
+/// individual classifications and everything else fell into `InternalError`,
+/// so every classification AFUI added later would have been reported as an
+/// afhttp bug. Now there is no wildcard, and adding one stops this compiling
+/// until somebody says which afhttp error it is.
+fn delivery_error(error: agent_first_ui::Error) -> Error {
+    use agent_first_ui::UiErrorKind;
 
-/// Hold the session open for whoever is framing it, and say how it ended.
-///
-/// A panel with no window here has no close event to wait on, so the two
-/// endings left are the ones that are still real: the credential afhttp minted
-/// runs out, or the agent stops waiting. Both bound the session by this
-/// process, which is what §4.6 asks — there is no page left hanging either way,
-/// because the listing goes when this returns.
-///
-/// A panel opened from an already-minted URL has no lifetime this command
-/// knows, so only the second ending applies.
-async fn wait_while_listed(ttl_s: Option<u64>) -> &'static str {
-    let stopped = stop_requested();
-    match ttl_s {
-        Some(ttl_s) => {
-            let expiry = tokio::time::sleep(Duration::from_secs(ttl_s));
-            tokio::select! {
-                () = expiry => "expired",
-                () = stopped => "stopped",
-            }
+    let error_code = match error.kind() {
+        UiErrorKind::WindowUnavailable | UiErrorKind::WindowWaitFailed => {
+            ErrorCode::BrowserLaunchFailed
         }
-        None => {
-            stopped.await;
-            "stopped"
+        UiErrorKind::InvalidArgument | UiErrorKind::UpstreamNotProxyable => {
+            ErrorCode::InvalidEndpoint
         }
-    }
+        // The panel is asked for by `--mode`, so a delivery AFUI will not
+        // resolve or cannot reach is what the caller passed, not a fault here.
+        UiErrorKind::DeliveryModeInvalid
+        | UiErrorKind::DeliveryModeNotOffered
+        | UiErrorKind::LinkAddressUnavailable => ErrorCode::InvalidEndpoint,
+        UiErrorKind::FrontendUnreadable
+        | UiErrorKind::FrontendIncompatible
+        | UiErrorKind::FrontendUnsafe
+        | UiErrorKind::PageRender
+        | UiErrorKind::PageIncomplete
+        | UiErrorKind::RuntimeMisconfigured
+        | UiErrorKind::RuntimeClosed
+        | UiErrorKind::RuntimeBusy
+        | UiErrorKind::RuntimeMessageTooLarge
+        | UiErrorKind::RuntimeBlob
+        | UiErrorKind::RuntimePayload
+        | UiErrorKind::ConfigUnreadable
+        | UiErrorKind::Io => ErrorCode::InternalError,
+    };
+    Error::new(error_code, error.to_string())
 }
 
 /// Resolves when the agent asks this command to stop.
@@ -255,12 +271,8 @@ async fn stop_requested() {
     }
 }
 
-/// A panel URL and, when this run minted it, what the host said about its
-/// lifetime. Nothing here is emitted except through `credential_free_panel_url`.
 struct Panel {
-    url: String,
-    expires_at_rfc3339: Option<String>,
-    ttl_s: Option<u64>,
+    lease: TakeoverUiSession,
 }
 
 async fn resolve_panel(args: TakeoverArgs) -> Result<Panel, Error> {
@@ -268,17 +280,12 @@ async fn resolve_panel(args: TakeoverArgs) -> Result<Panel, Error> {
         TakeoverArgs::Open {
             takeover_url_secret,
         } => Ok(Panel {
-            url: takeover_url_secret,
-            expires_at_rfc3339: None,
-            ttl_s: None,
+            lease: TakeoverUiSession::exchange(&takeover_url_secret).await?,
         }),
         TakeoverArgs::Mint { connection } => {
             let client = connection.client().await?;
-            let handoff = client.takeover_handoff(None, None).await?;
             Ok(Panel {
-                url: handoff.takeover_url_secret,
-                expires_at_rfc3339: Some(handoff.takeover_url_expires_at_rfc3339),
-                ttl_s: Some(handoff.takeover_url_ttl_s),
+                lease: client.takeover_ui_session().await?,
             })
         }
     }
@@ -292,7 +299,7 @@ fn credential_free_panel_url(url: &str) -> Result<String, Error> {
     let mut panel = url::Url::parse(url).map_err(|error| {
         Error::new(
             ErrorCode::InvalidEndpoint,
-            format!("--takeover-url-secret: {url:?} is not a URL: {error}"),
+            format!("--takeover-url-secret is not a valid URL: {error}"),
         )
     })?;
     panel.set_query(None);
@@ -302,6 +309,8 @@ fn credential_free_panel_url(url: &str) -> Result<String, Error> {
 
 #[cfg(test)]
 mod tests {
+    use agent_first_ui::UiAttentionPolicy;
+
     use super::*;
 
     #[test]
@@ -319,32 +328,105 @@ mod tests {
         assert_eq!(error.error_code, ErrorCode::InvalidEndpoint);
     }
 
+    const SECRET: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn ready_event(delivery: UiDeliveryMode, panel: &str) -> serde_json::Value {
+        let attention = (delivery == UiDeliveryMode::Link).then(UiAttentionPolicy::default);
+        let facts = agent_first_ui::UiDeliveryFacts {
+            mode: delivery,
+            session_id: "aabbccdd".to_string(),
+            link_url_secret: (delivery == UiDeliveryMode::Link)
+                .then(|| "http://192.168.1.20:9888/afui-capability/".to_string()),
+            idle_timeout_s: attention
+                .and_then(|policy| policy.idle_timeout())
+                .map(|duration| duration.as_secs()),
+            grace_period_s: attention.map(|policy| policy.grace_period().as_secs()),
+        };
+        super::ready_event(
+            &facts,
+            UiReady {
+                panel_url: panel.to_string(),
+                session: SESSION_KIND,
+            },
+        )
+        .unwrap()
+    }
+
     #[test]
-    fn neither_emitted_event_carries_the_secret() {
-        const SECRET: &str = "0123456789abcdef";
+    fn no_delivery_event_carries_the_upstream_secret() {
         let url = format!("http://127.0.0.1:9222/takeover/panel?handoff_secret={SECRET}");
         let panel = credential_free_panel_url(&url).unwrap();
-        let ready = serde_json::to_string(&UiReady {
-            panel_url: panel.clone(),
-            session: SESSION_KIND,
-            delivery: Delivery::Listed.as_str(),
-            session_id: Some("aabbccdd".to_string()),
-            takeover_url_expires_at_rfc3339: Some("2026-06-11T00:00:00Z".into()),
-            takeover_url_ttl_s: Some(900),
-        })
+        for delivery in [
+            UiDeliveryMode::Window,
+            UiDeliveryMode::Link,
+            UiDeliveryMode::Session,
+        ] {
+            let ready = serde_json::to_string(&ready_event(delivery, &panel)).unwrap();
+            let done = serde_json::to_string(&UiTakeoverResult {
+                panel_url: panel.clone(),
+                session: SESSION_KIND,
+                mode: delivery.as_str(),
+                outcome: "expired",
+                open_s: 12,
+            })
+            .unwrap();
+            assert!(!ready.contains(SECRET), "{ready}");
+            assert!(!ready.contains("handoff_secret"), "{ready}");
+            assert!(!done.contains(SECRET), "{done}");
+            assert!(!done.contains("handoff_secret"), "{done}");
+        }
+    }
+
+    /// Link exposes AFUI's outer credential and never the takeover credential
+    /// AFUI keeps behind its proxy.
+    #[test]
+    fn a_link_carries_only_the_afui_url() {
+        let value = serde_json::to_value(ready_event(
+            UiDeliveryMode::Link,
+            "http://127.0.0.1:9222/takeover/panel",
+        ))
         .unwrap();
-        let done = serde_json::to_string(&UiTakeoverResult {
-            panel_url: panel,
-            session: SESSION_KIND,
-            delivery: Delivery::Listed.as_str(),
-            outcome: "expired",
-            open_s: 12,
-        })
-        .unwrap();
-        assert!(!ready.contains(SECRET), "{ready}");
-        assert!(!ready.contains("handoff_secret"), "{ready}");
-        assert!(!done.contains(SECRET), "{done}");
-        assert!(!done.contains("handoff_secret"), "{done}");
+        assert_eq!(
+            value[agent_first_ui::cli::LINK_URL_FIELD],
+            serde_json::Value::String("http://192.168.1.20:9888/afui-capability/".to_string())
+        );
+        // Never under the suffixed name, which an emitter would mask.
+        assert!(value.get("link_url_secret").is_none(), "{value}");
+        assert!(value.get("takeover_url_secret").is_none());
+        let policy = UiAttentionPolicy::default();
+        assert_eq!(
+            value["idle_timeout_s"],
+            policy.idle_timeout().unwrap().as_secs()
+        );
+        assert_eq!(value["grace_period_s"], policy.grace_period().as_secs());
+    }
+
+    /// A credential minted a moment ago must not be spent on a delivery that
+    /// cannot run — and the refusal has to name the one that can.
+    #[test]
+    fn an_https_panel_is_refused_before_a_proxying_delivery_starts() {
+        for delivery in [UiDeliveryMode::Link, UiDeliveryMode::Session] {
+            let refused = window_only_upstream("https://takeover.example/takeover/panel", delivery)
+                .expect_err("a proxying delivery cannot reach an https panel");
+            assert_eq!(refused.error_code, ErrorCode::InvalidEndpoint);
+            assert!(refused.detail.contains("--mode window"), "{refused:?}");
+        }
+        // A window opens the panel itself, so TLS is not in anybody's way.
+        assert!(
+            window_only_upstream(
+                "https://takeover.example/takeover/panel",
+                UiDeliveryMode::Window
+            )
+            .is_ok()
+        );
+        // And plain HTTP is what every delivery was always able to reach.
+        for delivery in [
+            UiDeliveryMode::Window,
+            UiDeliveryMode::Link,
+            UiDeliveryMode::Session,
+        ] {
+            assert!(window_only_upstream("http://127.0.0.1:9222/takeover/panel", delivery).is_ok());
+        }
     }
 
     /// The panel is announced under identifiers AFUI accepts. Getting these

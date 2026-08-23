@@ -21,7 +21,7 @@ FINGERPRINT_CHROMIUM_VERSION="148.0.7778.215"
 CAMOUFOX_RELEASE="v152.0.4-beta.28"
 CAMOUFOX_X86_BUILD="152.0.4-beta.28"
 CAMOUFOX_ARM_BUILD="152.0.4-beta.28"
-GO_VERSION="1.26.5"
+GO_VERSION="1.27.0"
 KASMVNC_VERSION="1.5.0"
 
 arch="$(uname -m)"
@@ -89,8 +89,20 @@ install_camoufox() {
     rm /tmp/go.tgz
     export PATH="/usr/local/go/bin:$PATH" GOPATH=/go GOBIN=/usr/local/bin
     mkdir -p "$GOPATH"
-    go install github.com/VulpineOS/foxbridge/cmd/foxbridge@latest \
-        || echo "warning: foxbridge install failed; camoufox backend will be unavailable"
+    # Loud, like the fingerprint-chromium binary check above. A warning here
+    # produced an image that starts, advertises `--with camoufox`, and has no
+    # bridge for it — the failure surfaces much later, as a backend that does
+    # not work, with nothing pointing back at the build. It is also the one
+    # thing `GO_VERSION` is for, so a toolchain bump that breaks the build says
+    # so here rather than quietly shipping without the backend.
+    if ! go install github.com/VulpineOS/foxbridge/cmd/foxbridge@latest; then
+        rm -rf /usr/local/go "$GOPATH"
+        echo "foxbridge did not build with Go ${GO_VERSION}; camoufox needs it" >&2
+        return 1
+    fi
+    # Nothing below needs a compiler, and the toolchain is the largest thing
+    # this function downloads.
+    rm -rf /usr/local/go "$GOPATH"
     download /tmp/cf.zip "$cf_url"
     mkdir -p /opt/camoufox
     unzip -q /tmp/cf.zip -d /opt/camoufox
@@ -101,9 +113,9 @@ install_camoufox() {
     if [ -n "$cf_bin" ]; then
         ln -sf "$cf_bin" /usr/local/bin/camoufox
     else
-        echo "camoufox binary not found in extracted tree"
+        echo "camoufox binary not found in extracted tree" >&2
+        return 1
     fi
-    rm -rf /usr/local/go "$GOPATH"
 }
 
 install_chrome() {

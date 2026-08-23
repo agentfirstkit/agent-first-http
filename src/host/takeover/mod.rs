@@ -40,6 +40,8 @@ use crate::host::bootstrap::TakeoverProviderKind;
 use crate::host::browser::{pick_ephemeral_port, resolve_named_bin, wait_for_tcp_ready};
 use crate::shared::error::{Error, ErrorCode};
 
+const APP_ICON: &str = include_str!("app-icon.svg");
+
 /// Virtual framebuffer geometry for the takeover display. No window manager
 /// runs on the X display, so the headful browser window is pinned to this size
 /// (see `AppState::launch`) to fill the framebuffer.
@@ -351,6 +353,29 @@ async fn proxy_kasmvnc(
     uri: Uri,
     request: axum::extract::Request,
 ) -> Response {
+    // This is the Provider identity consumed by AFUI's desktop window. It is
+    // answered by afhttp rather than forwarded into the third-party display
+    // client, and it remains behind the same handoff credential as the panel.
+    if uri.path() == format!("/takeover/panel/{}", agent_first_ui::APP_ICON_PATH) && ws.is_err() {
+        // Validated rather than served raw: the bytes reach a browser as an
+        // application identity, and the one check that they are an SVG at all
+        // belongs to whoever owns that meaning.
+        let icon = match agent_first_ui::UiAppIcon::from_svg(APP_ICON) {
+            Ok(icon) => icon,
+            Err(error) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response();
+            }
+        };
+        return (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "image/svg+xml"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            icon.as_svg().to_owned(),
+        )
+            .into_response();
+    }
     // noVNC builds its WebSocket URL from the *origin root* plus its `path`
     // setting, ignoring the path of the page it is running on — so without help
     // the client connects to `/websockify` and 404s. `path` therefore has to

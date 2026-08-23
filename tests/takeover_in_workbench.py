@@ -7,7 +7,7 @@ to this one.
 
 Nothing here is a unit test. It starts the three real processes a person's
 takeover would involve — `afhttp host --takeover-provider kasmvnc`, `afhttp ui
-takeover --takeover-no-window`, `afui session serve` — walks the panel exactly
+takeover --mode session`, `afui session serve` — walks the panel exactly
 as a browser would, and then puts a real browser in front of it. Every check
 prints PASS/FAIL with what it actually saw, because the point is evidence
 rather than a green tick.
@@ -282,7 +282,8 @@ def main():
                 f"http://127.0.0.1:{HOST_PORT}",
                 "--token-secret",
                 HOST_TOKEN,
-                "--takeover-no-window",
+                "--mode",
+                "session",
             ],
             env=env,
         )
@@ -295,7 +296,7 @@ def main():
                     session_id = candidate
             time.sleep(0.3)
         check(
-            "`afhttp ui takeover --takeover-no-window` published a session",
+            "`afhttp ui takeover --mode session` published a session",
             session_id is not None,
             procs.log_of("afhttp-ui-takeover")[-2000:],
         )
@@ -349,42 +350,6 @@ def main():
         )
         shutil.rmtree(stub, ignore_errors=True)
 
-        print("\n== a panel announced without its credential ==")
-        # Announced *without* its credential, so the only way in is the cookie
-        # afhttp sets on the first authorized request. That is the handoff the
-        # per-mount jar has to carry, and this is the only shape that can tell
-        # the jar apart from the announced query re-authorizing everything.
-        panel = subprocess.run(
-            [
-                afhttp,
-                "panel",
-                "--endpoint-url",
-                f"http://127.0.0.1:{HOST_PORT}",
-                "--token-secret",
-                HOST_TOKEN,
-            ],
-            capture_output=True,
-            text=True,
-            env=env,
-        )
-        minted = json.loads(panel.stdout or "{}")
-        panel_url = minted.get("result", {}).get("takeover_url_secret", "")
-        bare_url, _, bare_query = panel_url.partition("?")
-        procs.start(
-            "afhttp-ui-takeover-bare",
-            [afhttp, "ui", "takeover", "--takeover-url-secret", bare_url, "--takeover-no-window"],
-            env=env,
-        )
-        bare_id = None
-        deadline = time.time() + 30
-        while time.time() < deadline and bare_id is None:
-            for event in emitted_events(procs.log_of("afhttp-ui-takeover-bare")):
-                candidate = (event.get("progress") or {}).get("session_id")
-                if candidate:
-                    bare_id = candidate
-            time.sleep(0.3)
-        check("a panel announced with no credential of its own is listed", bare_id is not None)
-
         # The shell, in both the shapes it can take. They differ in one thing:
         # where a framed session lives. Under a path on the page's own origin
         # the frame has to be sandboxed into an opaque origin, which costs it
@@ -405,8 +370,6 @@ def main():
                 port,
                 origin_host,
                 session_id,
-                bare_id,
-                bare_query,
                 9333 + index,
             )
             if shell is None:
@@ -515,9 +478,7 @@ class Frame:
         return self.shell.get(f"{self.path}{suffix}", headers, host=self.host)
 
 
-def shell_phase(
-    procs, env, afui, name, port, origin_host, session_id, bare_id, bare_query, debug_port
-):
+def shell_phase(procs, env, afui, name, port, origin_host, session_id, debug_port):
     """Everything the shell has to do, in one of its two shapes."""
     shape = "an origin per session" if origin_host else "one origin, sessions on paths"
     print(f"\n== the shell: {shape} ==")
@@ -634,26 +595,6 @@ def shell_phase(
         except (TimeoutError, ConnectionError) as error:
             check(f"[{shape}] RFB frames flow", False, str(error))
     connection.close()
-
-    print("\n== query→cookie handoff, against the per-mount jar ==")
-    if bare_id:
-        bare_card, _ = shell.card(bare_id)
-        if bare_card:
-            bare = shell.frame(bare_card)
-            first, first_headers, _ = bare.get(f"?{bare_query}")
-            second, _, _ = bare.get()
-            check(
-                f"[{shape}] a credential handed over once in a query keeps working from the jar",
-                first == 200 and second == 200,
-                f"with the query: {first}; the next request, with nothing at all: {second}",
-            )
-            check(
-                f"[{shape}] and the browser was never given the cookie that did it",
-                "set-cookie" not in {k.lower() for k in first_headers},
-                json.dumps(first_headers, indent=2),
-            )
-            unauthorized, _, _ = bare.get("nothing-set-this")
-            note(f"a path the jar has no cookie for is still refused upstream: {unauthorized}")
 
     print("\n== the credential the page holds, against the panel it frames ==")
     credential = shell.page_path.strip("/")

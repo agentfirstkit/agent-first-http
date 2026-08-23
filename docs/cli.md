@@ -47,7 +47,7 @@ A **shape** is one legal set of arguments that may appear together, under a stab
 - [`afhttp skill uninstall`](#afhttp-skill-uninstall) — Remove an afhttp-managed Agent-First HTTP skill.
 - [`afhttp tabs close`](#afhttp-tabs-close) — Close one CDP target by its target id.
 - [`afhttp tabs list`](#afhttp-tabs-list) — List the CDP targets currently attached to a host.
-- [`afhttp ui takeover`](#afhttp-ui-takeover) — Open the takeover panel in an isolated window and block until the person closes it.
+- [`afhttp ui takeover`](#afhttp-ui-takeover) — Put the takeover panel in front of a person and block until that session ends.
 - [`afhttp upload`](#afhttp-upload) — Upload a local file into a browser tab's file input via DOM.setFileInputFiles.
 
 ### `afhttp capabilities`
@@ -517,18 +517,18 @@ afhttp tabs list [--endpoint-url <URL>] [--token-secret <SOURCE>]
 
 ### `afhttp ui takeover`
 
-Open the takeover panel in an isolated window and block until the person closes it.
+Put the takeover panel in front of a person and block until that session ends.
 
-#### `ui-takeover` — Mint a fresh panel credential from a running host, then open it
-
-```
-afhttp ui takeover [--endpoint-url <URL>] [--token-secret <SOURCE>] [--takeover-no-window]
-```
-
-#### `ui-takeover-url` — Open a panel URL that was already minted; needs no host of its own
+#### `ui-takeover` — Mint a fresh panel credential from a running host, then deliver it
 
 ```
-afhttp ui takeover --takeover-url-secret <URL> [--takeover-no-window]
+afhttp ui takeover [--endpoint-url <URL>] [--token-secret <SOURCE>] [--mode <window|link|session>]
+```
+
+#### `ui-takeover-url` — Deliver a panel URL that was already minted; needs no host of its own
+
+```
+afhttp ui takeover --takeover-url-secret <URL> [--mode <window|link|session>]
 ```
 
 Output: protocol events; `--output` json (default `json`), `--output-to` split/stdout/stderr (default `stdout`); redirect with `--stdout-file` or `--stderr-file`.
@@ -540,7 +540,7 @@ Arguments across every shape above:
 | `--endpoint-url` | CDP endpoint of a running host; falls back to AFHTTP_ENDPOINT_URL, then to the local afhttp-host container |
 | `--token-secret` | Token for a protected host; falls back to AFHTTP_TOKEN_SECRET, then to the discovered host's own token (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, container:NAME, literal:VALUE) |
 | `--takeover-url-secret` | Panel URL a previous `panel` or `fetch --takeover` already minted |
-| `--takeover-no-window` | Publish the panel for `afui session list` and wait, instead of opening a window |
+| `--mode` | How this reaches the person: window a browser window is open on this machine; link the page is reachable from this machine's network at the link URL; session the session is registered only; open it with `afui session open` or reach it through `afui session serve`. Falls back to AFUI_DELIVERY, then window |
 
 ### `afhttp upload`
 
@@ -574,4 +574,4 @@ Every structural failure emits one strict JSON `kind:"error"` event on stderr, l
 
 Two exit-1 codes describe the tool itself rather than the call: `cli_invocation_invalid` means the program misread its own resolved invocation — an unknown action id, or an argument id the selected combination cannot produce — and `output_setup_failed` means an output sink (`--stdout-file`, `--stderr-file`, stream redirection) could not be established. Both are defects to report, not inputs to correct; retrying the same command cannot help.
 
-Domain failures (exit 1) carry their own stable `error.code` instead, drawn from whatever this tool defines rather than from the `cli_*` set. No error message quotes a raw value it was given — an error event is routinely logged, and the input may hold secrets.
+Domain failures (exit 1) carry their own stable `error.code` instead, drawn from whatever this tool defines rather than from the `cli_*` set. Error events are routinely logged, so a message never quotes a value that came from an argument able to carry a credential — a header, a cookie, a token, a password, a proxy URL, an environment value, a form field. Such an error names the argument and the shape that was wrong, and stops there. A value that cannot be a secret — a path, a dot-path, a session name — is quoted, because an error that cannot say which one it means is not worth logging either.

@@ -17,7 +17,7 @@ use crate::shared::error::{Error, ErrorCode};
 /// Installs the aws-lc-rs rustls provider once per process. reqwest's
 /// `rustls-tls-no-provider` feature relies on the caller to do this; if it
 /// isn't done the first `Client::builder().build()` call errors.
-fn ensure_rustls_provider() {
+pub(crate) fn ensure_rustls_provider() {
     static ONCE: OnceLock<()> = OnceLock::new();
     ONCE.get_or_init(|| {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();

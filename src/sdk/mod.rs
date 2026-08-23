@@ -18,4 +18,4 @@ pub use endpoint::Endpoint;
 pub use fetch::{FetchBuilder, FetchCookie, FetchCookieSameSite, FetchResult, RenderMode, Wait};
 #[cfg(feature = "host")]
 pub use inline::InlineConfig;
-pub use takeover::TakeoverHandoffResponse;
+pub use takeover::{TakeoverHandoffResponse, TakeoverUiSession};

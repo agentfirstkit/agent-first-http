@@ -111,11 +111,14 @@ fn enforce_listen_auth(listen: &str, token: Option<&str>) -> Result<(), Error> {
     Ok(())
 }
 
-fn parse_engine_env(raw: &str) -> Result<(String, String), Error> {
+// The value half is an environment variable handed to a browser engine, which
+// is exactly where a token or a proxy credential is passed. Same rule as
+// `--header` and `--cookie`: say what shape was wrong, never what was in it.
+pub(crate) fn parse_engine_env(raw: &str) -> Result<(String, String), Error> {
     let (k, v) = raw.split_once('=').ok_or_else(|| {
         Error::new(
             ErrorCode::InvalidArgument,
-            format!("--engine-env: expected NAME=VALUE, got {raw:?}"),
+            "--engine-env: expected NAME=VALUE, with an equals sign separating them".to_string(),
         )
     })?;
     if k.is_empty() {

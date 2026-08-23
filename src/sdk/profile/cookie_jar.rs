@@ -123,17 +123,45 @@ impl CookieJar {
             .collect()
     }
 
-    /// Merge a freshly-received Set-Cookie into the jar in memory. The
-    /// merge follows RFC 6265 identity (name + domain + path). Call
-    /// [`Self::persist`] afterwards to write the jar back to disk.
-    pub fn merge(&mut self, set_cookie: Cookie<'static>, request_url: &Url) {
-        let entry = JarEntry::from_set_cookie(set_cookie, request_url);
+    /// Merge a freshly-received Set-Cookie into the jar in memory, or refuse it.
+    ///
+    /// A jar is shared across every site a profile visits, so what a response
+    /// is *allowed* to write has to be checked before it is written. This used
+    /// to take the `Domain` attribute at its word: a response from anywhere
+    /// could say `Set-Cookie: sid=…; Domain=bank.example`, and the entry was
+    /// then sent to `bank.example` on a later fetch — replacing, by RFC
+    /// identity, whatever session cookie was already there. Returns `false`
+    /// when the response was not permitted to set the cookie, so callers can
+    /// count refusals rather than wonder where the cookie went.
+    ///
+    /// A `Max-Age` of zero or less is a deletion, and deleting is a merge
+    /// outcome like any other: it removes the matching identity and reports
+    /// success.
+    pub fn merge(&mut self, set_cookie: Cookie<'static>, request_url: &Url) -> bool {
+        let Some(host) = request_url.host_str() else {
+            return false;
+        };
+        if !may_set_domain(set_cookie.domain(), host) {
+            return false;
+        }
+        let entry = JarEntry::from_set_cookie(set_cookie.clone(), request_url);
+        // `Max-Age` outranks `Expires` (RFC 6265 §5.2.2), and a non-positive
+        // one means the site is logging you out. Treating that as a session
+        // cookie — which ignoring the attribute did — keeps a credential alive
+        // in the jar after the site revoked it.
+        if let Some(max_age) = set_cookie.max_age()
+            && !max_age.is_positive()
+        {
+            self.entries.retain(|e| !e.same_identity(&entry));
+            return true;
+        }
         if let Some(idx) = self.entries.iter().position(|e| e.same_identity(&entry)) {
             // Replace in place.
             self.entries[idx] = entry;
         } else {
             self.entries.push(entry);
         }
+        true
     }
 
     /// Drop expired entries; called automatically by [`Self::persist`] so
@@ -357,6 +385,37 @@ impl JarEntry {
     }
 }
 
+/// Whether a response from `host` may set a cookie for `cookie_domain`.
+///
+/// RFC 6265 §5.3: a `Domain` attribute is only honoured when the request host
+/// domain-matches it — a site may broaden a cookie to its own parent domain and
+/// no further. Omitting `Domain` is host-only and always permitted.
+///
+/// The bare-label rule below stands in for a public suffix list. Without one,
+/// `Domain=co.uk` from `shop.co.uk` passes the domain-match test and would be
+/// sent to every other `.co.uk` site in the jar. A full list is a dependency
+/// with its own update cadence; refusing a single-label domain blocks the `com`
+/// / `net` case, and the multi-label suffixes remain a narrower gap than the
+/// one this closes.
+fn may_set_domain(cookie_domain: Option<&str>, host: &str) -> bool {
+    let Some(domain) = cookie_domain else {
+        return true;
+    };
+    let domain = domain.trim_start_matches('.').to_ascii_lowercase();
+    let host = host.trim_start_matches('.').to_ascii_lowercase();
+    if domain.is_empty() {
+        return false;
+    }
+    // An address is only ever host-only; `Domain` on one is not meaningful.
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return false;
+    }
+    if !domain.contains('.') {
+        return false;
+    }
+    host == domain || host.ends_with(&format!(".{domain}"))
+}
+
 /// RFC 6265 §5.1.4 default-path computation.
 fn default_path(url: &Url) -> String {
     let path = url.path();
@@ -408,6 +467,111 @@ mod tests {
         assert_eq!(cookies[0].value(), "abc123");
         assert_eq!(cookies[0].secure(), Some(true));
         assert_eq!(cookies[0].http_only(), Some(true));
+    }
+
+    #[test]
+    fn a_site_cannot_set_a_cookie_for_a_domain_it_does_not_own() {
+        // One jar serves every site a profile visits, so the interesting
+        // question is not "did this parse" but "was this response allowed to
+        // write it". A response from anywhere used to be able to claim
+        // `Domain=bank.example` — and, by RFC identity, replace the session
+        // cookie already stored for that site.
+        let dir = tempfile::tempdir().unwrap();
+        let mut jar = CookieJar::load(dir.path().join("jar.json")).unwrap();
+        let bank = make_url("https://bank.example/");
+        assert!(
+            jar.merge(
+                Cookie::parse("sid=real; Domain=bank.example; Path=/")
+                    .unwrap()
+                    .into_owned(),
+                &bank,
+            )
+        );
+
+        let attacker = make_url("https://evil.example/");
+        for raw in [
+            "sid=stolen; Domain=bank.example; Path=/",
+            "sid=stolen; Domain=.bank.example; Path=/",
+            // A public-suffix-shaped claim would reach every `.com` in the jar.
+            "sid=stolen; Domain=com; Path=/",
+        ] {
+            assert!(
+                !jar.merge(Cookie::parse(raw).unwrap().into_owned(), &attacker),
+                "`{raw}` must be refused"
+            );
+        }
+        let kept = jar.applicable_cookies(&make_url("https://bank.example/"));
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].value(), "real", "the real session cookie survived");
+
+        // A site broadening to its own parent domain is the legitimate case.
+        let shop = make_url("https://shop.example.com/");
+        assert!(
+            jar.merge(
+                Cookie::parse("pref=dark; Domain=example.com; Path=/")
+                    .unwrap()
+                    .into_owned(),
+                &shop,
+            )
+        );
+    }
+
+    #[test]
+    fn max_age_outranks_expires_and_zero_deletes() {
+        // `Max-Age=0` is how a site logs you out. Reading only `Expires` turned
+        // that into a session cookie that outlived the revocation.
+        let dir = tempfile::tempdir().unwrap();
+        let mut jar = CookieJar::load(dir.path().join("jar.json")).unwrap();
+        let url = make_url("https://example.com/");
+        assert!(
+            jar.merge(
+                Cookie::parse("sid=live; Domain=example.com; Path=/")
+                    .unwrap()
+                    .into_owned(),
+                &url,
+            )
+        );
+        assert_eq!(
+            jar.applicable_cookies(&make_url("https://example.com/"))
+                .len(),
+            1
+        );
+
+        assert!(
+            jar.merge(
+                Cookie::parse("sid=; Domain=example.com; Path=/; Max-Age=0")
+                    .unwrap()
+                    .into_owned(),
+                &url,
+            )
+        );
+        assert!(
+            jar.applicable_cookies(&make_url("https://example.com/"))
+                .is_empty(),
+            "Max-Age=0 must remove the cookie, not store an empty one"
+        );
+
+        // And a deletion still wins when `Expires` says otherwise.
+        assert!(
+            jar.merge(
+                Cookie::parse("sid=live; Domain=example.com; Path=/")
+                    .unwrap()
+                    .into_owned(),
+                &url,
+            )
+        );
+        assert!(jar.merge(
+            Cookie::parse(
+                "sid=; Domain=example.com; Path=/; Max-Age=0; Expires=Wed, 09 Jun 2100 10:18:14 GMT"
+            )
+            .unwrap()
+            .into_owned(),
+            &url,
+        ));
+        assert!(
+            jar.applicable_cookies(&make_url("https://example.com/"))
+                .is_empty()
+        );
     }
 
     #[test]
