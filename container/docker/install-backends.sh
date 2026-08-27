@@ -18,9 +18,9 @@ set -euo pipefail
 # images build) together. Apt-backed Chrome and Brave track their vendors'
 # stable repositories.
 FINGERPRINT_CHROMIUM_VERSION="148.0.7778.215"
-CAMOUFOX_RELEASE="v152.0.4-beta.28"
-CAMOUFOX_X86_BUILD="152.0.4-beta.28"
-CAMOUFOX_ARM_BUILD="152.0.4-beta.28"
+CAMOUFOX_RELEASE="v152.0.4-beta.29"
+CAMOUFOX_X86_BUILD="152.0.4-beta.29"
+CAMOUFOX_ARM_BUILD="152.0.4-beta.29"
 GO_VERSION="1.27.0"
 KASMVNC_VERSION="1.5.0"
 

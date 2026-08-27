@@ -377,6 +377,9 @@ git clone https://github.com/agentfirstkit/agent-first-http
 cargo install --path agent-first-http
 ```
 
+Prebuilt archives are also available from
+[GitHub Releases](https://github.com/agentfirstkit/agent-first-http/releases).
+
 Then install the embedded [Agent Skill](skills/agent-first-http/SKILL.md) so the agent
 follows afhttp's behavior rules — when to escalate `--render`, when to reach for
 human takeover, how to read the artifacts. `skill install` targets Codex, Claude

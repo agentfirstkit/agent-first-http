@@ -25,6 +25,8 @@ use crate::shared::error::{Error, ErrorCode};
 const DOCKERFILE: &str = include_str!("../../../container/docker/Dockerfile");
 const INSTALL_BACKENDS: &str = include_str!("../../../container/docker/install-backends.sh");
 const ENTRYPOINT: &str = include_str!("../../../container/docker/entrypoint.sh");
+const INSTALL_BROWSER_POLICY: &str =
+    include_str!("../../../container/docker/install-browser-policy.sh");
 
 /// This binary's version — the image downloads exactly this release.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -35,6 +37,8 @@ const MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
 pub(crate) const DEFAULT_CONTAINER_NAME: &str = "afhttp-host";
 pub(crate) const DEFAULT_CONTAINER_PORT: u16 = 9222;
 const IMAGE_REPO: &str = "afhttp-host";
+/// The unprivileged account the image runs as; see `useradd` in the Dockerfile.
+const IMAGE_USER: &str = "afhttp";
 /// Where the entrypoint persists the host token inside the data volume. The
 /// volume outlives `container install`, so this path is the stable answer to
 /// "what is this host's token" for both discovery and `--token-secret
@@ -209,6 +213,17 @@ async fn install_result(args: &mut InstallArgs) -> Result<InstallResult, Error> 
     // token is stable across recreation.
     let _ = capture(runtime.bin(), &["stop".into(), args.common.name.clone()]);
     let _ = capture(runtime.bin(), &["rm".into(), args.common.name.clone()]);
+
+    // Apple's runtime mounts a named volume root-owned. Docker seeds an empty
+    // one from the image path instead, ownership included, which is why the
+    // image's `chown` at build time is enough there and not here. This image
+    // runs as a non-root user, so without this the host cannot create its own
+    // state directory and exits with `Permission denied` before it can write
+    // its token.
+    if runtime == Runtime::Apple {
+        let init = data_volume_chown_args(&args.common.name, &image);
+        exec_to_log(runtime.bin(), &init, &log_file)?;
+    }
 
     let run = run_args(
         &args.common.name,
@@ -1504,17 +1519,42 @@ fn inspect_container_state(runtime: Runtime, name: &str) -> Option<ContainerStat
         return None;
     }
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
-    let state = value
+    parse_container_state(&value)
+}
+
+/// Read a container's state out of whichever `inspect` shape the runtime emits.
+///
+/// Docker and Podman answer `{"State": {"Running": bool, "ExitCode": n}}`.
+/// Apple answers `{"status": {"state": "running"}}` — a string, under a
+/// different key, with no exit code anywhere. Reading only the first shape made
+/// this return `None` on Apple for every container, and the caller's fallback
+/// then ran `container ps`, which that runtime does not have (`Plugin
+/// 'container-ps' not found`). Between them, every container on Apple looked
+/// stopped, and `install` reported a host that was running perfectly as having
+/// "exited before /health became ready".
+fn parse_container_state(value: &serde_json::Value) -> Option<ContainerState> {
+    let first = value
         .as_array()
         .and_then(|arr| arr.first())
-        .and_then(|v| v.get("State"))
-        .or_else(|| value.get("State"))?;
+        .unwrap_or(value);
+
+    if let Some(state) = first.get("State") {
+        return Some(ContainerState {
+            running: state
+                .get("Running")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            exit_code: state.get("ExitCode").and_then(serde_json::Value::as_i64),
+        });
+    }
+
+    let state = first
+        .get("status")
+        .and_then(|status| status.get("state"))
+        .and_then(serde_json::Value::as_str)?;
     Some(ContainerState {
-        running: state
-            .get("Running")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-        exit_code: state.get("ExitCode").and_then(|v| v.as_i64()),
+        running: state.eq_ignore_ascii_case("running"),
+        exit_code: None,
     })
 }
 
@@ -1522,8 +1562,14 @@ fn container_running(runtime: Runtime, name: &str) -> bool {
     if let Some(state) = inspect_container_state(runtime, name) {
         return state.running;
     }
-    // Plain `ps` (no --format) so the check works the same on Docker and Apple.
-    capture(runtime.bin(), &["ps".into()])
+    // Apple lists containers with `ls` and has no `ps` subcommand at all, so
+    // asking for `ps` there failed and reported every container as stopped.
+    let list = if runtime == Runtime::Apple {
+        "ls"
+    } else {
+        "ps"
+    };
+    capture(runtime.bin(), &[list.into()])
         .map(|o| String::from_utf8_lossy(&o.stdout).contains(name))
         .unwrap_or(false)
 }
@@ -1651,17 +1697,85 @@ fn container_logs_summary(runtime: Runtime, name: &str) -> String {
     summary
 }
 
+/// Report why the image build failed, from what the builder actually said.
+///
+/// This used to assert a cause it had never checked — that no release asset
+/// existed for the target — and send the reader to `--from-source`, which
+/// compiles afhttp and its browser stack from scratch. When the real failure was
+/// a file missing from the embedded context, that advice pointed at a build two
+/// orders of magnitude slower than the one that had just failed, chasing a
+/// release asset that was published and downloadable the whole time. A confident
+/// wrong cause is worse than none, because it is the one that gets acted on.
+/// A one-shot root container that gives the data volume to the image's user.
+///
+/// Named rather than numeric: the account is defined once in the Dockerfile, and
+/// a uid repeated here would be a second definition free to drift from it.
+fn data_volume_chown_args(name: &str, image: &str) -> Vec<String> {
+    vec![
+        "run".into(),
+        "--rm".into(),
+        "--user".into(),
+        "root".into(),
+        // The image's entrypoint is the host itself, which would read what
+        // follows as its own arguments.
+        "--entrypoint".into(),
+        "/bin/sh".into(),
+        "-v".into(),
+        format!("{}:/data", volume_name(name)),
+        image.to_string(),
+        "-c".into(),
+        format!("chown -R {IMAGE_USER}:{IMAGE_USER} /data"),
+    ]
+}
+
 fn build_failed_error(target: &str, log_file: &Path) -> Error {
-    Error::new(
-        ErrorCode::InternalError,
-        format!(
-            "image build failed. If v{VERSION} has no published release asset for \
-             {target}, build from a source checkout instead: \
-             `afhttp container install --from-source` (or \
-             docker compose -f container/docker/compose.yaml up --build). Full output: {}",
-            log_file.display()
-        ),
-    )
+    let log = std::fs::read_to_string(log_file).unwrap_or_default();
+    // The target is stated either way: it is what was being built, which is a
+    // fact about the attempt rather than advice about what to do next.
+    let mut message = match build_failure_reason(&log) {
+        Some(reason) => format!("image build for {target} failed: {reason}"),
+        None => format!("image build for {target} failed"),
+    };
+    // The source-build routes are named only when the download itself failed,
+    // which is the one case where they are the answer.
+    if downloader_fetch_failed(&log) {
+        message.push_str(&format!(
+            ". The release asset for v{VERSION} {target} could not be fetched; if \
+             none is published for this target, build from a source checkout \
+             instead: `afhttp container install --from-source` (or \
+             docker compose -f container/docker/compose.yaml up --build)"
+        ));
+    }
+    message.push_str(&format!(". Full output: {}", log_file.display()));
+    Error::new(ErrorCode::InternalError, message)
+}
+
+/// The last thing the builder complained about, which is the actual cause.
+fn build_failure_reason(log: &str) -> Option<String> {
+    const CAP: usize = 400;
+    let line = log.lines().map(str::trim).rev().find(|line| {
+        line.contains("ERROR:") || line.starts_with("Error:") || line.contains("failed to solve")
+    })?;
+    let line = line.trim_start_matches("Error: ").trim();
+    if line.is_empty() {
+        return None;
+    }
+    Some(match line.char_indices().nth(CAP) {
+        Some((cut, _)) => format!("{}…", &line[..cut]),
+        None => line.to_string(),
+    })
+}
+
+/// Whether the downloader stage failed to fetch the release archive.
+///
+/// Deliberately narrow. Over-claiming here is the bug this replaced, so
+/// anything it cannot positively identify as a failed fetch is left to the
+/// builder's own message.
+fn downloader_fetch_failed(log: &str) -> bool {
+    log.lines().any(|line| {
+        line.contains("curl:")
+            && (line.contains("404") || line.contains("The requested URL returned error"))
+    })
 }
 
 // ── embedded build context ───────────────────────────────────────────────────
@@ -1682,6 +1796,18 @@ fn cache_context_dir() -> Result<PathBuf, Error> {
 
 fn write_build_context() -> Result<PathBuf, Error> {
     let root = cache_context_dir()?;
+    write_build_context_into(&root)?;
+    Ok(root)
+}
+
+/// Stage the embedded build context under `root`.
+///
+/// Every file the Dockerfile `COPY`s out of `container/docker/` has to be
+/// written here, because for this path the context is what the binary carries
+/// rather than a checkout on disk. A file added to the Dockerfile and not added
+/// here fails the build with `"…": not found` — which is not obviously about a
+/// missing embed, and is what `every_dockerfile_copy_is_staged` now prevents.
+fn write_build_context_into(root: &Path) -> Result<(), Error> {
     // Mirror the repo's container/docker/ layout so the Dockerfile's COPY paths
     // resolve the same way they do for a from-source build. The downloader stage
     // pulls the binary over the network, so no source tree is needed here.
@@ -1690,12 +1816,214 @@ fn write_build_context() -> Result<PathBuf, Error> {
     std::fs::write(dir.join("Dockerfile"), DOCKERFILE)?;
     std::fs::write(dir.join("install-backends.sh"), INSTALL_BACKENDS)?;
     std::fs::write(dir.join("entrypoint.sh"), ENTRYPOINT)?;
-    Ok(root)
+    std::fs::write(
+        dir.join("install-browser-policy.sh"),
+        INSTALL_BROWSER_POLICY,
+    )?;
+    Ok(())
+}
+
+/// The `container/docker/` files the Dockerfile copies into the runtime image.
+///
+/// Test-only: it exists so `every_dockerfile_copy_is_staged` can compare the
+/// Dockerfile against what is actually staged.
+///
+/// Directory copies (`COPY container/ container/`) belong to the from-source
+/// stage, which builds from a real checkout, so only file copies are listed.
+#[cfg(test)]
+fn dockerfile_copied_context_files(dockerfile: &str) -> Vec<String> {
+    let mut wanted = Vec::new();
+    for line in dockerfile.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("COPY ") else {
+            continue;
+        };
+        for token in rest.split_whitespace() {
+            if token.starts_with("--") {
+                continue;
+            }
+            if let Some(name) = token.strip_prefix("container/docker/")
+                && !name.is_empty()
+                && !name.ends_with('/')
+            {
+                wanted.push(name.to_string());
+            }
+        }
+    }
+    wanted.sort();
+    wanted.dedup();
+    wanted
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every runtime's `inspect` shape has to be readable, including Apple's.
+    ///
+    /// Apple puts the state under `status.state` as a string; Docker and Podman
+    /// put it under `State.Running` as a bool. Reading only the latter made this
+    /// answer `None` for every Apple container, and the caller then fell back to
+    /// `container ps`, a subcommand Apple does not have — so a perfectly healthy
+    /// host was reported as having "exited before /health became ready".
+    #[test]
+    fn container_state_is_read_from_every_runtime_shape() {
+        // Apple: the real shape, trimmed to what is read.
+        let apple = serde_json::json!([{
+            "id": "afhttp-host",
+            "status": {"state": "running", "startedDate": "2026-08-27T15:34:55Z"}
+        }]);
+        let state = parse_container_state(&apple).expect("Apple's shape must parse");
+        assert!(state.running, "a running Apple container is running");
+
+        let apple_stopped = serde_json::json!([{"id": "x", "status": {"state": "stopped"}}]);
+        assert!(
+            !parse_container_state(&apple_stopped)
+                .expect("Apple's shape must parse")
+                .running
+        );
+
+        // Docker and Podman.
+        let docker = serde_json::json!([{"State": {"Running": true, "ExitCode": 0}}]);
+        let state = parse_container_state(&docker).expect("Docker's shape must parse");
+        assert!(state.running);
+        assert_eq!(state.exit_code, Some(0));
+
+        let docker_dead = serde_json::json!([{"State": {"Running": false, "ExitCode": 137}}]);
+        let state = parse_container_state(&docker_dead).expect("Docker's shape must parse");
+        assert!(!state.running);
+        assert_eq!(state.exit_code, Some(137));
+
+        // Something unrecognised stays unrecognised rather than reading as
+        // stopped: the caller has a fallback, and a wrong "not running" is what
+        // produced the fabricated failure in the first place.
+        assert!(parse_container_state(&serde_json::json!([{"id": "x"}])).is_none());
+    }
+
+    /// Apple's runtime needs the data volume handed to the image's user before
+    /// the host starts.
+    ///
+    /// Docker seeds an empty named volume from the image path, ownership
+    /// included, so the Dockerfile's `chown` carries over. Apple's mounts it
+    /// root-owned, and the image runs as a non-root user — so the host died with
+    /// `mkdir: cannot create directory '/data/afhttp': Permission denied` before
+    /// it could write its token.
+    #[test]
+    fn the_data_volume_is_given_to_the_image_user() {
+        let args = data_volume_chown_args("afhttp-host", "afhttp-host:0.13.0");
+        let joined = args.join(" ");
+
+        assert!(
+            joined.contains("--user root"),
+            "the chown needs root: {joined}"
+        );
+        assert!(
+            joined.contains(&format!("chown -R {IMAGE_USER}:{IMAGE_USER} /data")),
+            "the volume goes to the account the image runs as: {joined}"
+        );
+        assert!(
+            joined.contains(&format!("{}:/data", volume_name("afhttp-host"))),
+            "it has to act on the same volume the host will mount: {joined}"
+        );
+        // The image's entrypoint is the host, which would otherwise read `-c
+        // chown …` as its own arguments and refuse them.
+        assert!(
+            joined.contains("--entrypoint /bin/sh"),
+            "the host entrypoint has to be bypassed: {joined}"
+        );
+        assert!(
+            args.contains(&"--rm".to_string()),
+            "it is one-shot: {joined}"
+        );
+    }
+
+    /// A build failure reports what the builder said, and only blames a missing
+    /// release asset when the download is what actually failed.
+    ///
+    /// Both halves were wrong before. The message asserted the asset was missing
+    /// without checking, so a context file that failed to copy was reported as a
+    /// publishing gap and the reader was sent to a from-source build — slower by
+    /// two orders of magnitude, and chasing an asset that was downloadable all
+    /// along.
+    #[test]
+    fn a_build_failure_reports_the_real_cause() {
+        let dir = tempfile::tempdir().expect("temp");
+
+        // The real failure from the missing embed: no download was attempted, so
+        // nothing here may mention a release asset.
+        let missing_file = dir.path().join("missing-file.log");
+        std::fs::write(
+            &missing_file,
+            "#10 [stage-3 2/16] COPY container/docker/install-browser-policy.sh\n             #10 ERROR: failed to calculate checksum of ref abc::def: \
+             \"/container/docker/install-browser-policy.sh\": not found\n",
+        )
+        .expect("write");
+        let error = build_failed_error("aarch64-unknown-linux-gnu", &missing_file);
+        assert!(
+            error.detail.contains("install-browser-policy.sh"),
+            "the builder's own reason must survive into the message: {}",
+            error.detail
+        );
+        assert!(
+            !error.detail.contains("release asset"),
+            "nothing downloaded, so nothing may blame the release: {}",
+            error.detail
+        );
+        assert!(
+            !error.detail.contains("--from-source"),
+            "a source build does not fix a missing context file: {}",
+            error.detail
+        );
+
+        // A genuine 404 from the downloader is the one case where it does.
+        let no_asset = dir.path().join("no-asset.log");
+        std::fs::write(
+            &no_asset,
+            "#8 [downloader 3/3] RUN set -eu; ...\n             #8 curl: (22) The requested URL returned error: 404\n             #8 ERROR: process \"/bin/sh -c set -eu\" did not complete successfully\n",
+        )
+        .expect("write");
+        let error = build_failed_error("aarch64-unknown-linux-gnu", &no_asset);
+        assert!(
+            error.detail.contains("release asset") && error.detail.contains("--from-source"),
+            "a failed fetch is exactly when the source build is the answer: {}",
+            error.detail
+        );
+    }
+
+    /// The embedded context has to carry every file the Dockerfile copies.
+    ///
+    /// For `afhttp container install` the build context is what this binary
+    /// carries, not a checkout, so a file added to the Dockerfile and not to
+    /// `write_build_context_into` is simply absent when the build runs. That
+    /// happened: `install-browser-policy.sh` was copied by the Dockerfile and
+    /// never staged, so the prebuilt path — the one the command uses by
+    /// default, on every platform — failed with
+    /// `"/container/docker/install-browser-policy.sh": not found`, while
+    /// `--from-source` kept working because it builds from a real tree.
+    ///
+    /// Checking the list rather than that one file is the point: the next file
+    /// added to the Dockerfile fails here instead of in a user's build.
+    #[test]
+    fn every_dockerfile_copy_is_staged() {
+        let staged = tempfile::tempdir().expect("temp");
+        write_build_context_into(staged.path()).expect("stage the context");
+        let dir = staged.path().join("container").join("docker");
+
+        let wanted = dockerfile_copied_context_files(DOCKERFILE);
+        assert!(
+            wanted
+                .iter()
+                .any(|name| name == "install-browser-policy.sh"),
+            "the scanner must see the copies it is meant to check, got {wanted:?}"
+        );
+        for name in wanted {
+            assert!(
+                dir.join(&name).is_file(),
+                "the Dockerfile copies container/docker/{name}, so the embedded \
+                 context must contain it"
+            );
+        }
+    }
 
     #[test]
     fn runtime_from_str_parses_and_rejects() {
@@ -2387,15 +2715,29 @@ mod tests {
     }
 
     #[test]
-    fn build_failure_error_points_at_compose_fallback() {
+    fn build_failure_error_names_the_target_and_the_log() {
+        // Deliberately a path that does not exist: with nothing to read, the
+        // message may state only what it knows.
         let err = build_failed_error(
             "aarch64-unknown-linux-gnu",
             Path::new("/tmp/afhttp-container-logs/build.log"),
         );
         assert_eq!(err.error_code, ErrorCode::InternalError);
-        assert!(err.detail.contains("compose"));
         assert!(err.detail.contains("aarch64-unknown-linux-gnu"));
         assert!(err.detail.contains("build.log"));
+
+        // This assertion is inverted from what it used to be. The message named
+        // the compose and `--from-source` routes on every failure, which reads
+        // as "your release asset is missing, go build from source" whatever
+        // actually went wrong — and that advice cost real time chasing an asset
+        // that was published and downloadable. Those routes are named when the
+        // download is what failed; `a_build_failure_reports_the_real_cause`
+        // covers that case.
+        assert!(
+            !err.detail.contains("compose") && !err.detail.contains("--from-source"),
+            "an unread log is not evidence of a missing release asset: {}",
+            err.detail
+        );
     }
 
     #[test]
