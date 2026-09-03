@@ -1,6 +1,6 @@
 [package]
 name = "agent-first-http"
-version = "0.13.1"
+version = "0.13.2"
 edition = "2024"
 description = "Give your AI agent its own private browser — so it reads the real page, past logins and bot walls, without ever touching yours."
 license = "MIT"

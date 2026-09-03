@@ -15,11 +15,16 @@
 
 mod support;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use agent_first_http::host::bootstrap::HealthPublic;
+use agent_first_http::host::browser::BrowserHandle;
 use agent_first_http::host::listener::{AppState, router_for_tests, test_state};
 use agent_first_http::sdk::Client;
+use axum::extract::ws::{Message, WebSocketUpgrade};
+use axum::response::IntoResponse;
+use futures::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
 
 /// Spawn the host listener on a random TCP port and return its base URL.
@@ -55,6 +60,70 @@ async fn health_reports_starting_when_no_backend() {
     assert!(response.backend_error.is_none());
     assert!(response.profile.is_none());
     assert_eq!(response.capabilities_url.as_deref(), Some("/capabilities"));
+}
+
+/// A stand-in CDP backend that accepts the websocket at once and answers
+/// `Target.getTargets` only after `delay`. This is what a real browser looks
+/// like while several heavy pages render at once: reachable, working, and slow.
+async fn spawn_slow_cdp_backend(delay: Duration, pages: usize) -> String {
+    let handler = move |ws: WebSocketUpgrade| async move {
+        ws.on_upgrade(move |socket| async move {
+            let (mut tx, mut rx) = socket.split();
+            while let Some(Ok(msg)) = rx.next().await {
+                let Message::Text(text) = msg else { continue };
+                let request: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+                tokio::time::sleep(delay).await;
+                let targets: Vec<serde_json::Value> = (0..pages)
+                    .map(|i| serde_json::json!({"targetId": format!("target-{i}"), "type": "page"}))
+                    .collect();
+                let reply = serde_json::json!({
+                    "id": request["id"],
+                    "result": {"targetInfos": targets},
+                });
+                let _ = tx.send(Message::Text(reply.to_string().into())).await;
+            }
+        })
+        .into_response()
+    };
+    let app = axum::Router::new().route("/devtools/browser/slow", axum::routing::get(handler));
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind backend");
+    let addr = listener.local_addr().expect("local_addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    format!("ws://{addr}/devtools/browser/slow")
+}
+
+/// The probe decides, for every reader of `/health`, whether the backend is
+/// still there — so it must not answer "gone" for one that is merely busy. A
+/// budget under a second reported a rendering browser as broken, and callers
+/// downstream refused requests the browser would have served. The delay here
+/// is well past that old budget and well inside a working browser's worst case.
+#[tokio::test]
+async fn a_slow_backend_is_busy_not_degraded() {
+    support::ensure_rustls_provider();
+    let ws_url = spawn_slow_cdp_backend(Duration::from_millis(1_200), 2).await;
+    let profile_tmp = tempfile::tempdir().expect("profile tmp");
+    let handle = Arc::new(BrowserHandle::synthetic_at(
+        ws_url,
+        profile_tmp.path().to_path_buf(),
+    ));
+    let state = test_state(None, HealthPublic::Off).with_default_browser(handle);
+    let base = serve_state(state).await;
+    let client = Client::connect(&base).expect("client");
+
+    let response = client.health().await.expect("health");
+    assert_eq!(
+        response.status, "ok",
+        "a backend that answered late is not degraded; backend_error: {:?}",
+        response.backend_error
+    );
+    assert!(response.backend_error.is_none());
+    assert_eq!(response.tabs_active, 2);
+    assert!(response.backend.expect("backend").connected);
 }
 
 #[tokio::test]

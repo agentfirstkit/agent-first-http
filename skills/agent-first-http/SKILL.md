@@ -84,6 +84,13 @@ Treat `status: 200` as transport only. If the page is a login, consent gate,
 security check, captcha, or bot wall, do not answer as if the target page was
 verified.
 
+A host is one browser, and every fetch sent to it shares that browser's memory
+and CPU. Fetch a list of heavy, JS-driven pages one at a time: rendering several
+at once is not faster, and past a couple of them they begin to time out
+together, which reads as the site refusing rather than the browser running out
+of room. When a single page is slow, raise `--timeout-ms` rather than adding
+concurrency.
+
 ## Stay On Task
 
 Keep the crawl bounded by the user's actual question. For follow-ups like

@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-http",
   "name": "Agent-First HTTP",
-  "version": "0.13.1",
+  "version": "0.13.2",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "Give your AI agent its own private browser — so it reads the real page, past logins and bot walls, without ever touching yours.",
@@ -13,11 +13,12 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Fix the prebuilt container install, which failed on every platform: the Dockerfile copies install-browser-policy.sh out of the embedded build context and that file was never embedded, so the default install path died on a missing file while --from-source kept working",
-    "Report what the builder actually said when an image build fails, instead of asserting an unchecked cause; the source-build routes are named only when the release download is what failed, rather than on every failure regardless of reason",
-    "Hand the data volume to the image's own account before first start on the Apple runtime, where a named volume is mounted root-owned and the non-root host could not create its state directory",
-    "Read container state from Apple's inspect shape (status.state) as well as Docker's (State.Running), and list with ls rather than a ps subcommand Apple does not have; between them every container on that runtime read as stopped and a healthy host was reported as having exited",
-    "Update the pinned camoufox backend from v152.0.4-beta.28 to v152.0.4-beta.29"
+    "Widen the host liveness probe and time its websocket connect and CDP call separately, so a browser busy rendering is no longer reported as a browser that is gone",
+    "Stop host discovery from refusing a request over a degraded backend reading — only a host that reports having no browser yet blocks one now",
+    "Name `afhttp container install` in the recovery hint only when no host was found, instead of pointing at a container that just answered",
+    "Wait out a transient unhealthy /health reading during container install rather than failing the install on the first one",
+    "Document that one host is one browser, so heavy JS-driven pages are fetched one at a time rather than concurrently",
+    "Refresh the dependency lockfile, replacing a yanked chacha20 release, and follow the pinned Go toolchain to 1.27.1"
   ],
   "bonds": [
     {

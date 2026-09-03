@@ -115,6 +115,19 @@ impl BrowserHandle {
         }
     }
 
+    /// A synthetic handle that also carries a CDP address, so a test can put
+    /// a stand-in backend behind `/health` instead of a real browser. The
+    /// probe's whole job is deciding what a backend's answer — or its silence
+    /// — means, and that decision is only testable against a backend whose
+    /// timing the test controls.
+    #[cfg(any(test, feature = "host"))]
+    pub fn synthetic_at(ws_url: impl Into<String>, profile_path: PathBuf) -> Self {
+        BrowserHandle {
+            ws_url: ws_url.into(),
+            ..BrowserHandle::synthetic(profile_path)
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn synthetic_ephemeral(ephemeral_dir: tempfile::TempDir) -> Self {
         let profile_path = ephemeral_dir.path().to_path_buf();

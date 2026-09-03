@@ -30,3 +30,6 @@ cli::args::tests::a_token_source_is_classified_but_not_read
 cli::cmd::fetch::tests::a_plain_fetch_needs_no_host_and_discovers_nothing
 cli::cmd::fetch::tests::a_named_endpoint_is_never_second_guessed
 cli::token_source::tests::an_unreadable_source_names_the_flag_and_not_the_value
+a_slow_backend_is_busy_not_degraded
+cli::cmd::container::tests::only_a_host_without_a_backend_blocks_discovery
+cli::cmd::container::tests::a_host_that_answered_is_never_told_to_install_one

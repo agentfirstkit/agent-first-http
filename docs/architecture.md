@@ -98,9 +98,16 @@ These hold across every command (the per-flag reference is generated into
   Every driver command (`fetch`/`cdp`/`tabs`/`upload`/`health`/`capabilities`/`panel`)
   falls back to `AFHTTP_ENDPOINT_URL` when the flag is omitted, and then to the
   standard local `afhttp-host` container: it is inspected read-only for its
-  token and verified over `/health` before anything is sent. Discovery never
-  starts or recreates a container, and `fetch` without a profile or a takeover
-  still needs no host at all — it runs inline.
+  token and verified over `/health` before anything is sent. That verification
+  covers what discovery is entitled to decide — the host is running, its token
+  is readable, its version matches the driver's, and it has a backend at all —
+  and stops there. A `degraded` backend is a reading about how busy the browser
+  is, not a verdict on whether the request can be served, so it does not block:
+  the request goes out and fails, if it fails, with what actually broke. This is
+  also what a caller who names the host with `--endpoint-url` gets, so both ways
+  of reaching a host behave alike. Discovery never starts or recreates a
+  container, and `fetch` without a profile or a takeover still needs no host at
+  all — it runs inline.
 - `--token-secret` is sent as `Authorization: Bearer <token>` for HTTP control
   requests, and the flag names a *source* rather than only a value:
   `env:NAME`, `file:PATH#DOT_PATH` (any JSON/TOML/YAML/dotenv/INI config, read

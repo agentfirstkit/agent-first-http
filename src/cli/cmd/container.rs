@@ -985,7 +985,7 @@ pub(crate) async fn discover_default_local_host(
     token_override: Option<&str>,
 ) -> Result<LocalHost, Error> {
     let runtime = resolve_runtime(None).map_err(|e| {
-        local_host_error(format!(
+        local_host_missing_error(format!(
             "could not choose a container runtime to inspect `{DEFAULT_CONTAINER_NAME}`: {}",
             e.detail
         ))
@@ -994,7 +994,7 @@ pub(crate) async fn discover_default_local_host(
         .map(|s| s.running)
         .unwrap_or_else(|| container_running(runtime, DEFAULT_CONTAINER_NAME));
     if !running {
-        return Err(local_host_error(format!(
+        return Err(local_host_missing_error(format!(
             "default local container `{DEFAULT_CONTAINER_NAME}` is not running"
         )));
     }
@@ -1026,13 +1026,9 @@ pub(crate) async fn discover_default_local_host(
             &health.version,
         )));
     }
-    if health.status != "ok" {
-        let detail = health
-            .backend_error
-            .map(|e| format!("{}: {}", e.error_code, e.error))
-            .unwrap_or_else(|| format!("status={}", health.status));
+    if discovery_blocks_on_status(&health.status) {
         return Err(local_host_error(format!(
-            "default local container `{DEFAULT_CONTAINER_NAME}` at {endpoint} is not ready: {detail}"
+            "default local container `{DEFAULT_CONTAINER_NAME}` at {endpoint} is still starting and has no browser yet"
         )));
     }
     Ok(LocalHost {
@@ -1113,16 +1109,47 @@ fn container_token_error(name: &str, detail: &str) -> Error {
     )
 }
 
+/// Discovery answers "where is the host", not "is its browser idle". A backend
+/// that missed one liveness probe is most often a backend rendering something
+/// heavy, and refusing on that reading turns it into a request that never ran,
+/// carrying a diagnosis discovery is in no position to make. A caller who names
+/// the host with `--endpoint-url` gets no such gate, so leaving the judgement to
+/// the request also makes both ways of reaching a host behave alike: each fails,
+/// when it fails, with what actually broke. The host saying it has no backend
+/// yet is the one answer that is a fact rather than a reading, and the only one
+/// worth stopping for.
+fn discovery_blocks_on_status(status: &str) -> bool {
+    status == "starting"
+}
+
+/// A host was reached but did not check out. Naming `container install` here
+/// would send the caller to start something that is already running, so the
+/// recovery line stops at looking and at naming a different host.
 fn local_host_error(detail: String) -> Error {
+    local_host_error_with_recovery(detail, false)
+}
+
+/// Nothing was found to talk to, which is the one case where starting a
+/// container is the fix.
+fn local_host_missing_error(detail: String) -> Error {
+    local_host_error_with_recovery(detail, true)
+}
+
+fn local_host_error_with_recovery(detail: String, missing: bool) -> Error {
     // Some details are one sentence and some — the version mismatch — are a
     // paragraph that already ends in a period. Trim it rather than emit `..`.
     let detail = detail.trim_end_matches('.');
+    let recovery = if missing {
+        "Start one with `afhttp container install`, inspect it with `afhttp container status`,"
+    } else {
+        "Inspect it with `afhttp container status`,"
+    };
     Error::new(
         ErrorCode::InvalidArgument,
         format!(
             "no --endpoint-url or AFHTTP_ENDPOINT_URL was given, so afhttp looked for the default \
-             local host, and {detail}. Start one with `afhttp container install`, inspect it with \
-             `afhttp container status`, or pass --endpoint-url/--token-secret explicitly."
+             local host, and {detail}. {recovery} or pass --endpoint-url/--token-secret \
+             explicitly."
         ),
     )
 }
@@ -1618,6 +1645,7 @@ async fn wait_for_container_health(
 ) -> Result<(), Error> {
     let endpoint = endpoint_url(port);
     let client = crate::sdk::Client::connect(&endpoint)?.with_token(token.to_string());
+    let mut last_unhappy: Option<Error> = None;
     for attempt in 0..30 {
         if !container_running(runtime, name) {
             return Err(container_launch_failure_error(
@@ -1638,15 +1666,21 @@ async fn wait_for_container_health(
             }
             Ok(health) if health.status == "ok" => return Ok(()),
             Ok(health) => {
-                if let Some(backend_error) = health.backend_error {
-                    return Err(Error::new(
+                // A backend that misses one probe here is usually a backend
+                // still opening its first window, so this remembers why and
+                // keeps waiting. Failing the whole install on the first
+                // unhappy reading would call a slow start a broken one, and
+                // the deadline below already bounds how long that can go on.
+                let status = health.status;
+                last_unhappy = health.backend_error.map(|backend_error| {
+                    Error::new(
                         backend_error.error_code,
                         format!(
-                            "container host /health reported {}: {}",
-                            health.status, backend_error.error
+                            "container host /health reported {status}: {}",
+                            backend_error.error
                         ),
-                    ));
-                }
+                    )
+                });
             }
             Err(_) => {}
         }
@@ -1654,11 +1688,15 @@ async fn wait_for_container_health(
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
     }
-    Err(container_launch_failure_error(
-        runtime,
-        name,
-        "container host did not pass /health before the startup deadline",
-    ))
+    // The last reason the host gave beats a generic timeout, and is why the
+    // reading is kept rather than acted on immediately.
+    Err(last_unhappy.unwrap_or_else(|| {
+        container_launch_failure_error(
+            runtime,
+            name,
+            "container host did not pass /health before the startup deadline",
+        )
+    }))
 }
 
 fn container_launch_failure_error(runtime: Runtime, name: &str, reason: &str) -> Error {
@@ -2250,9 +2288,47 @@ mod tests {
         assert!(host_version_warning(DEFAULT_CONTAINER_NAME, VERSION).is_none());
     }
 
+    /// A host that answered is a host that is running, so the recovery line
+    /// must not send the caller off to start one. This is what turned a busy
+    /// browser into "start a container with `afhttp container install`".
+    #[test]
+    fn a_host_that_answered_is_never_told_to_install_one() {
+        let err = local_host_error(
+            "default local container `afhttp-host` at ws://127.0.0.1:9222 is still starting and has no browser yet"
+                .into(),
+        );
+        assert!(
+            !err.detail.contains("afhttp container install"),
+            "a reachable host must not be diagnosed as a missing one: {}",
+            err.detail
+        );
+        assert!(
+            err.detail.contains("afhttp container status"),
+            "{}",
+            err.detail
+        );
+        assert!(
+            err.detail.contains("--endpoint-url/--token-secret"),
+            "{}",
+            err.detail
+        );
+    }
+
+    /// The incident this rule comes from: twelve fetches against a running,
+    /// working host were refused before they were sent, because its browser
+    /// was busy rendering and missed a liveness probe. Only `starting` — the
+    /// host reporting it has no backend at all — may stop a request.
+    #[test]
+    fn only_a_host_without_a_backend_blocks_discovery() {
+        assert!(discovery_blocks_on_status("starting"));
+        assert!(!discovery_blocks_on_status("degraded"));
+        assert!(!discovery_blocks_on_status("ok"));
+    }
+
     #[test]
     fn local_host_error_names_autodiscovery_and_manual_commands() {
-        let err = local_host_error("default local container `afhttp-host` is not running".into());
+        let err =
+            local_host_missing_error("default local container `afhttp-host` is not running".into());
         assert_eq!(err.error_code, ErrorCode::InvalidArgument);
         assert!(err.detail.contains("afhttp-host"));
         assert!(err.detail.contains("afhttp container install"));

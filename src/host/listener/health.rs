@@ -76,6 +76,19 @@ pub async fn build(state: &AppState, authenticated: bool) -> HealthResponse {
     }
 }
 
+/// A backend under load is not a backend that is gone, and this probe is the
+/// only thing every reader of `/health` has to tell those two apart. Several
+/// heavy pages rendering at once park CDP replies for seconds, so a budget
+/// tight enough to feel like a liveness check is also tight enough to report a
+/// busy browser as a broken one. These are sized for the slow case on purpose:
+/// a probe that answers late costs one `/health` call, while a probe that
+/// answers wrong costs the request that trusted it.
+const PROBE_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const PROBE_COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Connect and command are timed apart so the failure names the phase that
+/// actually stalled: a backend that will not accept a websocket is a different
+/// problem from one that accepts it and then never answers.
 async fn probe_tabs_active(entry: &ProfileEntry) -> Result<u32, Error> {
     if entry.ws_url().is_empty() {
         return Err(Error::new(
@@ -83,17 +96,30 @@ async fn probe_tabs_active(entry: &ProfileEntry) -> Result<u32, Error> {
             "backend CDP websocket URL is empty",
         ));
     }
-    let fut = async {
-        let conn = Connection::connect(entry.ws_url(), None).await?;
-        let result = conn
-            .send("Target.getTargets", &serde_json::json!({}), None)
-            .await;
-        conn.close();
-        result
-    };
-    let value = tokio::time::timeout(Duration::from_millis(750), fut)
-        .await
-        .map_err(|_| Error::new(ErrorCode::CdpTimeout, "Target.getTargets timed out"))??;
+    let conn = tokio::time::timeout(
+        PROBE_CONNECT_TIMEOUT,
+        Connection::connect(entry.ws_url(), None),
+    )
+    .await
+    .map_err(|_| {
+        Error::new(
+            ErrorCode::CdpTimeout,
+            format!(
+                "connecting to the backend CDP websocket timed out after {}ms",
+                PROBE_CONNECT_TIMEOUT.as_millis()
+            ),
+        )
+    })??;
+    let result = conn
+        .send_timeout(
+            "Target.getTargets",
+            &serde_json::json!({}),
+            None,
+            PROBE_COMMAND_TIMEOUT,
+        )
+        .await;
+    conn.close();
+    let value = result?;
     let count = value
         .get("targetInfos")
         .and_then(|v| v.as_array())
