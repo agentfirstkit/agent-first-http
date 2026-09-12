@@ -36,7 +36,7 @@ other commands may omit it.
 | `request_url` | always on success | URL originally requested by the agent. |
 | `status` | if HTTP response exists | Final HTTP status code. 4xx/5xx are successful transport responses, not `error` envelopes. |
 | `final_url` | always on success | URL after redirects/navigation. |
-| `tab_id` | when a browser tab was used | CDP target/tab id for follow-up `afhttp cdp` or `afhttp fetch --tab`. |
+| `tab_id` | when the tab is still open | CDP target/tab id for follow-up `afhttp cdp` or `afhttp fetch --tab`. Present only for a caller-named `--tab` or a pending takeover; a tab the fetch opened and closed is not reported. |
 | `content_type` | when the response carried one | Response `Content-Type` verbatim. Prefer it over guessing from `body_file`'s extension: the extension comes from a lossy table and unknown types land in `body.bin`. |
 | `body_file` | when `body` requested and body exists | Raw HTTP response body path. |
 | `rendered_html_file` | when produced | Serialized post-JS DOM path. |
@@ -66,7 +66,6 @@ Example:
   "request_url": "https://example.com/",
   "status": 200,
   "final_url": "https://example.com/",
-  "tab_id": "page-1",
   "body_file": "/tmp/afhttp-out/req/body.html",
   "content_file": "/tmp/afhttp-out/req/content.md",
   "content_json_file": "/tmp/afhttp-out/req/content.json",

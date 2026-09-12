@@ -65,7 +65,13 @@ pub async fn handler(
                 .into_response();
         }
     };
-    ws.on_upgrade(move |socket| forward(socket, backend))
+    ws.on_upgrade(move |socket| async move {
+        // Held for the connection's lifetime: while any proxy client is
+        // connected the host counts as in use, which is what keeps the
+        // idle-tab reaper's hands off a browser someone is driving.
+        let _client = state.cdp_client_guard();
+        forward(socket, backend).await;
+    })
 }
 
 async fn forward(client: WebSocket, browser_ws_url: Arc<String>) {

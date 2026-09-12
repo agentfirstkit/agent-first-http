@@ -274,13 +274,13 @@ Run the browser host: launch a backend browser and serve /cdp for clients.
 #### `host` — Serve no takeover surface; --display picks headless or headful
 
 ```
-afhttp host --listen <tcp:HOST:PORT|unix:PATH> [--profile <NAME>] [--display <headless|headful>] [--takeover-provider off] [--browser <auto|chromium|chrome|fingerprint-chromium|edge|brave|lightpanda|camoufox>] [--browser-bin <PATH>] [--token-secret <SOURCE>] [--no-health] [--health-public <off|minimal>] [--engine-env <NAME=VALUE>...] [--browser-arg <FLAG>...] [--proxy-url <URL>] [--recent-requests-cap <N>]
+afhttp host --listen <tcp:HOST:PORT|unix:PATH> [--profile <NAME>] [--display <headless|headful>] [--takeover-provider off] [--browser <auto|chromium|chrome|fingerprint-chromium|edge|brave|lightpanda|camoufox>] [--browser-bin <PATH>] [--token-secret <SOURCE>] [--no-health] [--health-public <off|minimal>] [--engine-env <NAME=VALUE>...] [--browser-arg <FLAG>...] [--proxy-url <URL>] [--recent-requests-cap <N>] [--tab-idle-timeout-s <SECONDS>]
 ```
 
 #### `host-takeover` — Serve a KasmVNC real-display takeover, which is always headful
 
 ```
-afhttp host --listen <tcp:HOST:PORT|unix:PATH> [--profile <NAME>] --takeover-provider kasmvnc [--takeover-quality-percent <PERCENT>] [--browser <auto|chromium|chrome|fingerprint-chromium|edge|brave|lightpanda|camoufox>] [--browser-bin <PATH>] [--token-secret <SOURCE>] [--no-health] [--health-public <off|minimal>] [--engine-env <NAME=VALUE>...] [--browser-arg <FLAG>...] [--proxy-url <URL>] [--recent-requests-cap <N>]
+afhttp host --listen <tcp:HOST:PORT|unix:PATH> [--profile <NAME>] --takeover-provider kasmvnc [--takeover-quality-percent <PERCENT>] [--browser <auto|chromium|chrome|fingerprint-chromium|edge|brave|lightpanda|camoufox>] [--browser-bin <PATH>] [--token-secret <SOURCE>] [--no-health] [--health-public <off|minimal>] [--engine-env <NAME=VALUE>...] [--browser-arg <FLAG>...] [--proxy-url <URL>] [--recent-requests-cap <N>] [--tab-idle-timeout-s <SECONDS>]
 ```
 
 Output: protocol events; `--output` json (default `json`), `--output-to` split/stdout/stderr (default `stdout`); redirect with `--stdout-file` or `--stderr-file`.
@@ -303,6 +303,7 @@ Arguments across every shape above:
 | `--browser-arg` | Raw backend flag appended after the host's defaults |
 | `--proxy-url` | Upstream browser proxy; ambient HTTP_PROXY is never inherited |
 | `--recent-requests-cap` | Enable /recent-requests with a bounded ring of N entries; 0 is off |
+| `--tab-idle-timeout-s` | Close page tabs after this long with no client connected and no takeover pending; 0 is off |
 
 ### `afhttp panel`
 

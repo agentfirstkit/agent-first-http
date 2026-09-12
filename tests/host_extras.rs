@@ -45,6 +45,7 @@ async fn spawn() -> Option<String> {
         browser_args: Vec::new(),
         proxy: None,
         recent_requests_cap: 0,
+        tab_idle_timeout_s: 0,
     };
     let handle = browser::launch(&args).await.expect("browser launch");
     let state = test_state(None, HealthPublic::Off).with_default_browser(Arc::new(handle));

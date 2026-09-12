@@ -61,6 +61,7 @@ async fn spawn_host_with_camoufox() -> Option<(String, tempfile::TempDir)> {
         browser_args: Vec::new(),
         proxy: None,
         recent_requests_cap: 0,
+        tab_idle_timeout_s: 0,
     };
     let handle = browser::launch(&args).await.expect("camoufox launch");
     assert_eq!(handle.family, "camoufox");
@@ -126,6 +127,7 @@ async fn camoufox_refuses_persistent_profile() {
         browser_args: Vec::new(),
         proxy: None,
         recent_requests_cap: 0,
+        tab_idle_timeout_s: 0,
     };
     let err = browser::launch(&args).await.err().expect("expected error");
     assert_eq!(

@@ -243,7 +243,11 @@ impl FetchBuilder {
         self
     }
 
-    /// Keep a freshly-opened target open after the fetch (for human takeover).
+    /// Declare takeover intent: keep the target open after the fetch when the
+    /// page turned out to need a human (`next_action` is set on the result).
+    /// When the fetch reaches the content directly the target is closed even
+    /// with this set — a tab that stays open must have someone coming to it,
+    /// and a clean result sends nobody.
     #[must_use]
     pub fn keep_tab_open(mut self, keep: bool) -> Self {
         self.keep_tab_open = keep;

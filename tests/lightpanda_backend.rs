@@ -47,6 +47,7 @@ async fn spawn_host_with_lightpanda() -> Option<(String, tempfile::TempDir)> {
         browser_args: Vec::new(),
         proxy: None,
         recent_requests_cap: 0,
+        tab_idle_timeout_s: 0,
     };
     let handle = browser::launch(&args).await.expect("lightpanda launch");
     assert_eq!(handle.family, "lightpanda");
@@ -106,6 +107,7 @@ async fn lightpanda_refuses_persistent_profile() {
         browser_args: Vec::new(),
         proxy: None,
         recent_requests_cap: 0,
+        tab_idle_timeout_s: 0,
     };
     let err = browser::launch(&args).await.err().expect("expected error");
     assert_eq!(

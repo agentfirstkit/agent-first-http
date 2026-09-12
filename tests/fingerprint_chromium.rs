@@ -53,6 +53,7 @@ async fn spawn_host_with_fingerprint_chromium() -> Option<(String, tempfile::Tem
         browser_args: Vec::new(),
         proxy: None,
         recent_requests_cap: 0,
+        tab_idle_timeout_s: 0,
     };
     let handle = browser::launch(&args)
         .await

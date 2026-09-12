@@ -182,6 +182,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         browser_args: Vec::new(),
         proxy: None,
         recent_requests_cap: 0,
+        tab_idle_timeout_s: 0,
     };
     eprintln!("launching KasmVNC + {browser_arg} headful (this can take a few seconds)…");
     let state = AppState::launch(&args).await?;

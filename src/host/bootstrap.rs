@@ -48,6 +48,10 @@ pub struct HostArgs {
     /// Maximum number of recent requests to keep in the ring. `0` (default)
     /// disables the `/recent-requests` endpoint entirely.
     pub recent_requests_cap: usize,
+    /// Seconds the host may sit idle — no `/cdp` client connected, no live
+    /// takeover credential — before leftover page targets are closed. `0`
+    /// disables the reaper.
+    pub tab_idle_timeout_s: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,6 +161,12 @@ pub fn install_rustls_provider() {
 pub async fn run(args: HostArgs) -> Result<(), Error> {
     install_rustls_provider();
     let state = AppState::launch(&args).await?;
+    if args.tab_idle_timeout_s > 0 {
+        crate::host::reaper::spawn(
+            state.clone(),
+            std::time::Duration::from_secs(args.tab_idle_timeout_s),
+        );
+    }
     state.serve(&args.listen).await
 }
 

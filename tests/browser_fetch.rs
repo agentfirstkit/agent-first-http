@@ -49,6 +49,7 @@ async fn spawn_host_with_browser() -> Option<(String, tempfile::TempDir, OwnedSe
         browser_args: Vec::new(),
         proxy: None,
         recent_requests_cap: 0,
+        tab_idle_timeout_s: 0,
     };
     let handle = browser::launch(&args).await.expect("browser launch");
     let state = test_state(None, HealthPublic::Off).with_default_browser(Arc::new(handle));
@@ -106,7 +107,9 @@ async fn render_always_returns_rendered_html_and_artifacts() {
         result.trace.render_decision,
         agent_first_http::sdk::fetch::result::RenderDecision::Browser
     );
-    assert!(result.tab_id.is_some());
+    // A one-shot fetch closes the target it opened, so no tab_id is
+    // reported: a tab_id always names a tab that is still open.
+    assert!(result.tab_id.is_none());
     assert_eq!(result.status, 200);
 
     // All seven artifacts produced.
@@ -606,6 +609,152 @@ async fn fetch_tab_reuses_existing_target_and_does_not_close_it() {
         .iter()
         .any(|t| t["targetId"].as_str() == Some(target_id.as_str()));
     assert!(still_open, "fetch --tab must not close reused target");
+}
+
+async fn target_is_open(client: &Client, target_id: &str) -> bool {
+    let targets = client
+        .cdp("Target.getTargets")
+        .send()
+        .await
+        .expect("Target.getTargets");
+    targets["targetInfos"]
+        .as_array()
+        .unwrap_or(&Vec::new())
+        .iter()
+        .any(|t| t["targetId"].as_str() == Some(target_id))
+}
+
+/// Target.closeTarget's response acknowledges that closing began, so a target
+/// can linger in Target.getTargets briefly after a fetch returns. Poll it out
+/// instead of asserting on a single racy snapshot.
+async fn wait_until_closed(client: &Client, target_id: &str) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if !target_is_open(client, target_id).await {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[tokio::test]
+async fn takeover_intent_without_a_wall_closes_the_created_tab() {
+    let Some((endpoint, tmp, _browser_guard)) = spawn_host_with_browser().await else {
+        println!("(skipping: no chromium)");
+        return;
+    };
+    let fixture = support::fixture_server::spawn().await;
+    let client = Client::connect(&endpoint).expect("client");
+
+    // Takeover intent, but the page came back clean: no human is coming, so
+    // the freshly-opened tab must close instead of idling forever.
+    let result = client
+        .fetch(format!("{}/plain.html", fixture.base_url()))
+        .render(RenderMode::Always)
+        .keep_tab_open(true)
+        .wait(Wait::Load)
+        .timeout(Duration::from_secs(10))
+        .want([Artifact::Text])
+        .out_dir(tmp.path().to_path_buf())
+        .send()
+        .await
+        .expect("fetch");
+    assert!(
+        result.next_action.is_none(),
+        "plain page must not be a wall"
+    );
+    assert!(
+        result.tab_id.is_none(),
+        "a closed tab must not be reported as tab_id"
+    );
+
+    // No tab_id to name the closed target, so poll by URL for the same
+    // reason wait_until_closed polls by id: the close is acknowledged before
+    // the target list reflects it.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let targets = client
+            .cdp("Target.getTargets")
+            .send()
+            .await
+            .expect("Target.getTargets");
+        let leaked = targets["targetInfos"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .any(|t| {
+                t["type"].as_str() == Some("page")
+                    && t["url"].as_str().is_some_and(|u| u.contains("plain.html"))
+            });
+        if !leaked {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "clean takeover fetch leaked its tab: {targets:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[tokio::test]
+async fn takeover_intent_with_a_wall_keeps_the_tab_open() {
+    let Some((endpoint, tmp, _browser_guard)) = spawn_host_with_browser().await else {
+        println!("(skipping: no chromium)");
+        return;
+    };
+    let fixture = support::fixture_server::spawn().await;
+    let client = Client::connect(&endpoint).expect("client");
+
+    let result = client
+        .fetch(format!("{}/cloudflare-turnstile.html", fixture.base_url()))
+        .render(RenderMode::Always)
+        .keep_tab_open(true)
+        .wait(Wait::Ms(300))
+        .timeout(Duration::from_secs(15))
+        .want([Artifact::RenderedHtml])
+        .out_dir(tmp.path().to_path_buf())
+        .send()
+        .await
+        .expect("fetch");
+    assert!(
+        result.next_action.is_some(),
+        "challenge page must set next_action; page_kind={:?}",
+        result.page_kind
+    );
+    let tab_id = result.tab_id.as_ref().expect("tab_id for pending takeover");
+    assert!(
+        target_is_open(&client, tab_id.as_str()).await,
+        "tab with a pending takeover must stay open"
+    );
+
+    // The human cleared the wall (simulated: the tab now shows a clean
+    // page); the takeover re-fetch of the same tab completes the loop and
+    // closes it.
+    let result = client
+        .fetch(format!("{}/plain.html", fixture.base_url()))
+        .render(RenderMode::Always)
+        .tab(TabId::new(tab_id.as_str()))
+        .keep_tab_open(true)
+        .wait(Wait::Load)
+        .timeout(Duration::from_secs(10))
+        .want([Artifact::Text])
+        .out_dir(tmp.path().to_path_buf())
+        .send()
+        .await
+        .expect("re-fetch");
+    assert!(result.next_action.is_none());
+    assert!(
+        result.tab_id.is_none(),
+        "completed takeover must not report a tab_id"
+    );
+    assert!(
+        wait_until_closed(&client, tab_id.as_str()).await,
+        "completed takeover must close the tab"
+    );
 }
 
 #[tokio::test]

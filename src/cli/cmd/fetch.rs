@@ -210,14 +210,26 @@ async fn run_inner(args: Args) -> Result<(), FetchRunError> {
                 && result.next_action.is_some()
                 && let Some(endpoint) = takeover_endpoint.as_deref()
             {
-                let mut handoff_client = Client::connect(endpoint)?;
-                if let Some(token) = &takeover_token {
-                    handoff_client = handoff_client.with_token(token.expose_secret());
-                }
                 let tab_id = result.tab_id.as_ref().map(|t| t.as_str().to_string());
-                let handoff = handoff_client
-                    .takeover_handoff(None, tab_id.as_deref())
-                    .await?;
+                let handoff =
+                    mint_handoff(endpoint, takeover_token.as_ref(), tab_id.as_deref()).await;
+                let handoff = match handoff {
+                    Ok(handoff) => handoff,
+                    Err(err) => {
+                        // The tab was held open for the human this URL was
+                        // meant to reach; with no URL minted, nobody is
+                        // coming. Best-effort close so a failed handoff does
+                        // not leak a tab still working on the wall.
+                        if let Some(tab) = tab_id.as_deref() {
+                            let _ = client
+                                .cdp("Target.closeTarget")
+                                .params(serde_json::json!({ "targetId": tab }))
+                                .send()
+                                .await;
+                        }
+                        return Err(err.into());
+                    }
+                };
                 result.attach_takeover_with_context(
                     handoff.takeover_url_secret,
                     Some(handoff.takeover_url_expires_at_rfc3339),
@@ -305,6 +317,18 @@ fn takeover_recommended_endpoint(
     } else {
         None
     }
+}
+
+async fn mint_handoff(
+    endpoint: &str,
+    token: Option<&agent_first_data::value_source::SecretString>,
+    tab_id: Option<&str>,
+) -> Result<crate::sdk::TakeoverHandoffResponse, Error> {
+    let mut handoff_client = Client::connect(endpoint)?;
+    if let Some(token) = token {
+        handoff_client = handoff_client.with_token(token.expose_secret());
+    }
+    handoff_client.takeover_handoff(None, tab_id).await
 }
 
 /// Derive a default host profile from a URL's registrable domain (eTLD+1), so

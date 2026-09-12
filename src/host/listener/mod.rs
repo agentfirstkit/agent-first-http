@@ -98,6 +98,12 @@ pub struct AppState {
     /// through timing. Live credentials are few — one per minted panel URL,
     /// dropped as soon as they expire or are revoked — so the scan is cheap.
     handoffs: Arc<RwLock<Vec<UiAccessToken>>>,
+    /// Number of `/cdp` proxy clients currently connected. Every driver's CDP
+    /// traffic flows through the proxy, so this count is the host's own
+    /// answer to "is anyone using this browser right now" — the backend's
+    /// per-target `attached` flag cannot say (a chromium-family host's own
+    /// launcher keeps every page attached).
+    cdp_clients: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl AppState {
@@ -157,6 +163,29 @@ impl AppState {
         self.revoke_takeover_handoffs();
         drop(old);
         Ok(())
+    }
+
+    /// RAII lease for one connected `/cdp` proxy client.
+    pub fn cdp_client_guard(&self) -> CdpClientGuard {
+        self.cdp_clients
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        CdpClientGuard(self.cdp_clients.clone())
+    }
+
+    /// How many `/cdp` proxy clients are connected right now.
+    pub fn cdp_client_count(&self) -> usize {
+        self.cdp_clients.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Whether any takeover credential (fixed handoff or panel UI lease) is
+    /// still live. The tab reaper reads this as "a human is at, or on their
+    /// way to, the display": a viewer on the real display drives the browser
+    /// without ever opening a CDP connection, so credential liveness is the
+    /// only signal the host has that someone is still coming to a tab.
+    pub fn has_live_takeover_credentials(&self) -> bool {
+        let mut handoffs = self.handoffs.write().unwrap_or_else(|e| e.into_inner());
+        handoffs.retain(is_live);
+        !handoffs.is_empty()
     }
 
     /// Revoke every live takeover credential, so any panel still open on it
@@ -299,6 +328,7 @@ impl AppState {
             recent_requests: recent,
             takeover,
             handoffs: Arc::new(RwLock::new(Vec::new())),
+            cdp_clients: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         })
     }
 
@@ -494,6 +524,15 @@ impl AppState {
 /// revoked by a profile switch or host shutdown.
 fn is_live(token: &UiAccessToken) -> bool {
     !token.is_expired() && !token.is_revoked()
+}
+
+/// Decrements the `/cdp` client count when a proxy connection ends.
+pub struct CdpClientGuard(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for CdpClientGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 async fn takeover_handoff_handler(
@@ -1028,6 +1067,7 @@ pub fn test_state(token: Option<&str>, health_public: HealthPublic) -> AppState 
         recent_requests: None,
         takeover: None,
         handoffs: Arc::new(RwLock::new(Vec::new())),
+        cdp_clients: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     }
 }
 

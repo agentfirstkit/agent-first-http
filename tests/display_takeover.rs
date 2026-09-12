@@ -388,6 +388,7 @@ async fn lightpanda_rejects_kasmvnc_takeover_before_launch() {
         browser_args: Vec::new(),
         proxy: None,
         recent_requests_cap: 0,
+        tab_idle_timeout_s: 0,
     };
     let err = AppState::launch(&args).await.err().expect("expected error");
     assert_eq!(err.error_code, ErrorCode::BackendUnsupported);
@@ -497,6 +498,7 @@ async fn takeover_browsers_expose_webgl_on_a_real_display() {
             browser_args: Vec::new(),
             proxy: None,
             recent_requests_cap: 0,
+            tab_idle_timeout_s: 0,
         };
         let handle = agent_first_http::host::browser::launch(&args)
             .await
@@ -602,6 +604,7 @@ async fn takeover_download_lands_in_profile_without_a_save_dialog() {
         browser_args: Vec::new(),
         proxy: None,
         recent_requests_cap: 0,
+        tab_idle_timeout_s: 0,
     };
     let handle = agent_first_http::host::browser::launch(&args)
         .await

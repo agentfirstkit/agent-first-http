@@ -58,6 +58,7 @@ command host
   arg browser_arg --browser-arg ...
   arg proxy_url --proxy-url
   arg recent_requests_cap --recent-requests-cap =0
+  arg tab_idle_timeout_s --tab-idle-timeout-s =900
   shape host -> host
   shape host-takeover -> host
 command upload

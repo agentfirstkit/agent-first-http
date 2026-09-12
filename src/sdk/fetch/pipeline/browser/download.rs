@@ -37,7 +37,7 @@ pub(super) struct DownloadNavigation {
     pub(super) escalation_reason: Option<String>,
     pub(super) target_id: String,
     pub(super) session_id: String,
-    pub(super) close_target_after_fetch: bool,
+    pub(super) created_target: bool,
     pub(super) deadline: FetchDeadline,
 }
 
@@ -59,11 +59,11 @@ pub(super) async fn finish_download_navigation(
         escalation_reason,
         target_id,
         session_id,
-        close_target_after_fetch,
+        created_target,
         deadline,
     } = ctx;
     let Some(download_dir) = download_dir else {
-        finish_target(&conn, &target_id, &session_id, close_target_after_fetch).await;
+        finish_target(&conn, &target_id, &session_id, created_target).await;
         return Err(Error::new(
             ErrorCode::ArtifactCaptureFailed,
             "navigation became a download, but the host profile download directory was unavailable",
@@ -74,7 +74,7 @@ pub(super) async fn finish_download_navigation(
         match wait_for_download_file(&download_dir, &downloads_before, builder.timeout).await {
             Ok(file) => file,
             Err(e) => {
-                finish_target(&conn, &target_id, &session_id, close_target_after_fetch).await;
+                finish_target(&conn, &target_id, &session_id, created_target).await;
                 return Err(e);
             }
         };
@@ -99,7 +99,9 @@ pub(super) async fn finish_download_navigation(
     });
     let mut result = FetchResult::new(request_id, builder.url.clone(), deadline.snapshot());
     result.status = main_entry.as_ref().and_then(|e| e.status).unwrap_or(0);
-    result.tab_id = Some(TabId::new(target_id.clone()));
+    // A download can never be a wall, so a created target always closes at
+    // the end of this path; only a caller-named tab survives to be reported.
+    result.tab_id = (!created_target).then(|| TabId::new(target_id.clone()));
     result.download_file = Some(downloaded.path.clone());
     result.download_bytes = Some(downloaded.bytes);
     result.download_filename = Some(downloaded.filename);
@@ -122,7 +124,7 @@ pub(super) async fn finish_download_navigation(
     } else {
         let _ = network_collector.finish().await;
     }
-    finish_target(&conn, &target_id, &session_id, close_target_after_fetch).await;
+    finish_target(&conn, &target_id, &session_id, created_target).await;
     deadline.update_trace(|trace| {
         trace.duration_ms = duration_ms(start.elapsed());
     });

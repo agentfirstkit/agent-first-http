@@ -61,6 +61,7 @@ async fn spawn_takeover_host(
         browser_args: Vec::new(),
         proxy: None,
         recent_requests_cap: 0,
+        tab_idle_timeout_s: 0,
     };
     let handle = browser::launch(&args)
         .await

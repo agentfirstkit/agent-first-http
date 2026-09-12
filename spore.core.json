@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-http",
   "name": "Agent-First HTTP",
-  "version": "0.13.2",
+  "version": "0.14.0",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "Give your AI agent its own private browser — so it reads the real page, past logins and bot walls, without ever touching yours.",
@@ -13,12 +13,10 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Widen the host liveness probe and time its websocket connect and CDP call separately, so a browser busy rendering is no longer reported as a browser that is gone",
-    "Stop host discovery from refusing a request over a degraded backend reading — only a host that reports having no browser yet blocks one now",
-    "Name `afhttp container install` in the recovery hint only when no host was found, instead of pointing at a container that just answered",
-    "Wait out a transient unhealthy /health reading during container install rather than failing the install on the first one",
-    "Document that one host is one browser, so heavy JS-driven pages are fetched one at a time rather than concurrently",
-    "Refresh the dependency lockfile, replacing a yanked chacha20 release, and follow the pinned Go toolchain to 1.27.1"
+    "A takeover tab now stays open only while a wall is pending; clean results, errors, and the completed re-fetch close it",
+    "New host idle-tab reaper: --tab-idle-timeout-s (default 900s) closes leftover page tabs once no client is connected and no takeover is pending",
+    "tab_id is reported only for a tab that is still open",
+    "Dependency upgrades: dirs 7; camoufox pin 152.0.4-beta.30"
   ],
   "bonds": [
     {

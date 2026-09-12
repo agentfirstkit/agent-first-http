@@ -33,3 +33,8 @@ cli::token_source::tests::an_unreadable_source_names_the_flag_and_not_the_value
 a_slow_backend_is_busy_not_degraded
 cli::cmd::container::tests::only_a_host_without_a_backend_blocks_discovery
 cli::cmd::container::tests::a_host_that_answered_is_never_told_to_install_one
+sdk::fetch::pipeline::browser::tests::a_kept_tab_needs_a_pending_takeover
+host::reaper::tests::only_web_pages_are_reapable
+takeover_intent_without_a_wall_closes_the_created_tab
+takeover_intent_with_a_wall_keeps_the_tab_open
+idle_unattached_tabs_are_reaped_and_a_window_survives

@@ -352,6 +352,12 @@ fn host(invocation: &ResolvedInvocation) -> Projected {
             "--recent-requests-cap",
             u64::try_from(usize::MAX).unwrap_or(u64::MAX),
         )? as usize,
+        tab_idle_timeout_s: unsigned(
+            invocation,
+            "tab_idle_timeout_s",
+            "--tab-idle-timeout-s",
+            u64::MAX,
+        )?,
     }))
 }
 

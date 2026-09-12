@@ -534,6 +534,7 @@ fn host_command() -> CommandSpec {
         "browser_arg",
         "proxy_url",
         "recent_requests_cap",
+        "tab_idle_timeout_s",
     ];
     let mut headless = shared.to_vec();
     headless.push("display");
@@ -603,6 +604,11 @@ fn host_command() -> CommandSpec {
             ArgSpec::option_i64("--recent-requests-cap", "N")
                 .default_i64(0)
                 .about("Enable /recent-requests with a bounded ring of N entries; 0 is off"),
+        )
+        .arg(
+            ArgSpec::option_i64("--tab-idle-timeout-s", "SECONDS")
+                .default_i64(900)
+                .about("Close page tabs after this long with no client connected and no takeover pending; 0 is off"),
         )
         .combination(
             Combination::new("host")

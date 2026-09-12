@@ -102,6 +102,7 @@ async fn chromium_subprocess_env_is_allowlisted() {
             browser_args: Vec::new(),
             proxy: None,
             recent_requests_cap: 0,
+            tab_idle_timeout_s: 0,
         };
         let handle = browser::launch(&args).await.expect("chromium launch");
         let pid = handle.process_id.expect("chromium process id");
@@ -177,6 +178,7 @@ async fn lightpanda_subprocess_does_not_inherit_ambient_http_proxy() {
             browser_args: Vec::new(),
             proxy: None,
             recent_requests_cap: 0,
+            tab_idle_timeout_s: 0,
         };
         let handle = browser::launch(&args).await.expect("lightpanda launch");
         let state = test_state(None, HealthPublic::Off).with_default_browser(Arc::new(handle));
@@ -255,6 +257,7 @@ async fn engine_env_explicit_passthrough_reaches_subprocess() {
         browser_args: Vec::new(),
         proxy: None,
         recent_requests_cap: 0,
+        tab_idle_timeout_s: 0,
         engine_envs: vec![("AFHTTP_TEST_MARKER".into(), "1".into())],
     };
     let handle = browser::launch(&args)

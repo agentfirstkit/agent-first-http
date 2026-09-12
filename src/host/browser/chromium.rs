@@ -577,6 +577,7 @@ mod tests {
             browser_args: Vec::new(),
             proxy: None,
             recent_requests_cap: 0,
+            tab_idle_timeout_s: 0,
         }
     }
 

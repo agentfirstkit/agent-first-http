@@ -150,8 +150,11 @@ pub(super) async fn browser_path(
         )
         .await?;
 
-    let (target_id, session_id, close_target_after_fetch) = if let Some(tab) = builder.tab.as_ref()
-    {
+    // `created_target` is what error paths key on: an errored fetch mints no
+    // takeover handoff, so a target this fetch opened has no owner and is
+    // closed even under `keep_tab_open`, while a caller-named `--tab` is left
+    // as we found it. The success path decides via [`close_after_success`].
+    let (target_id, session_id, created_target) = if let Some(tab) = builder.tab.as_ref() {
         let target_id = tab.as_str().to_string();
         let session_id = deadline
             .run_result(
@@ -169,9 +172,7 @@ pub(super) async fn browser_path(
                 session::open_blank_target(&conn),
             )
             .await?;
-        // Keep the new target open when the caller asked (human takeover);
-        // otherwise close it once the fetch finishes.
-        (target_id, session_id, !builder.keep_tab_open)
+        (target_id, session_id, true)
     };
 
     deadline
@@ -210,7 +211,7 @@ pub(super) async fn browser_path(
         )
         .await
     {
-        finish_target(&conn, &target_id, &session_id, close_target_after_fetch).await;
+        finish_target(&conn, &target_id, &session_id, created_target).await;
         return Err(e);
     }
 
@@ -256,7 +257,7 @@ pub(super) async fn browser_path(
     let navigate = match navigate {
         Ok(v) => v,
         Err(e) => {
-            finish_target(&conn, &target_id, &session_id, close_target_after_fetch).await;
+            finish_target(&conn, &target_id, &session_id, created_target).await;
             return Err(e);
         }
     };
@@ -290,7 +291,7 @@ pub(super) async fn browser_path(
             escalation_reason,
             target_id,
             session_id,
-            close_target_after_fetch,
+            created_target,
             deadline: deadline.clone(),
         })
         .await;
@@ -299,7 +300,7 @@ pub(super) async fn browser_path(
         && !err.is_empty()
     {
         let code = classify_navigate_error(err);
-        finish_target(&conn, &target_id, &session_id, close_target_after_fetch).await;
+        finish_target(&conn, &target_id, &session_id, created_target).await;
         return Err(Error::new(code, format!("Page.navigate errorText: {err}")));
     }
 
@@ -317,7 +318,7 @@ pub(super) async fn browser_path(
         )
         .await
     {
-        finish_target(&conn, &target_id, &session_id, close_target_after_fetch).await;
+        finish_target(&conn, &target_id, &session_id, created_target).await;
         return Err(e);
     }
 
@@ -348,7 +349,7 @@ pub(super) async fn browser_path(
     {
         Ok(outcome) => outcome,
         Err(e) => {
-            finish_target(&conn, &target_id, &session_id, close_target_after_fetch).await;
+            finish_target(&conn, &target_id, &session_id, created_target).await;
             if e.error_code == ErrorCode::CdpTimeout {
                 return Err(Error::new(ErrorCode::NavigationTimeout, e.detail));
             }
@@ -366,7 +367,7 @@ pub(super) async fn browser_path(
             )
             .await
     {
-        finish_target(&conn, &target_id, &session_id, close_target_after_fetch).await;
+        finish_target(&conn, &target_id, &session_id, created_target).await;
         return Err(e);
     }
 
@@ -420,7 +421,7 @@ pub(super) async fn browser_path(
         main_entry.as_ref(),
         page_snapshot.as_ref(),
     ) {
-        finish_target(&conn, &target_id, &session_id, close_target_after_fetch).await;
+        finish_target(&conn, &target_id, &session_id, created_target).await;
         return Err(e);
     }
     if let Some(snapshot) = page_snapshot.as_ref()
@@ -825,8 +826,15 @@ pub(super) async fn browser_path(
         });
     }
 
-    if close_target_after_fetch {
+    if close_after_success(
+        created_target,
+        builder.keep_tab_open,
+        result.next_action.is_some(),
+    ) {
         let _ = session::close_target(&conn, &target_id).await;
+        // The id would name a target that no longer exists; a reported
+        // `tab_id` always points at a tab that is still open.
+        result.tab_id = None;
     } else {
         let _ = session::detach_from_target(&conn, &session_id).await;
     }
@@ -1008,13 +1016,28 @@ pub(super) async fn finish_target(
     conn: &Connection,
     target_id: &str,
     session_id: &str,
-    close_target_after_fetch: bool,
+    close: bool,
 ) {
-    if close_target_after_fetch {
+    if close {
         let _ = session::close_target(conn, target_id).await;
     } else {
         let _ = session::detach_from_target(conn, session_id).await;
     }
+}
+
+/// Whether a successful fetch closes its target. The rule: a tab that stays
+/// open must have someone coming to it.
+///
+/// `keep_tab_open` is the takeover intent, but it only holds the tab when the
+/// page actually needs a human (`next_action` was set, and the caller mints a
+/// handoff URL for it). A takeover fetch whose warmed profile reached the
+/// content directly keeps nothing — nobody was ever going to visit that tab —
+/// and a `--tab` re-fetch that comes back clean after the human cleared the
+/// wall closes the tab, completing the loop instead of leaking it. Plain
+/// `--tab` fetches without takeover intent never close what they were handed.
+fn close_after_success(created_target: bool, keep_tab_open: bool, has_next_action: bool) -> bool {
+    let takeover_pending = keep_tab_open && has_next_action;
+    !takeover_pending && (created_target || keep_tab_open)
 }
 
 async fn wait_for_navigation_commit(
@@ -1268,6 +1291,28 @@ async fn write_frames_jsonl(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_kept_tab_needs_a_pending_takeover() {
+        // A fresh target closes after a plain one-shot fetch.
+        assert!(close_after_success(true, false, false));
+        // Takeover intent alone does not hold the tab: the warmed profile
+        // reached the content, so no human is coming.
+        assert!(close_after_success(true, true, false));
+        // A wall was detected; the tab stays open for the handoff.
+        assert!(!close_after_success(true, true, true));
+        // The takeover re-fetch of that tab came back clean — loop complete.
+        assert!(close_after_success(false, true, false));
+        // The re-fetch still hit the wall; the human is still working.
+        assert!(!close_after_success(false, true, true));
+        // A plain `--tab` fetch never closes what it was handed, even when
+        // the page classified as a wall.
+        assert!(!close_after_success(false, false, false));
+        assert!(!close_after_success(false, false, true));
+        // A fresh target closes even when a wall was detected, when no
+        // takeover was requested: nobody will be sent to it.
+        assert!(close_after_success(true, false, true));
+    }
 
     #[test]
     fn classify_navigate_error_buckets_chromium_symbols() {

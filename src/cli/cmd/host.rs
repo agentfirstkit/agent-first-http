@@ -33,6 +33,7 @@ pub struct Args {
     pub browser_args: Vec<String>,
     pub proxy: Option<String>,
     pub recent_requests_cap: usize,
+    pub tab_idle_timeout_s: u64,
 }
 
 pub async fn run(args: Args) -> Result<(), Error> {
@@ -81,6 +82,7 @@ pub async fn run(args: Args) -> Result<(), Error> {
         browser_args: args.browser_args,
         proxy: args.proxy,
         recent_requests_cap: args.recent_requests_cap,
+        tab_idle_timeout_s: args.tab_idle_timeout_s,
     };
     crate::host::bootstrap::run(host_args).await
 }

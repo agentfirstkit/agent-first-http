@@ -188,6 +188,7 @@ async fn launch_inline_host(config: &InlineConfig) -> Result<LaunchedInlineHost,
         browser_args: Vec::new(),
         proxy: None,
         recent_requests_cap: 0,
+        tab_idle_timeout_s: 0,
     };
     let state = AppState::launch(&args).await?;
     serve_state(state).await

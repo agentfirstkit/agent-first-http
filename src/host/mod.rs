@@ -6,6 +6,7 @@
 pub mod bootstrap;
 pub mod browser;
 pub mod listener;
+pub mod reaper;
 pub mod takeover;
 
 pub use bootstrap::HostArgs;

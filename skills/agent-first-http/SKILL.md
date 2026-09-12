@@ -212,7 +212,8 @@ wait. Where a window can open on this machine, `afhttp ui takeover
 --takeover-url-secret` replaces that wait with a real ending: it returns when
 the user closes the panel. Only after the user closes the panel or explicitly
 confirms should you run `next_action.recommended_command` (a re-fetch of the
-same `--tab`).
+same `--tab`). When that re-fetch comes back clean it also closes the takeover
+tab — the loop is self-cleaning, so do not follow up with `afhttp tabs close`.
 
 A panel dies with the browser it showed. Switching profiles on the host, or
 restarting it, revokes every panel credential — if you did either, mint a fresh
@@ -242,7 +243,10 @@ you need session reuse, a warmed/authenticated profile, human takeover, or CDP
 state inspection. A host serves one active profile at a time but switches at
 runtime when a fetch passes `--profile` (the browser is relaunched under it);
 persistent profile storage is scoped by backend, so `work` under Brave and
-`work` under Chromium are separate identities.
+`work` under Chromium are separate identities. Cookies and logins persist in
+the profile on disk, but tabs do not idle forever: the host closes a page tab
+left alone for ~15 minutes with no takeover pending, so never park state
+you need in an open tab — re-fetch through the profile instead.
 
 Use `afhttp health`, `afhttp capabilities`, `afhttp tabs`, or `afhttp cdp` only
 when the task needs that detail; check the relevant `--help` before doing so.

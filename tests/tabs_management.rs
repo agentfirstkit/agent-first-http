@@ -22,11 +22,12 @@ use std::time::Duration;
 use agent_first_http::host::bootstrap::{
     BrowserChoice, DisplayMode, HealthPublic, HostArgs, ProfileChoice, Takeover,
 };
+use agent_first_http::host::listener::AppState;
 use agent_first_http::host::{browser, listener::router_for_tests, listener::test_state};
 use agent_first_http::sdk::Client;
 use tokio::net::TcpListener;
 
-async fn spawn_chromium_host() -> Option<(String, tempfile::TempDir)> {
+async fn spawn_chromium_host() -> Option<(String, AppState, tempfile::TempDir)> {
     support::ensure_rustls_provider();
     let bin = support::env::discover_browser()?;
     let args = HostArgs {
@@ -45,10 +46,11 @@ async fn spawn_chromium_host() -> Option<(String, tempfile::TempDir)> {
         browser_args: Vec::new(),
         proxy: None,
         recent_requests_cap: 0,
+        tab_idle_timeout_s: 0,
     };
     let handle = browser::launch(&args).await.expect("browser launch");
     let state = test_state(None, HealthPublic::Off).with_default_browser(Arc::new(handle));
-    let app = router_for_tests(state);
+    let app = router_for_tests(state.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local_addr");
     tokio::spawn(async move {
@@ -56,12 +58,12 @@ async fn spawn_chromium_host() -> Option<(String, tempfile::TempDir)> {
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
     let tmp = tempfile::tempdir().expect("tmpdir");
-    Some((format!("ws://{addr}"), tmp))
+    Some((format!("ws://{addr}"), state, tmp))
 }
 
 #[tokio::test]
 async fn target_get_close_round_trip() {
-    let Some((endpoint, _tmp)) = spawn_chromium_host().await else {
+    let Some((endpoint, _state, _tmp)) = spawn_chromium_host().await else {
         println!("(skipping: no chromium)");
         return;
     };
@@ -124,4 +126,65 @@ async fn target_get_close_round_trip() {
             .any(|t| t["targetId"].as_str() == Some(target_id.as_str())),
         "target {target_id} still listed after close",
     );
+}
+
+#[tokio::test]
+async fn idle_unattached_tabs_are_reaped_and_a_window_survives() {
+    let Some((endpoint, state, _tmp)) = spawn_chromium_host().await else {
+        println!("(skipping: no chromium)");
+        return;
+    };
+    let fixture = support::fixture_server::spawn().await;
+
+    // A leaked page target: created and navigated to a real web page by a
+    // driver that then went away — exactly what a killed driver leaves. The
+    // client must be closed afterwards: an open /cdp connection marks the
+    // host as in use, which resets every idle clock.
+    let client = Client::connect(&endpoint).expect("client");
+    let create = client
+        .cdp("Target.createTarget")
+        .params(serde_json::json!({ "url": format!("{}/plain.html", fixture.base_url()) }))
+        .send()
+        .await
+        .expect("Target.createTarget");
+    let target_id = create["targetId"]
+        .as_str()
+        .expect("targetId in createTarget response")
+        .to_string();
+    client.close().await;
+
+    agent_first_http::host::reaper::spawn_with_interval(
+        state,
+        Duration::from_secs(2),
+        Duration::from_millis(250),
+    );
+
+    // Strictly quiet while idleness accrues; the margin over the 2s timeout
+    // absorbs container scheduling jitter.
+    tokio::time::sleep(Duration::from_secs(10)).await;
+
+    let client = Client::connect(&endpoint).expect("client");
+    let listed = client
+        .cdp("Target.getTargets")
+        .send()
+        .await
+        .expect("Target.getTargets");
+    let targets = listed["targetInfos"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let still_open = targets
+        .iter()
+        .any(|t| t["targetId"].as_str() == Some(target_id.as_str()));
+    assert!(
+        !still_open,
+        "target {target_id} not reaped while the host was idle; targets: {targets:?}",
+    );
+    // The reaper closes leaked pages, never the browser: at least one page
+    // target (the browser's own start tab) must survive.
+    let pages = targets
+        .iter()
+        .filter(|t| t["type"].as_str() == Some("page"))
+        .count();
+    assert!(pages >= 1, "reaper left no page target alive: {targets:?}");
 }

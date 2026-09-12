@@ -50,6 +50,7 @@ fn make_args(browser_bin: std::path::PathBuf) -> HostArgs {
         browser_args: Vec::new(),
         proxy: None,
         recent_requests_cap: 0,
+        tab_idle_timeout_s: 0,
     }
 }
 
