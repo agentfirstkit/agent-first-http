@@ -182,6 +182,12 @@ The KasmVNC client needs browser storage. A default opaque-origin frame cannot
 provide it; use `afui session open`, or serve sessions with a real
 per-session-origin hostname whose wildcard DNS and TLS are already configured.
 
+`upload --file` passes an absolute path to the browser; it does not transfer
+file bytes. The driver must also be able to read the same file at that path.
+The default host container shares no host directories, so a file present only
+on the agent's machine cannot be uploaded through it. Browser-side files under
+the container's `/data` are not automatically available to the driver.
+
 ## Bot Walls And Human Takeover
 
 If afhttp reports a `next_action.kind: "human_takeover"` (or only `page_kind:

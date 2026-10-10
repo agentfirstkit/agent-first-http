@@ -231,6 +231,12 @@ fn wrap_payload(code: &str, value: serde_json::Value) -> Result<serde_json::Valu
     Ok(serde_json::Value::Object(map))
 }
 
+// Every error emitter shares this boundary, including errors built from a raw
+// message rather than an SDK `Error`.
+pub(crate) fn error_builder(code: &str, message: &str) -> agent_first_data::ErrorBuilder {
+    agent_first_data::json_error(code, &crate::shared::redact::redact_urls_in_text(message))
+}
+
 /// Convenience: emit an SDK-built AFDATA error event.
 pub fn emit_error<W: Write>(writer: &mut W, err: &Error) -> Result<(), Error> {
     let mut emitter = agent_first_data::CliEmitter::with_options(
@@ -239,7 +245,7 @@ pub fn emit_error<W: Write>(writer: &mut W, err: &Error) -> Result<(), Error> {
         output_options(RedactionMode::Default),
     )
     .with_strict_protocol();
-    let event = agent_first_data::json_error(err.error_code.as_str(), &err.detail)
+    let event = error_builder(err.error_code.as_str(), &err.detail)
         .retryable_if(err.retryable)
         .build()
         .map_err(|err| {
@@ -258,7 +264,7 @@ pub fn emit_error<W: Write>(writer: &mut W, err: &Error) -> Result<(), Error> {
 
 /// Emit an SDK-built AFDATA error event through `--output-to`.
 pub fn emit_process_error(err: &Error) -> Result<(), Error> {
-    let event = agent_first_data::json_error(err.error_code.as_str(), &err.detail)
+    let event = error_builder(err.error_code.as_str(), &err.detail)
         .retryable_if(err.retryable)
         .build()
         .map_err(|error| {
@@ -308,7 +314,7 @@ pub fn emit_error_with<W: Write>(
         }
         other => other,
     };
-    let event = agent_first_data::json_error(code, message)
+    let event = error_builder(code, message)
         .retryable_if(retryable)
         .fields(fields)
         .trace(trace)
@@ -347,7 +353,7 @@ pub fn emit_process_error_with(
         }
         other => other,
     };
-    let event = agent_first_data::json_error(code, message)
+    let event = error_builder(code, message)
         .retryable_if(retryable)
         .fields(fields)
         .trace(trace)
@@ -374,7 +380,7 @@ pub fn emit_process_error_with(
 
 /// Build a strict AFDATA error event for HTTP response bodies.
 pub fn error_value(code: &str, message: &str, retryable: bool) -> serde_json::Value {
-    let value: serde_json::Value = agent_first_data::json_error(code, message)
+    let value: serde_json::Value = error_builder(code, message)
         .retryable_if(retryable)
         .build()
         .map(Into::into)
@@ -512,6 +518,50 @@ mod tests {
         assert_eq!(parsed["error"]["code"], "navigation_timeout");
         assert_eq!(parsed["error"]["message"], "no load");
         assert_eq!(parsed["error"]["retryable"], true);
+    }
+
+    #[test]
+    fn every_error_emitter_redacts_url_credentials_in_raw_messages() {
+        let message = "request https://reader:password-canary@example.test/path?token_secret=query-canary&token=legacy-canary&safe=ok failed";
+        let expected = "request https://reader:***@example.test/path?token_secret=***&token=***&safe=ok failed";
+        // Bypass `Error::new` to verify that the emitters protect their own
+        // boundary rather than relying on an already-redacted SDK error.
+        let err = Error {
+            error_code: crate::shared::error::ErrorCode::HostUnreachable,
+            detail: message.to_string(),
+            retryable: true,
+        };
+        let mut sdk_output = Vec::new();
+        emit_error(&mut sdk_output, &err).expect("emit SDK error");
+        let mut extended_output = Vec::new();
+        emit_error_with(
+            &mut extended_output,
+            "host_unreachable",
+            message,
+            serde_json::json!({"retryable": true, "stage": "navigate"}),
+            serde_json::json!({"duration_ms": 10}),
+        )
+        .expect("emit extended error");
+        let sdk: serde_json::Value = serde_json::from_slice(&sdk_output).expect("SDK event");
+        let extended: serde_json::Value =
+            serde_json::from_slice(&extended_output).expect("extended event");
+        let http = error_value("host_unreachable", message, true);
+        // The process emitters and CLI startup path use the same builder.
+        let process: serde_json::Value = error_builder("host_unreachable", message)
+            .retryable_if(true)
+            .build()
+            .expect("process event")
+            .into();
+        for value in [sdk, extended, http, process] {
+            agent_first_data::validate_protocol_event(&value, true).expect("strict event");
+            assert_eq!(value["error"]["message"], expected);
+            assert_eq!(value["error"]["code"], "host_unreachable");
+            assert_eq!(value["error"]["retryable"], true);
+            let text = serde_json::to_string(&value).expect("event text");
+            assert!(!text.contains("password-canary"));
+            assert!(!text.contains("query-canary"));
+            assert!(!text.contains("legacy-canary"));
+        }
     }
 
     #[test]

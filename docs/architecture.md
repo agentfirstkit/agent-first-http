@@ -66,17 +66,18 @@ These two non-concerns mean `afhttp` only ever sees endpoint URLs. The CLI and S
 
 ## 5. CLI Surface
 
-The CLI has 11 commands and no stdin protocol. The command set is: `host`,
-`fetch`, `upload`, `cdp`, `panel`, `health`, `capabilities`, `profile`, `tabs`,
-`skill`, and `container`.
+The CLI has 12 commands and no stdin protocol. The command set is: `host`,
+`fetch`, `upload`, `cdp`, `panel`, `ui`, `health`, `capabilities`, `profile`,
+`tabs`, `skill`, and `container`.
 
 | Command | Role | Purpose |
 | --- | --- | --- |
 | `afhttp host` | browser-host | Start a foreground browser host, profile, CDP/HTTP listener, and optional real-display takeover. |
 | `afhttp fetch` | agent-driver | Acquire a URL through HTTP-only or browser-backed fetch and write requested artifacts. |
-| `afhttp upload` | agent-driver | Attach a local file to an existing `<input type=file>` through `DOM.setFileInputFiles`. |
+| `afhttp upload` | agent-driver | Set an existing `<input type=file>` from a path visible to both driver and browser through `DOM.setFileInputFiles`; no bytes are transferred. |
 | `afhttp cdp` | agent-driver | Send one raw CDP method to a target tab. |
 | `afhttp panel` | agent-driver/human | Print a short-lived takeover URL for a host. |
+| `afhttp ui` | agent-driver/human | Open a browser takeover interface through an AFUI delivery. |
 | `afhttp health` | agent-driver | Query `/health` readiness. |
 | `afhttp capabilities` | agent-driver | Query `/capabilities` planning metadata. |
 | `afhttp profile` | local admin | List, inspect, lock-check, list captured downloads, delete, prune, or inspect redacted cookies for local profiles. |
@@ -216,7 +217,16 @@ Custom request options are applied before acquisition, not silently ignored. On 
 
 ### Other endpoint commands
 
-`afhttp cdp`, `afhttp upload`, and `afhttp tabs` are raw CDP/target-management helpers. They require `--endpoint-url` and do not introduce Playwright-style semantic action wrappers. `afhttp panel`, `afhttp health`, and `afhttp capabilities` are thin HTTP helpers over `/takeover/handoff`, `/health`, and `/capabilities`; panel output contains a short-lived `takeover_url_secret` with `handoff_secret=...`, not the host token.
+`afhttp cdp`, `afhttp upload`, and `afhttp tabs` are raw CDP/target-management helpers. They need a running host; when `--endpoint-url` is omitted, the driver discovers the standard local container. They do not introduce Playwright-style semantic action wrappers. `afhttp panel`, `afhttp health`, and `afhttp capabilities` are thin HTTP helpers over `/takeover/handoff`, `/health`, and `/capabilities`; panel output contains a short-lived `takeover_url_secret` with `handoff_secret=...`, not the host token.
+
+`upload --file` validates and canonicalizes the file in the driver's filesystem,
+then sends that absolute path to `DOM.setFileInputFiles`. The browser must be
+able to read the same file at the same path; file bytes are not transferred.
+The standard container mounts only its named volume at `/data` and provides no
+host-directory sharing option. A file present only on the driver's machine
+therefore cannot be uploaded through the default container, even if local
+validation succeeds. Files under the container's `/data` are browser-side
+files, not automatically accessible to the driver.
 
 ### Local commands
 
@@ -419,12 +429,42 @@ Response body capture is opt-in because network logs often contain credentials, 
 | `--network-bodies xhr` | Saves text/JSON/XHR/fetch response bodies up to `--network-body-max-bytes` each. |
 | `--network-bodies all` | Attempts to save every response body up to `--network-body-max-bytes` each, including documents/scripts/images when CDP exposes them. |
 
-Captured bodies are written under `network-bodies/<request_id>.<ext>` and referenced from `network.json` via `body_file`. With `--wait auto`, browser fetches capture XHR/fetch/EventSource bodies by default. Binary bodies may be base64 files if the original bytes cannot be represented as UTF-8. Per-entry body capture failures become `warnings` with `artifact: "network"` and do not fail the fetch.
+Captured bodies are written under `network-bodies/<request_id>.<ext>` and referenced from `network.json` via `body_file`. With `--wait auto`, browser fetches capture XHR/fetch/EventSource bodies by default. CDP base64 bodies are decoded before being written as raw bytes. Per-entry body capture failures become `warnings` with `artifact: "network"` and do not fail the fetch.
 
 `network.summary` also reports readiness diagnostics: `responses_total`,
 `finished_total`, `incomplete_total`, `inflight_total_at_capture`, and
 `pending_by_resource_type`. These are mechanical counts; they do not classify
 which payload is important.
+
+Each fetch retains at most 4,096 network entries and 4,096 console events.
+WebSocket/SSE capture retains at most 4,096 request keys per stream kind and
+1,024 frames/events per request. Existing network entries keep
+receiving lifecycle updates after the entry limit is reached, and a slot is
+reserved for the main document. Counts describe retained records rather than
+all activity when capture is incomplete.
+
+`network.summary` and `console.json` report `events_dropped` for lost CDP
+events and `truncated` when a capture limit is reached. Zero/false values are
+omitted and default to zero/false when reading older artifacts. Collectors
+continue after event loss and stop when their fetch scope is dropped. Readiness
+samples taken after network event loss or a metadata or stream capture limit
+fall back to the idle window: every Network.* event still stamps activity even
+when its request was not retained, so `network_quiet` means "no network event
+for the idle window" rather than "no pending request", and the normal deadline
+still bounds the wait. The trace
+retains the last readiness sample before artifact capture. Loss or truncation
+discovered later appears in warnings and the final summary without rewriting
+that sample. Skipping or truncating response bodies does not change readiness.
+Network warnings also expose incomplete capture when only stream payloads
+were requested.
+
+Before requesting a network response body, afhttp checks known
+`encodedDataLength` and case-insensitive `Content-Length`. A known size above
+`--network-body-max-bytes` skips the body request and emits
+`network_body_truncated`. Unknown sizes still use the existing decoded-prefix
+limit. CDP returns a complete JSON response, and a compressed size can be
+smaller than its decoded body; this is an early size filter, not a peak-memory
+guarantee. The separate main `body` artifact keeps its own capture contract.
 
 ## 9. Takeover
 

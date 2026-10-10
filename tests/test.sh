@@ -2,13 +2,13 @@
 # Fixed test entrypoint for agent-first-http: every gate runs inside the test
 # container.
 #
-# The single source of truth for how this spore is tested. CI, the monorepo
-# driver (scripts/projects.sh test agent-first-http), and the release gate all
-# call this file, so a mode can never mean one thing locally and another in CI.
+# The fixed container gate used by the monorepo driver and release gate.
+# Native CI legs run the corresponding Cargo checks directly.
 #
 #   tests/test.sh                       # default gates only (no browser)
 #   tests/test.sh static                # shellcheck + fmt + build + clippy
 #   tests/test.sh unit                  # lib + bin unit tests
+#   tests/test.sh download              # browser download-to-disk tests only
 #   tests/test.sh integration           # full browser-integration suite
 #   tests/test.sh takeover              # display takeover proxy + KasmVNC smoke
 #   tests/test.sh all                   # static + unit + integration
@@ -25,7 +25,7 @@ SPORE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 afdata_args_begin "$0 [MODE]"
 afdata_args_positional test_mode MODE \
-  "Test mode: static, unit, integration, takeover, default, all, or release" optional
+  "Test mode: static, unit, download, integration, takeover, default, all, or release" optional
 afdata_args_parse "$@"
 MODE="${test_mode:-default}"
 
@@ -52,8 +52,9 @@ run_static() {
 }
 
 run_unit() {
-  run "cargo test --lib --bins --features sdk,cli"
+  run "cargo test --lib --bins --test host_token_sources --features sdk,cli"
   run "bash tests/check_regressions.sh"
+  run "bash tests/check_backend_requirements.sh"
 }
 
 run_integration() {
@@ -97,6 +98,7 @@ run_default() {
 case "$MODE" in
   static) run_static ;;
   unit) run_unit ;;
+  download) run "cargo test --all-features --test browser_fetch browser_navigation_download" ;;
   integration) run_integration ;;
   takeover) run_takeover ;;
   default) run_default ;;
@@ -116,7 +118,7 @@ case "$MODE" in
   *)
     afdata_error unknown_test_mode \
       "unknown test mode: $MODE" \
-      "run one of: static, unit, integration, takeover, default, all, release" || :
+      "run one of: static, unit, download, integration, takeover, default, all, release" || :
     exit 2
     ;;
 esac

@@ -219,7 +219,11 @@ impl NextAction {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FetchError {
     pub error_code: ErrorCode,
-    #[serde(rename = "error")]
+    #[serde(
+        rename = "error",
+        serialize_with = "crate::shared::error::serialize_detail",
+        deserialize_with = "crate::shared::error::deserialize_detail"
+    )]
     pub detail: String,
     pub retryable: bool,
     pub trace: Trace,
@@ -230,7 +234,7 @@ impl FetchError {
     pub fn new(error: Error, trace: Trace) -> Self {
         Self {
             error_code: error.error_code,
-            detail: error.detail,
+            detail: crate::shared::redact::redact_urls_in_text(&error.detail),
             retryable: error.retryable,
             trace,
         }
@@ -238,20 +242,18 @@ impl FetchError {
 
     #[must_use]
     pub fn into_error(self) -> Error {
-        Error {
-            error_code: self.error_code,
-            detail: self.detail,
-            retryable: self.retryable,
-        }
+        Error::new(self.error_code, self.detail).with_retryable(self.retryable)
     }
 
     #[must_use]
     pub fn as_error(&self) -> Error {
-        Error {
-            error_code: self.error_code,
-            detail: self.detail.clone(),
-            retryable: self.retryable,
-        }
+        Error::new(self.error_code, self.detail.clone()).with_retryable(self.retryable)
+    }
+}
+
+impl std::fmt::Display for FetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_error())
     }
 }
 
@@ -422,6 +424,96 @@ fn shell_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fetch_error_redacts_url_credentials_at_every_public_output_boundary() {
+        let detail = "request https://reader:password-canary@example.test/path?token_secret=query-canary&api_key=legacy-canary&safe=ok failed";
+        let expected = "request https://reader:***@example.test/path?token_secret=***&api_key=***&safe=ok failed";
+        let trace = Trace {
+            current_stage: "navigate".into(),
+            timeout_ms: 42,
+            ..Trace::default()
+        };
+        // Public Error fields can bypass its constructor before reaching us.
+        let created = FetchError::new(
+            Error {
+                error_code: ErrorCode::TargetUnreachable,
+                detail: detail.into(),
+                retryable: false,
+            },
+            trace.clone(),
+        );
+        assert_eq!(created.detail, expected);
+        let direct = FetchError {
+            error_code: ErrorCode::TargetUnreachable,
+            detail: detail.into(),
+            retryable: false,
+            trace: trace.clone(),
+        };
+        let mut mutated = FetchError::new(
+            Error::new(ErrorCode::TargetUnreachable, "initial message").with_retryable(false),
+            trace.clone(),
+        );
+        mutated.detail = detail.into();
+        for failure in [created, direct, mutated] {
+            assert_eq!(
+                failure.to_string(),
+                format!("target_unreachable: {expected}")
+            );
+            let json = serde_json::to_value(&failure).expect("serialize fetch error");
+            assert_eq!(json["error_code"], "target_unreachable");
+            assert_eq!(json["error"], expected);
+            assert_eq!(json["retryable"], false);
+            assert_eq!(
+                json["trace"],
+                serde_json::to_value(&trace).expect("trace JSON")
+            );
+            let serialized = serde_json::to_string(&failure).expect("fetch error JSON");
+            for canary in ["password-canary", "query-canary", "legacy-canary"] {
+                assert!(!serialized.contains(canary), "URL credential leaked");
+            }
+            for error in [failure.as_error(), failure.into_error()] {
+                assert_eq!(error.error_code, ErrorCode::TargetUnreachable);
+                assert_eq!(error.detail, expected);
+                assert!(!error.retryable);
+            }
+        }
+    }
+
+    #[test]
+    fn older_fetch_error_json_redacts_urls_without_changing_its_trace() {
+        // Older traces omit the render-mode fields that now have defaults.
+        let failure: FetchError = serde_json::from_value(serde_json::json!({
+            "error_code": "target_unreachable",
+            "error": "connect https://reader:password-canary@example.test/?token_secret=query-canary&token=legacy-canary&safe=ok",
+            "retryable": true,
+            "trace": {
+                "render_decision": "http_only",
+                "main_request_observed": false,
+                "duration_ms": 7,
+                "timeout_ms": 42,
+                "current_stage": "navigate",
+                "stages": [{"name": "navigate", "status": "error", "duration_ms": 7}]
+            }
+        }))
+        .expect("deserialize older fetch error");
+        let expected =
+            "connect https://reader:***@example.test/?token_secret=***&token=***&safe=ok";
+        assert_eq!(failure.detail, expected);
+        assert!(failure.retryable);
+        assert_eq!(failure.trace.render_mode, TraceRenderMode::Auto);
+        assert!(!failure.trace.render_used);
+        assert_eq!(failure.trace.duration_ms, 7);
+        assert_eq!(failure.trace.timeout_ms, 42);
+        assert_eq!(failure.trace.current_stage, "navigate");
+        assert_eq!(failure.trace.stages.len(), 1);
+        assert_eq!(failure.trace.stages[0].name, "navigate");
+        assert_eq!(failure.trace.stages[0].status, TraceStageStatus::Error);
+        let json = serde_json::to_value(&failure).expect("serialize older fetch error");
+        assert_eq!(json["error"], expected);
+        assert_eq!(json["error_code"], "target_unreachable");
+        assert_eq!(json["trace"]["current_stage"], "navigate");
+    }
 
     #[test]
     fn fetch_success_json_is_flat_golden() {

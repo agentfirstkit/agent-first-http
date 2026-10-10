@@ -94,8 +94,8 @@ afhttp splits into two roles that are independently locatable:
 
 Run the host where the browser needs to be (residential IP, GUI machine,
 datacenter); run the driver wherever the agent runs. Connectivity is your mesh's
-problem, not afhttp's. The CLI has 11 commands: `host`, `fetch`, `upload`,
-`cdp`, `panel`, `health`, `capabilities`, `profile`, `tabs`, `skill`, and
+problem, not afhttp's. The CLI has 12 commands: `host`, `fetch`, `upload`,
+`cdp`, `panel`, `ui`, `health`, `capabilities`, `profile`, `tabs`, `skill`, and
 `container`.
 
 ## Running it: inline for a one-shot, a host for sessions
@@ -113,6 +113,10 @@ needs a host — `fetch --takeover`, `fetch --profile`, `cdp`, `tabs`, `upload`,
 `health`, `capabilities`, `panel` — discovers the standard local `afhttp-host`
 and reads its token from the container when `--endpoint-url` is omitted. No
 environment variable, no `docker exec … cat`.
+
+`upload --file` sends a path, not bytes: the file must already exist at that
+path in the browser's filesystem, and the default container shares no directory
+with the driver.
 
 `container install` is takeover-ready by default (Brave + KasmVNC + an
 ephemeral initial profile + a 2g `/dev/shm`). A takeover fetch switches to a
@@ -168,6 +172,8 @@ The shortest path starts with pure HTTP. `--render none` never starts a browser.
 ```bash
 afhttp fetch https://example.com
 ```
+
+The following is an excerpt of the event's `result` field:
 
 ```json
 {
@@ -262,6 +268,8 @@ afhttp fetch "$URL" --takeover
 ```
 
 If the warmed profile already reaches the target, `fetch --takeover` just returns the content. Otherwise it keeps a persistent tab open and returns a `next_action`:
+
+The following is an excerpt of the event's `result` field:
 
 ```json
 {

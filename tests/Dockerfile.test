@@ -48,9 +48,11 @@ RUN apt-get update \
 
 # Browser backends — installed from the single source of truth shared with the
 # runtime image (container/docker/install-backends.sh), so pinned versions can
-# never drift between the test image and the deploy image. The test image keeps
-# very large optional backends opt-in; tests that need a missing backend
-# self-skip via AFHTTP_TEST_*_BIN discovery.
+# never drift between the test image and the deploy image. Every backend
+# installed here is required at run time (tests/container-entrypoint.sh extends
+# AFHTTP_TEST_REQUIRE_BACKENDS), so its tests fail rather than skip when the
+# binary is missing. Only the very large camoufox backend is opt-in, and only
+# its tests self-skip when the image was built without it.
 COPY container/docker/install-backends.sh /usr/local/bin/install-backends.sh
 ARG AFHTTP_TEST_INSTALL_CAMOUFOX=0
 RUN chmod +x /usr/local/bin/install-backends.sh \
@@ -70,6 +72,8 @@ RUN chmod +x /usr/local/bin/install-browser-policy.sh \
 # Cargo caches live on named volumes so image rebuilds do not redownload crates.
 ENV CARGO_HOME=/cargo-home \
     CARGO_TARGET_DIR=/cargo-target \
+    AFHTTP_TEST_REQUIRE_BACKENDS=chromium \
+    AFHTTP_TEST_INSTALL_CAMOUFOX=${AFHTTP_TEST_INSTALL_CAMOUFOX} \
     AFHTTP_TEST_BROWSER_BIN=/usr/bin/chromium \
     AFHTTP_TEST_LIGHTPANDA_BIN=/usr/local/bin/lightpanda \
     AFHTTP_TEST_FINGERPRINT_CHROMIUM_BIN=/usr/local/bin/fingerprint-chromium \
@@ -86,3 +90,7 @@ ENV CARGO_HOME=/cargo-home \
 RUN rustup component add clippy rustfmt
 
 WORKDIR /work
+
+COPY tests/container-entrypoint.sh /usr/local/bin/test-entrypoint.sh
+RUN chmod +x /usr/local/bin/test-entrypoint.sh
+ENTRYPOINT ["/usr/local/bin/test-entrypoint.sh"]

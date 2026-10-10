@@ -69,9 +69,8 @@ pub(super) async fn finish_download_navigation(
             "navigation became a download, but the host profile download directory was unavailable",
         ));
     };
-    deadline.set_stage("capture_download");
     let downloaded =
-        match wait_for_download_file(&download_dir, &downloads_before, builder.timeout).await {
+        match wait_for_download_with_deadline(&download_dir, &downloads_before, &deadline).await {
             Ok(file) => file,
             Err(e) => {
                 finish_target(&conn, &target_id, &session_id, created_target).await;
@@ -256,6 +255,18 @@ pub(super) async fn snapshot_download_dir(dir: &Path) -> std::io::Result<BTreeSe
     Ok(out)
 }
 
+async fn wait_for_download_with_deadline(
+    dir: &Path,
+    before: &BTreeSet<PathBuf>,
+    deadline: &FetchDeadline,
+) -> Result<CompletedDownload, Error> {
+    deadline
+        .run_result("capture_download", ErrorCode::NavigationTimeout, async {
+            wait_for_download_file(dir, before, deadline.remaining("capture_download")?).await
+        })
+        .await
+}
+
 async fn wait_for_download_file(
     dir: &Path,
     before: &BTreeSet<PathBuf>,
@@ -265,7 +276,7 @@ async fn wait_for_download_file(
     loop {
         if Instant::now() >= deadline {
             return Err(Error::new(
-                ErrorCode::ArtifactCaptureFailed,
+                ErrorCode::NavigationTimeout,
                 format!("download did not complete in {}", dir.display()),
             ));
         }
@@ -322,6 +333,30 @@ async fn newest_completed_download(dir: &Path, before: &BTreeSet<PathBuf>) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn unfinished_download_uses_remaining_fetch_budget_and_timeout_trace() {
+        use crate::sdk::fetch::result::{TraceRenderMode, TraceStageStatus};
+        let dir = tempfile::tempdir().unwrap();
+        // A partial download never counts as a completed artifact.
+        std::fs::write(dir.path().join("pending.crdownload"), "partial").unwrap();
+        let deadline = FetchDeadline::new(Duration::from_millis(200), TraceRenderMode::Always);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let started = Instant::now();
+        let error = wait_for_download_with_deadline(dir.path(), &BTreeSet::new(), &deadline)
+            .await
+            .unwrap_err();
+        assert_eq!(error.error_code, ErrorCode::NavigationTimeout);
+        assert!(started.elapsed() < Duration::from_millis(150));
+        let trace = deadline.snapshot();
+        assert!(
+            trace
+                .stages
+                .iter()
+                .any(|stage| stage.name == "capture_download"
+                    && stage.status == TraceStageStatus::Timeout)
+        );
+    }
 
     #[test]
     fn err_aborted_is_not_a_download_without_cdp_download_event() {

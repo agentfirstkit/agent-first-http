@@ -153,7 +153,11 @@ impl std::fmt::Display for ErrorCode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Error {
     pub error_code: ErrorCode,
-    #[serde(rename = "error")]
+    #[serde(
+        rename = "error",
+        serialize_with = "serialize_detail",
+        deserialize_with = "deserialize_detail"
+    )]
     pub detail: String,
     pub retryable: bool,
 }
@@ -163,7 +167,7 @@ impl Error {
     pub fn new(error_code: ErrorCode, detail: impl Into<String>) -> Self {
         Self {
             error_code,
-            detail: detail.into(),
+            detail: crate::shared::redact::redact_urls_in_text(&detail.into()),
             retryable: error_code.retryable_default(),
         }
     }
@@ -177,8 +181,29 @@ impl Error {
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.error_code, self.detail)
+        write!(
+            f,
+            "{}: {}",
+            self.error_code,
+            crate::shared::redact::redact_urls_in_text(&self.detail)
+        )
     }
+}
+
+// `detail` is public, so protect output even when a caller constructs or
+// mutates it without going through `Error::new`.
+pub(crate) fn serialize_detail<S: serde::Serializer>(
+    detail: &str,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&crate::shared::redact::redact_urls_in_text(detail))
+}
+
+pub(crate) fn deserialize_detail<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
+    String::deserialize(deserializer)
+        .map(|detail| crate::shared::redact::redact_urls_in_text(&detail))
 }
 
 impl std::error::Error for Error {}
@@ -281,6 +306,42 @@ mod tests {
         assert_eq!(json["error_code"], "navigation_timeout");
         assert_eq!(json["error"], "page never loaded");
         assert_eq!(json["retryable"], true);
+    }
+
+    #[test]
+    fn error_redacts_url_credentials_at_every_public_output_boundary() {
+        let detail = "connect https://reader:password-canary@example.test/path?token_secret=query-canary&api_key=legacy-canary&safe=ok";
+        let expected =
+            "connect https://reader:***@example.test/path?token_secret=***&api_key=***&safe=ok";
+        let created = Error::new(ErrorCode::HostUnreachable, detail);
+        assert_eq!(created.detail, expected);
+
+        let direct = Error {
+            error_code: ErrorCode::HostUnreachable,
+            detail: detail.to_string(),
+            retryable: true,
+        };
+        let mut mutated = Error::new(ErrorCode::HostUnreachable, "initial message");
+        mutated.detail = detail.to_string();
+        for err in [created, direct, mutated] {
+            assert_eq!(err.to_string(), format!("host_unreachable: {expected}"));
+            let json = serde_json::to_value(&err).expect("serialize error");
+            assert_eq!(json["error"], expected);
+            assert_eq!(json["error_code"], "host_unreachable");
+            assert_eq!(json["retryable"], true);
+            let serialized = serde_json::to_string(&err).expect("serialize error text");
+            assert!(!serialized.contains("password-canary"));
+            assert!(!serialized.contains("query-canary"));
+            assert!(!serialized.contains("legacy-canary"));
+        }
+
+        let decoded: Error = serde_json::from_value(serde_json::json!({
+            "error_code": "host_unreachable",
+            "error": detail,
+            "retryable": true
+        }))
+        .expect("deserialize error");
+        assert_eq!(decoded.detail, expected);
     }
 
     #[test]

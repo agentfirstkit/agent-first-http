@@ -94,6 +94,14 @@ pub async fn run(args: Args) -> Result<(), Error> {
 /// sockets are reachable only locally, so a token stays optional. (When a token
 /// is set we skip the parse here; the listener validates the address later.)
 fn enforce_listen_auth(listen: &str, token: Option<&str>) -> Result<(), Error> {
+    // Whitespace is not a secret: a blank token would otherwise authenticate
+    // `?token_secret=%20`, which is no better than having no token at all.
+    if token.is_some_and(|token| token.trim().is_empty()) {
+        return Err(Error::new(
+            ErrorCode::InvalidArgument,
+            "--token-secret: token source resolved to an empty or whitespace-only value",
+        ));
+    }
     if token.is_some() {
         return Ok(());
     }
@@ -152,6 +160,24 @@ mod tests {
         for spec in ["tcp:0.0.0.0:9222", "tcp:192.168.1.10:9222", "tcp:[::]:9222"] {
             let err = enforce_listen_auth(spec, None).err().unwrap();
             assert_eq!(err.error_code, ErrorCode::InvalidArgument, "spec={spec}");
+        }
+    }
+
+    #[test]
+    fn empty_token_is_rejected_for_every_listener() {
+        for listen in [
+            "tcp:0.0.0.0:9222",
+            "tcp:127.0.0.1:9222",
+            "unix:/run/afhttp.sock",
+        ] {
+            for token in ["", " ", "\t\n "] {
+                let error = enforce_listen_auth(listen, Some(token)).unwrap_err();
+                assert_eq!(error.error_code, ErrorCode::InvalidArgument);
+                assert_eq!(
+                    error.detail,
+                    "--token-secret: token source resolved to an empty or whitespace-only value"
+                );
+            }
         }
     }
 

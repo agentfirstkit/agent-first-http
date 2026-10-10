@@ -35,6 +35,12 @@ pub struct NetworkSummary {
     pub pending_by_resource_type: BTreeMap<String, usize>,
     pub captured_body_files: usize,
     pub redacted: bool,
+    /// CDP events lost because the broadcast receiver fell behind.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub events_dropped: u64,
+    /// A fixed request/frame capture limit omitted data.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +134,10 @@ pub fn redact_request_url(url: &str, enabled: bool) -> String {
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 #[cfg(test)]

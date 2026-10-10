@@ -135,7 +135,7 @@ impl CookieJar {
     /// count refusals rather than wonder where the cookie went.
     ///
     /// A `Max-Age` of zero or less is a deletion, and deleting is a merge
-    /// outcome like any other: it removes the matching identity and reports
+    /// outcome like any other: it expires the matching identity and reports
     /// success.
     pub fn merge(&mut self, set_cookie: Cookie<'static>, request_url: &Url) -> bool {
         let Some(host) = request_url.host_str() else {
@@ -145,16 +145,6 @@ impl CookieJar {
             return false;
         }
         let entry = JarEntry::from_set_cookie(set_cookie.clone(), request_url);
-        // `Max-Age` outranks `Expires` (RFC 6265 §5.2.2), and a non-positive
-        // one means the site is logging you out. Treating that as a session
-        // cookie — which ignoring the attribute did — keeps a credential alive
-        // in the jar after the site revoked it.
-        if let Some(max_age) = set_cookie.max_age()
-            && !max_age.is_positive()
-        {
-            self.entries.retain(|e| !e.same_identity(&entry));
-            return true;
-        }
         if let Some(idx) = self.entries.iter().position(|e| e.same_identity(&entry)) {
             // Replace in place.
             self.entries[idx] = entry;
@@ -195,7 +185,6 @@ impl CookieJar {
     }
 
     pub fn persist(mut self) -> Result<(), Error> {
-        self.prune_expired();
         let parent = self.path.parent().ok_or_else(|| {
             Error::new(
                 ErrorCode::IoError,
@@ -242,7 +231,11 @@ impl CookieJar {
             }
         }
 
-        let json = serde_json::to_vec_pretty(&merged)
+        // Expired replacements must reach the merge first, otherwise a
+        // deletion would resurrect the older on-disk cookie.
+        self.entries = merged;
+        self.prune_expired();
+        let json = serde_json::to_vec_pretty(&self.entries)
             .map_err(|e| Error::new(ErrorCode::IoError, format!("serialize cookie jar: {e}")))?;
         atomic_write(&self.path, &json).map_err(|e| {
             Error::new(
@@ -345,10 +338,15 @@ impl JarEntry {
             .path()
             .map(str::to_string)
             .or_else(|| Some(default_path(request_url)));
-        let expires_epoch_s = c.expires().and_then(|e| match e {
-            Expiration::DateTime(dt) => Some(dt.unix_timestamp()),
-            Expiration::Session => None,
-        });
+        // Max-Age takes precedence over Expires, including deletion.
+        let expires_epoch_s = match c.max_age() {
+            Some(age) if age.is_positive() => Some(unix_now().saturating_add(age.whole_seconds())),
+            Some(_) => Some(0),
+            None => c.expires().and_then(|e| match e {
+                Expiration::DateTime(dt) => Some(dt.unix_timestamp()),
+                Expiration::Session => None,
+            }),
+        };
         let same_site = c.same_site().map(|ss| match ss {
             SameSite::Strict => "Strict".to_string(),
             SameSite::Lax => "Lax".to_string(),
@@ -439,6 +437,44 @@ mod tests {
 
     fn make_url(s: &str) -> Url {
         Url::parse(s).unwrap()
+    }
+
+    #[test]
+    fn persisted_cookie_deletions_do_not_resurrect_and_max_age_expires() {
+        let url = make_url("https://example.test/");
+        for deletion in [
+            "sid=; Path=/; Max-Age=0",
+            "sid=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT",
+            "sid=; Path=/; Max-Age=0; Expires=Wed, 09 Jun 2100 10:18:14 GMT",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("jar.json");
+            let mut jar = CookieJar::load(&path).unwrap();
+            assert!(jar.merge(
+                Cookie::parse("sid=live; Path=/").unwrap().into_owned(),
+                &url
+            ));
+            jar.persist().unwrap();
+            let mut jar = CookieJar::load(&path).unwrap();
+            assert!(jar.merge(Cookie::parse(deletion).unwrap().into_owned(), &url));
+            jar.persist().unwrap();
+            let jar = CookieJar::load(&path).unwrap();
+            assert!(jar.applicable_cookies(&url).is_empty());
+            assert!(jar.entries.is_empty());
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap())
+                    .unwrap(),
+                serde_json::json!([])
+            );
+        }
+        let before = unix_now();
+        let entry = JarEntry::from_set_cookie(
+            Cookie::parse("sid=live; Max-Age=60; Expires=Thu, 01 Jan 1970 00:00:00 GMT")
+                .unwrap()
+                .into_owned(),
+            &url,
+        );
+        assert!((before + 60..=unix_now() + 60).contains(&entry.expires_epoch_s.unwrap()));
     }
 
     #[test]

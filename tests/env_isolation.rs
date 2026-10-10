@@ -143,6 +143,7 @@ async fn chromium_subprocess_env_is_allowlisted() {
 #[tokio::test]
 async fn lightpanda_subprocess_does_not_inherit_ambient_http_proxy() {
     let Some(bin) = support::env::discover_lightpanda() else {
+        support::env::require_backend_if_missing("lightpanda");
         println!("(skipping: no lightpanda binary; set AFHTTP_TEST_LIGHTPANDA_BIN)");
         return;
     };
@@ -231,6 +232,7 @@ async fn lightpanda_subprocess_does_not_inherit_ambient_http_proxy() {
 #[tokio::test]
 async fn engine_env_explicit_passthrough_reaches_subprocess() {
     let Some(bin) = support::env::discover_lightpanda() else {
+        support::env::require_backend_if_missing("lightpanda");
         println!("(skipping: no lightpanda binary; set AFHTTP_TEST_LIGHTPANDA_BIN)");
         return;
     };

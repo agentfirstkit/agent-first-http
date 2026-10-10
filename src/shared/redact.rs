@@ -75,6 +75,13 @@ pub fn redact_url(url: &str) -> String {
     url_redactor().url(url)
 }
 
+/// Apply the same credential policy to complete URLs embedded in diagnostic
+/// prose, without treating ordinary structured fields such as `code` as secret.
+#[must_use]
+pub(crate) fn redact_urls_in_text(text: &str) -> String {
+    url_redactor().urls_in_text(text)
+}
+
 /// Redact third-party credential parameters only inside `_url`/`_URL` fields.
 ///
 /// AFDATA deliberately uses one exact-name list for both structured fields and

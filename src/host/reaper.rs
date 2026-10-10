@@ -29,6 +29,16 @@ use serde_json::Value;
 use crate::host::listener::AppState;
 use crate::sdk::cdp::ws_client::Connection;
 
+pub(super) struct ReaperGuard {
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for ReaperGuard {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 /// Matches the default takeover-handoff TTL: a tab parked for a human gets
 /// the same patience as the URL that would have sent one.
 pub const DEFAULT_TAB_IDLE_TIMEOUT_S: u64 = 900;
@@ -39,20 +49,37 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
 /// Spawn the reaper as a background task. `idle_timeout` must be non-zero;
 /// callers gate on the `--tab-idle-timeout-s 0` opt-out before spawning.
 pub fn spawn(state: AppState, idle_timeout: Duration) {
-    let interval = (idle_timeout / 3).clamp(Duration::from_millis(500), Duration::from_secs(60));
-    spawn_with_interval(state, idle_timeout, interval);
+    spawn_with_interval(state, idle_timeout, sweep_interval(idle_timeout));
+}
+
+pub(super) fn spawn_scoped(state: AppState, idle_timeout: Duration) -> ReaperGuard {
+    ReaperGuard {
+        task: spawn_task(state, idle_timeout, sweep_interval(idle_timeout)),
+    }
+}
+
+fn sweep_interval(idle_timeout: Duration) -> Duration {
+    (idle_timeout / 3).clamp(Duration::from_millis(500), Duration::from_secs(60))
 }
 
 /// [`spawn`] with an explicit sweep interval; split out so tests can sweep
 /// fast without shrinking the timeout below what they mean to assert.
 pub fn spawn_with_interval(state: AppState, idle_timeout: Duration, interval: Duration) {
+    drop(spawn_task(state, idle_timeout, interval));
+}
+
+fn spawn_task(
+    state: AppState,
+    idle_timeout: Duration,
+    interval: Duration,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut tracker = Tracker::default();
         loop {
             tokio::time::sleep(interval).await;
             sweep(&state, idle_timeout, &mut tracker).await;
         }
-    });
+    })
 }
 
 /// Per-target idle clocks. Keyed by the backend websocket URL so a runtime

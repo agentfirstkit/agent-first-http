@@ -175,7 +175,7 @@ pub(super) async fn browser_path(
         (target_id, session_id, true)
     };
 
-    deadline
+    if let Err(error) = deadline
         .run_result("browser_enable", ErrorCode::NavigationTimeout, async {
             for method in [
                 "Page.enable",
@@ -195,7 +195,11 @@ pub(super) async fn browser_path(
             }
             Ok(())
         })
-        .await?;
+        .await
+    {
+        finish_target(&conn, &target_id, &session_id, created_target).await;
+        return Err(error);
+    }
 
     if let Err(e) = deadline
         .run_result(
@@ -807,23 +811,19 @@ pub(super) async fn browser_path(
             }),
         }
     } else {
-        let _ = network_collector.finish().await;
+        let log = network_collector.finish().await;
+        push_network_capture_warnings(&log.summary, &mut warnings);
     }
 
-    if let Some(jar_path) = &builder.cookie_jar.path
-        && let Err(e) = deadline
+    if let Some(jar_path) = &builder.cookie_jar.path {
+        let synced = deadline
             .run_result(
                 "sync_cookie_jar",
                 ErrorCode::NavigationTimeout,
                 sync_browser_cookies_to_jar(&conn, &session_id, &result.final_url, jar_path),
             )
-            .await
-    {
-        warnings.push(Warning {
-            artifact: Artifact::Network,
-            code: e.error_code,
-            detail: format!("cookie jar sync: {}", e.detail),
-        });
+            .await;
+        warnings.extend(cookie_jar_sync_warning(synced));
     }
 
     if close_after_success(
@@ -831,12 +831,12 @@ pub(super) async fn browser_path(
         builder.keep_tab_open,
         result.next_action.is_some(),
     ) {
-        let _ = session::close_target(&conn, &target_id).await;
+        finish_target(&conn, &target_id, &session_id, true).await;
         // The id would name a target that no longer exists; a reported
         // `tab_id` always points at a tab that is still open.
         result.tab_id = None;
     } else {
-        let _ = session::detach_from_target(&conn, &session_id).await;
+        finish_target(&conn, &target_id, &session_id, false).await;
     }
 
     result.warnings = warnings;
@@ -1012,17 +1012,28 @@ fn runtime_exception_detail(exception: &Value) -> String {
         .to_string()
 }
 
+const TARGET_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 pub(super) async fn finish_target(
     conn: &Connection,
     target_id: &str,
     session_id: &str,
     close: bool,
 ) {
-    if close {
-        let _ = session::close_target(conn, target_id).await;
+    let (method, params) = if close {
+        (
+            "Target.closeTarget",
+            serde_json::json!({"targetId": target_id}),
+        )
     } else {
-        let _ = session::detach_from_target(conn, session_id).await;
-    }
+        (
+            "Target.detachFromTarget",
+            serde_json::json!({"sessionId": session_id}),
+        )
+    };
+    let _ = conn
+        .send_timeout(method, &params, None, TARGET_CLEANUP_TIMEOUT)
+        .await;
 }
 
 /// Whether a successful fetch closes its target. The rule: a tab that stays
@@ -1209,10 +1220,52 @@ fn push_size_warning(
     }
 }
 
+/// A cookie the jar's scope rules refused is state that was not captured, by
+/// policy — nothing inside afhttp went wrong.
+fn cookie_jar_sync_warning(synced: Result<usize, Error>) -> Option<Warning> {
+    match synced {
+        Ok(0) => None,
+        Ok(rejected_count) => Some(Warning {
+            artifact: Artifact::Network,
+            code: ErrorCode::ArtifactCaptureFailed,
+            detail: format!("cookie jar sync: rejected_cookie_count={rejected_count}"),
+        }),
+        Err(e) => Some(Warning {
+            artifact: Artifact::Network,
+            code: e.error_code,
+            detail: format!("cookie jar sync: {}", e.detail),
+        }),
+    }
+}
+
+fn push_network_capture_warnings(
+    summary: &network_artifact::NetworkSummary,
+    warnings: &mut Vec<Warning>,
+) {
+    if summary.events_dropped > 0 {
+        warnings.push(Warning {
+            artifact: Artifact::Network,
+            code: ErrorCode::ArtifactCaptureFailed,
+            detail: format!(
+                "network capture lost {} CDP event(s); network quiet could not be verified",
+                summary.events_dropped
+            ),
+        });
+    }
+    if summary.truncated {
+        warnings.push(Warning {
+            artifact: Artifact::Network,
+            code: ErrorCode::ArtifactCaptureFailed,
+            detail: "network capture reached a fixed request or stream event limit; network quiet could not be verified".into(),
+        });
+    }
+}
+
 fn push_network_readiness_warnings(
     summary: &network_artifact::NetworkSummary,
     warnings: &mut Vec<Warning>,
 ) {
+    push_network_capture_warnings(summary, warnings);
     if summary.inflight_total_at_capture > 0 {
         warnings.push(Warning {
             artifact: Artifact::Network,
@@ -1291,6 +1344,138 @@ async fn write_frames_jsonl(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn failed_page_enable_closes_the_created_target() {
+        use futures::{SinkExt, StreamExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut target_exists = false;
+            while let Some(Ok(message)) = socket.next().await {
+                let Ok(text) = message.to_text() else {
+                    continue;
+                };
+                let command: Value = serde_json::from_str(text).unwrap();
+                let id = command["id"].clone();
+                let reply = match command["method"].as_str().unwrap() {
+                    "Target.createTarget" => {
+                        target_exists = true;
+                        serde_json::json!({"id": id, "result": {"targetId": "created"}})
+                    }
+                    "Target.attachToTarget" => {
+                        serde_json::json!({"id": id, "result": {"sessionId": "session"}})
+                    }
+                    "Page.enable" => {
+                        serde_json::json!({"id": id, "error": {"code": -32000, "message": "enable rejected"}})
+                    }
+                    "Target.closeTarget" => {
+                        assert_eq!(command["params"]["targetId"], "created");
+                        target_exists = false;
+                        serde_json::json!({"id": id, "result": {"success": true}})
+                    }
+                    "Target.getTargets" => {
+                        serde_json::json!({"id": id, "result": {"targetInfos": if target_exists { vec![serde_json::json!({"targetId": "created"})] } else { vec![] }}})
+                    }
+                    method => panic!("unexpected CDP command {method}"),
+                };
+                socket
+                    .send(tokio_tungstenite::tungstenite::Message::Text(
+                        reply.to_string().into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let client = crate::sdk::Client::connect(&format!("ws://{address}")).unwrap();
+        let error = client
+            .fetch("https://example.test/")
+            .render(crate::sdk::fetch::RenderMode::Always)
+            .no_cookie_jar()
+            .out_dir(dir.path().to_path_buf())
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await
+            .unwrap_err();
+        assert_eq!(error.error_code, ErrorCode::CdpError);
+        let targets = client.cdp("Target.getTargets").send().await.unwrap();
+        assert_eq!(targets["targetInfos"], serde_json::json!([]));
+        drop(client);
+        tokio::time::timeout(std::time::Duration::from_secs(1), peer)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn finish_target_is_bounded_when_peer_never_replies() {
+        use futures::StreamExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut websocket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while websocket.next().await.is_some() {}
+        });
+        let conn = Connection::connect(&format!("ws://{address}/cdp"), None)
+            .await
+            .unwrap();
+        for close in [true, false] {
+            tokio::time::timeout(
+                TARGET_CLEANUP_TIMEOUT + std::time::Duration::from_secs(1),
+                finish_target(&conn, "target", "session", close),
+            )
+            .await
+            .expect("close and detach cleanup must respect their deadline");
+        }
+        drop(conn);
+        tokio::time::timeout(std::time::Duration::from_secs(1), peer)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[test]
+    fn rejected_jar_cookies_are_counted_in_a_capture_warning() {
+        assert!(cookie_jar_sync_warning(Ok(0)).is_none());
+        let warning = cookie_jar_sync_warning(Ok(3)).unwrap();
+        assert_eq!(warning.artifact, Artifact::Network);
+        assert_eq!(warning.code, ErrorCode::ArtifactCaptureFailed);
+        assert_eq!(warning.detail, "cookie jar sync: rejected_cookie_count=3");
+        let warning =
+            cookie_jar_sync_warning(Err(Error::new(ErrorCode::IoError, "jar unwritable"))).unwrap();
+        assert_eq!(warning.code, ErrorCode::IoError);
+        assert_eq!(warning.detail, "cookie jar sync: jar unwritable");
+    }
+
+    #[test]
+    fn partial_network_capture_warns_without_a_network_artifact() {
+        let summary = network_artifact::NetworkSummary {
+            events_dropped: 12,
+            truncated: true,
+            ..Default::default()
+        };
+        let mut warnings = Vec::new();
+        // This is also the path used when only WS/SSE files are requested.
+        push_network_capture_warnings(&summary, &mut warnings);
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings.iter().all(|warning| {
+            warning.artifact == Artifact::Network
+                && warning.code == ErrorCode::ArtifactCaptureFailed
+        }));
+        assert!(warnings[0].detail.contains("12 CDP event(s)"));
+        assert!(
+            warnings[1]
+                .detail
+                .contains("fixed request or stream event limit")
+        );
+        let mut warnings = Vec::new();
+        push_network_capture_warnings(&Default::default(), &mut warnings);
+        assert!(warnings.is_empty());
+    }
 
     #[test]
     fn a_kept_tab_needs_a_pending_takeover() {

@@ -15,6 +15,20 @@ pub const CONSOLE_SCHEMA_VERSION: u32 = 2;
 pub struct ConsoleLog {
     pub schema_version: u32,
     pub events: Vec<ConsoleEvent>,
+    /// CDP events lost because the broadcast receiver fell behind.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub events_dropped: u64,
+    /// The fixed console event limit omitted data.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub truncated: bool,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

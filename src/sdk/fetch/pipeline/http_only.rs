@@ -17,7 +17,9 @@ use crate::shared::time::duration_ms;
 
 use super::super::page_classification;
 use super::cookie_jar_resolve::persist_set_cookies;
-use super::request_opts::{BodyPayload, PreparedRequestOptions, prepare_cookie};
+use super::request_opts::{
+    BodyPayload, PreparedRequestOptions, prepare_cookie, validate_cookie_scope,
+};
 
 pub(super) struct HttpOnlyOutcome {
     pub(super) result: FetchResult,
@@ -37,35 +39,16 @@ pub(super) async fn http_only(
     deadline.set_stage("prepare_http_fetch");
     writer::ensure_dir(&paths.root).await?;
 
-    let opts = resolve_jar_cookies(builder, request_options)?;
-    let opts_ref: &PreparedRequestOptions = &opts;
-
     let http_owned;
     let http_client = if builder.http.proxy.is_some()
         || builder.http.ca_cert.is_some()
         || builder.http.tls_insecure
+        || builder.cookie_jar.path.is_some()
     {
         http_owned = build_per_fetch_http_client(builder).await?;
         &http_owned
     } else {
         builder.client.http()
-    };
-
-    let http_method = reqwest::Method::from_bytes(opts_ref.method.as_bytes()).map_err(|_| {
-        Error::new(
-            ErrorCode::InvalidArgument,
-            format!("invalid HTTP method {:?}", opts_ref.method),
-        )
-    })?;
-    let mut request = http_client.request(http_method, &builder.url);
-    let headers = opts_ref.http_header_map(&builder.url)?;
-    if !headers.is_empty() {
-        request = request.headers(headers);
-    }
-    request = match &opts_ref.body_payload {
-        BodyPayload::None => request,
-        BodyPayload::Bytes(b) => request.body(b.clone()),
-        BodyPayload::Form(fields) => request.form(fields),
     };
 
     deadline.update_trace(|trace| {
@@ -80,34 +63,17 @@ pub(super) async fn http_only(
 
     let resp = deadline
         .run_result("navigate", ErrorCode::NavigationTimeout, async {
-            request.send().await.map_err(|e| {
-                let code = classify_http_error(&e);
-                let prefix = if e.is_timeout() {
-                    "HTTP timeout"
-                } else if e.is_connect() {
-                    "HTTP connect"
-                } else {
-                    "HTTP error"
-                };
-                Error::new(code, format!("{prefix}: {e}"))
-            })
+            send_http_response(builder, request_options, http_client).await
         })
         .await?;
 
     let final_url = resp.url().to_string();
-    let final_url_parsed = resp.url().clone();
     let status = resp.status().as_u16();
     let content_type = resp
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .map(String::from);
-    let set_cookie_lines: Vec<String> = resp
-        .headers()
-        .get_all(reqwest::header::SET_COOKIE)
-        .iter()
-        .filter_map(|v| v.to_str().ok().map(String::from))
-        .collect();
     let (bytes, truncated_at) = deadline
         .run_result(
             "capture_body",
@@ -115,20 +81,6 @@ pub(super) async fn http_only(
             read_body_with_cap(resp, builder.http.max_response_bytes),
         )
         .await?;
-
-    if let Some(jar_path) = &builder.cookie_jar.path {
-        deadline
-            .run_result(
-                "sync_cookie_jar",
-                ErrorCode::NavigationTimeout,
-                std::future::ready(persist_set_cookies(
-                    jar_path,
-                    &set_cookie_lines,
-                    &final_url_parsed,
-                )),
-            )
-            .await?;
-    }
 
     let mut result = FetchResult::new(request_id, builder.url.clone(), deadline.snapshot());
     result.final_url = final_url;
@@ -171,6 +123,117 @@ pub(super) async fn http_only(
     })
 }
 
+async fn send_http_response(
+    builder: &FetchBuilder,
+    request_options: &PreparedRequestOptions,
+    client: &reqwest::Client,
+) -> Result<reqwest::Response, Error> {
+    let mut url = Url::parse(&builder.url).map_err(|_| {
+        let code = if builder.cookie_jar.path.is_some() {
+            ErrorCode::InvalidArgument
+        } else {
+            ErrorCode::IoError
+        };
+        Error::new(code, "invalid HTTP request URL")
+    })?;
+    let mut options = request_options.clone();
+    for redirects in 0..=10 {
+        let mut opts = resolve_jar_cookies(builder, &options, &url)?;
+        if redirects > 0 {
+            // The caller scoped its cookies against the URL it asked for, and
+            // the first hop still rejects a mismatch. A redirect target is the
+            // server's choice: a cookie that does not apply there is simply
+            // not sent, the way a browser would treat it.
+            opts.to_mut()
+                .cookies
+                .retain(|cookie| validate_cookie_scope(cookie, &url, ".cookie(...)").is_ok());
+        }
+        let method = reqwest::Method::from_bytes(opts.method.as_bytes()).map_err(|_| {
+            Error::new(
+                ErrorCode::InvalidArgument,
+                format!("invalid HTTP method {:?}", opts.method),
+            )
+        })?;
+        let mut request = client
+            .request(method, url.clone())
+            .headers(opts.http_header_map(url.as_str())?);
+        request = match &opts.body_payload {
+            BodyPayload::None => request,
+            BodyPayload::Bytes(bytes) => request.body(bytes.clone()),
+            BodyPayload::Form(fields) => request.form(fields),
+        };
+        let response = request.send().await.map_err(|error| {
+            Error::new(
+                classify_http_error(&error),
+                format!("HTTP request: {error}"),
+            )
+        })?;
+        let Some(jar_path) = &builder.cookie_jar.path else {
+            return Ok(response);
+        };
+        let cookies = response
+            .headers()
+            .get_all(reqwest::header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok().map(String::from))
+            .collect::<Vec<_>>();
+        persist_set_cookies(jar_path, &cookies, response.url())?;
+        let status = response.status().as_u16();
+        if !matches!(status, 301 | 302 | 303 | 307 | 308) {
+            return Ok(response);
+        }
+        let Some(location) = response.headers().get(reqwest::header::LOCATION) else {
+            return Ok(response);
+        };
+        if redirects == 10 {
+            return Err(Error::new(
+                ErrorCode::IoError,
+                "HTTP redirect limit exceeded (10 hops)",
+            ));
+        }
+        let next = location
+            .to_str()
+            .ok()
+            .and_then(|location| url.join(location).ok())
+            .filter(|next| matches!(next.scheme(), "http" | "https"))
+            // The server chose this Location; the caller's arguments were fine.
+            .ok_or_else(|| Error::new(ErrorCode::IoError, "invalid HTTP redirect location"))?;
+        if url.origin() != next.origin() {
+            options.headers.retain(|header| {
+                !matches!(
+                    header.name.as_str(),
+                    "authorization"
+                        | "proxy-authorization"
+                        | "cookie"
+                        | "cookie2"
+                        | "host"
+                        | "www-authenticate"
+                )
+            });
+            options.raw_cookie_header = None;
+            options.raw_cookie_pairs.clear();
+            options.cookies.clear();
+        }
+        if ((status == 301 || status == 302) && options.method == "POST")
+            || (status == 303 && options.method != "HEAD")
+        {
+            options.method = "GET".into();
+            options.body_payload = BodyPayload::None;
+            options.headers.retain(|header| {
+                !matches!(
+                    header.name.as_str(),
+                    "content-type" | "content-length" | "transfer-encoding"
+                )
+            });
+        }
+        url = next;
+    }
+    Err(Error::new(
+        ErrorCode::InternalError,
+        "HTTP redirect loop ended unexpectedly",
+    ))
+}
+
 pub(super) fn classify_http_body(
     bytes: &[u8],
     content_type: Option<&str>,
@@ -189,19 +252,14 @@ pub(super) fn classify_http_body(
 fn resolve_jar_cookies<'a>(
     builder: &FetchBuilder,
     request_options: &'a PreparedRequestOptions,
+    url: &Url,
 ) -> Result<Cow<'a, PreparedRequestOptions>, Error> {
     let Some(jar_path) = &builder.cookie_jar.path else {
         return Ok(Cow::Borrowed(request_options));
     };
-    let url = Url::parse(&builder.url).map_err(|e| {
-        Error::new(
-            ErrorCode::InvalidArgument,
-            format!("cookie jar: invalid request url {:?}: {e}", builder.url),
-        )
-    })?;
     let jar = crate::sdk::profile::cookie_jar::CookieJar::load(jar_path)?;
     let mut prepared = Vec::new();
-    for c in jar.applicable_cookies(&url) {
+    for c in jar.applicable_cookies(url) {
         if let Ok(p) = prepare_cookie(&c, "cookie_jar") {
             prepared.push(p);
         }
@@ -214,6 +272,9 @@ fn resolve_jar_cookies<'a>(
 async fn build_per_fetch_http_client(builder: &FetchBuilder) -> Result<reqwest::Client, Error> {
     let mut b =
         reqwest::Client::builder().user_agent(concat!("afhttp/", env!("CARGO_PKG_VERSION")));
+    if builder.cookie_jar.path.is_some() {
+        b = b.redirect(reqwest::redirect::Policy::none());
+    }
     match &builder.http.proxy {
         Some(url) => {
             // A proxy URL routinely carries `user:password@`, so the value
@@ -406,6 +467,239 @@ fn count_visible_chars_after(html: &str, body_start: usize) -> usize {
 mod tests {
     use super::*;
 
+    async fn read_fixture_request(stream: &mut tokio::net::TcpStream) -> String {
+        use tokio::io::AsyncReadExt;
+        let mut request = Vec::new();
+        loop {
+            let mut chunk = [0; 2048];
+            let count = stream.read(&mut chunk).await.unwrap();
+            assert!(count > 0);
+            request.extend_from_slice(&chunk[..count]);
+            if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                let length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.strip_prefix("content-length:")?
+                            .trim()
+                            .parse::<usize>()
+                            .ok()
+                    })
+                    .unwrap_or(0);
+                if request.len() >= end + 4 + length {
+                    break;
+                }
+            }
+        }
+        String::from_utf8(request).unwrap()
+    }
+
+    #[tokio::test]
+    async fn cookie_jar_redirect_loop_stops_after_ten_hops() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/loop", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for _ in 0..=10 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                read_fixture_request(&mut stream).await;
+                stream.write_all(b"HTTP/1.1 302 Found\r\nLocation: /loop\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let client = crate::sdk::Client::http_only().unwrap();
+        let error = client
+            .fetch(url)
+            .render(crate::sdk::fetch::RenderMode::None)
+            .cookie_jar(dir.path().join("cookies.json"))
+            .out_dir(dir.path().join("out"))
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await
+            .unwrap_err();
+        assert_eq!(error.error_code, ErrorCode::IoError);
+        assert_eq!(error.detail, "HTTP redirect limit exceeded (10 hops)");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn redirect_hops_persist_cookies_and_preserve_method_and_credential_rules() {
+        use tokio::io::AsyncWriteExt;
+        for status in [301, 302, 303, 307, 308] {
+            let login = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let echo = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let login_url = format!("http://{}/login", login.local_addr().unwrap());
+            let echo_url = format!("http://{}/echo-cookie", echo.local_addr().unwrap());
+            let destination = echo_url.clone();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = login.accept().await.unwrap();
+                let initial = read_fixture_request(&mut stream).await;
+                assert!(initial.starts_with("POST /login "));
+                stream.write_all(format!("HTTP/1.1 {status} Redirect\r\nLocation: {destination}\r\nSet-Cookie: sid=redirect-session; Path=/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+                drop(stream);
+                let (mut stream, _) = echo.accept().await.unwrap();
+                let request = read_fixture_request(&mut stream).await;
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                    )
+                    .await
+                    .unwrap();
+                request
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let jar_path = dir.path().join("cookies.json");
+            let client = crate::sdk::Client::http_only().unwrap();
+            let result = client
+                .fetch(login_url)
+                .render(crate::sdk::fetch::RenderMode::None)
+                .method("POST")
+                .body(b"login=data".to_vec())
+                .header("Authorization", "Bearer caller-secret")
+                .header("Cookie", "caller=secret")
+                .cookie_jar(&jar_path)
+                .out_dir(dir.path().join("out"))
+                .want([Artifact::Body])
+                .timeout(std::time::Duration::from_secs(2))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(result.final_url, echo_url);
+            assert_eq!(result.status, 200);
+            let request = server.await.unwrap();
+            let headers = request.to_ascii_lowercase();
+            assert!(
+                headers.contains("cookie: sid=redirect-session\r\n"),
+                "{request}"
+            );
+            assert!(!headers.contains("caller-secret") && !headers.contains("caller=secret"));
+            if matches!(status, 307 | 308) {
+                assert!(
+                    request.starts_with("POST /echo-cookie ") && request.ends_with("login=data")
+                );
+            } else {
+                assert!(request.starts_with("GET /echo-cookie ") && request.ends_with("\r\n\r\n"));
+            }
+            let jar = crate::sdk::profile::cookie_jar::CookieJar::load(&jar_path).unwrap();
+            assert!(
+                jar.applicable_cookies(&Url::parse(&echo_url).unwrap())
+                    .iter()
+                    .any(|cookie| cookie.name() == "sid" && cookie.value() == "redirect-session")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn same_origin_redirect_keeps_credentials_and_skips_out_of_scope_caller_cookies() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let first = read_fixture_request(&mut stream).await;
+            // A relative Location: resolved against /login/start it is /login/../home.
+            stream.write_all(b"HTTP/1.1 302 Found\r\nLocation: ../home?step=2\r\nSet-Cookie: sid=redirect-session; Path=/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+            drop(stream);
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let second = read_fixture_request(&mut stream).await;
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .await
+                .unwrap();
+            (first, second)
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let client = crate::sdk::Client::http_only().unwrap();
+        let result = client
+            .fetch(format!("{origin}/login/start"))
+            .render(crate::sdk::fetch::RenderMode::None)
+            .header("Authorization", "Bearer caller-secret")
+            .cookie_full(
+                cookie::Cookie::build(("scoped", "login-only"))
+                    .path("/login")
+                    .build(),
+            )
+            .cookie("everywhere", "yes")
+            .cookie_jar(dir.path().join("cookies.json"))
+            .out_dir(dir.path().join("out"))
+            .want([Artifact::Body])
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(result.status, 200);
+        assert_eq!(result.final_url, format!("{origin}/home?step=2"));
+        let (first, second) = server.await.unwrap();
+        let (first_lower, second_lower) = (first.to_ascii_lowercase(), second.to_ascii_lowercase());
+        assert!(first.starts_with("GET /login/start "), "{first}");
+        assert!(
+            first_lower.contains("cookie: scoped=login-only; everywhere=yes\r\n"),
+            "{first}"
+        );
+        assert!(second.starts_with("GET /home?step=2 "), "{second}");
+        assert!(
+            second_lower.contains("authorization: bearer caller-secret\r\n"),
+            "{second}"
+        );
+        assert!(
+            second_lower.contains("cookie: everywhere=yes; sid=redirect-session\r\n"),
+            "{second}"
+        );
+    }
+
+    #[tokio::test]
+    async fn out_of_scope_caller_cookie_on_the_requested_url_is_still_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = crate::sdk::Client::http_only().unwrap();
+        let error = client
+            .fetch("http://127.0.0.1:1/home")
+            .render(crate::sdk::fetch::RenderMode::None)
+            .cookie_full(
+                cookie::Cookie::build(("scoped", "login-only"))
+                    .path("/login")
+                    .build(),
+            )
+            .cookie_jar(dir.path().join("cookies.json"))
+            .out_dir(dir.path().join("out"))
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await
+            .unwrap_err();
+        assert_eq!(error.error_code, ErrorCode::InvalidArgument);
+        assert_eq!(
+            error.detail,
+            ".cookie(...): cookie \"scoped\" Path=\"/login\" does not match URL path \"/home\""
+        );
+    }
+
+    #[tokio::test]
+    async fn unusable_redirect_location_is_a_server_failure_not_a_caller_error() {
+        use tokio::io::AsyncWriteExt;
+        for location in ["ftp://example.invalid/file", "http://[broken"] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/start", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                read_fixture_request(&mut stream).await;
+                stream.write_all(format!("HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let client = crate::sdk::Client::http_only().unwrap();
+            let error = client
+                .fetch(url)
+                .render(crate::sdk::fetch::RenderMode::None)
+                .cookie_jar(dir.path().join("cookies.json"))
+                .out_dir(dir.path().join("out"))
+                .timeout(std::time::Duration::from_secs(2))
+                .send()
+                .await
+                .unwrap_err();
+            assert_eq!(error.error_code, ErrorCode::IoError, "{location}");
+            assert_eq!(error.detail, "invalid HTTP redirect location");
+            server.await.unwrap();
+        }
+    }
+
     #[test]
     fn empty_html_shell_detector_classifies_common_cases() {
         let shell = b"<!doctype html><html><head><title>App</title></head><body><div id=\"root\"></div><script src=\"app.js\"></script></body></html>";
@@ -458,5 +752,38 @@ mod tests {
             classify_http_error_parts(true, true, "operation timed out"),
             ErrorCode::NavigationTimeout
         );
+    }
+
+    #[tokio::test]
+    async fn http_only_request_failure_redacts_sdk_error_urls() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().expect("local address").port();
+        drop(listener);
+        let out = tempfile::tempdir().expect("output directory");
+        let client = crate::sdk::Client::http_only().expect("HTTP-only client");
+        let err = client
+            .fetch(format!(
+                "http://reader:password-canary@127.0.0.1:{port}/path?token_secret=query-canary&api_key=legacy-canary&safe=ok"
+            ))
+            .render(crate::sdk::fetch::RenderMode::None)
+            .want([Artifact::Body])
+            .out_dir(out.path().to_path_buf())
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await
+            .expect_err("closed endpoint must fail");
+        assert_eq!(err.error_code, ErrorCode::TargetUnreachable);
+        assert!(err.detail.contains("token_secret=***"));
+        assert!(err.detail.contains("api_key=***"));
+        let display = err.to_string();
+        let json = serde_json::to_string(&err).expect("serialize SDK error");
+        for text in [&err.detail, &display, &json] {
+            assert!(!text.contains("password-canary"), "password leaked: {text}");
+            assert!(!text.contains("query-canary"), "query leaked: {text}");
+            assert!(
+                !text.contains("legacy-canary"),
+                "legacy query leaked: {text}"
+            );
+        }
     }
 }

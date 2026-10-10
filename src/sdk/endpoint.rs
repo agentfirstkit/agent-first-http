@@ -79,9 +79,7 @@ impl Endpoint {
         } else {
             Err(Error::new(
                 ErrorCode::InvalidEndpoint,
-                format!(
-                    "endpoint must start with ws://, wss://, http://, https://, or unix:; got {input:?}"
-                ),
+                "endpoint must start with ws://, wss://, http://, https://, or unix:",
             ))
         }
     }
@@ -132,12 +130,9 @@ fn split_host_port(rest: &str, default_port: u16) -> Result<(String, u16), Error
         ));
     }
     if let Some((host, port)) = rest.rsplit_once(':') {
-        let port: u16 = port.parse().map_err(|_| {
-            Error::new(
-                ErrorCode::InvalidEndpoint,
-                format!("endpoint port not a u16: {port:?}"),
-            )
-        })?;
+        let port: u16 = port
+            .parse()
+            .map_err(|_| Error::new(ErrorCode::InvalidEndpoint, "endpoint port not a u16"))?;
         Ok((host.to_string(), port))
     } else {
         Ok((rest.to_string(), default_port))
@@ -209,5 +204,25 @@ mod tests {
     fn rejects_bad_port() {
         let err = Endpoint::parse("ws://host:notnum").err();
         assert_eq!(err.map(|e| e.error_code), Some(ErrorCode::InvalidEndpoint),);
+    }
+
+    #[test]
+    fn client_connect_parse_errors_never_echo_endpoint_credentials() {
+        for endpoint in [
+            "ws://reader:password-canary@127.0.0.1:invalid?token_secret=query-canary",
+            "ftp://reader:password-canary@127.0.0.1/path with-space?token_secret=query-canary",
+            "reader:password-canary@127.0.0.1?token_secret=query-canary",
+        ] {
+            let err = crate::sdk::Client::connect(endpoint)
+                .err()
+                .expect("endpoint must fail parsing");
+            assert_eq!(err.error_code, ErrorCode::InvalidEndpoint);
+            let display = err.to_string();
+            let json = serde_json::to_string(&err).expect("serialize SDK error");
+            for text in [&err.detail, &display, &json] {
+                assert!(!text.contains("password-canary"), "password leaked: {text}");
+                assert!(!text.contains("query-canary"), "query leaked: {text}");
+            }
+        }
     }
 }

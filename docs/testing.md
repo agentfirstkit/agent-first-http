@@ -2,12 +2,13 @@
 
 This project optimizes for functional correctness and protocol stability, not stress/performance testing.
 
-`tests/test.sh` is the one entrypoint: CI, the monorepo driver, and the release
-gate all call it, so a mode cannot mean one thing locally and another in CI.
+`tests/test.sh` is the fixed local/container entrypoint used by the monorepo
+driver and release gate. Native CI legs run the corresponding Cargo checks
+directly.
 It is written against the [`agent-first-data`](https://github.com/agentfirstkit/agent-first-data)
 Bash kit, so `afdata` has to be on `PATH` (or named by `AFDATA_BIN`) to drive
-the harness — the container it drives needs none of that. Everything cargo
-touches runs inside that container; nothing in this suite is built on the host.
+the harness — the container it drives needs none of that. All Cargo work driven
+by this entrypoint runs inside the container.
 
 ## Default Gates
 
@@ -20,6 +21,10 @@ Run on every PR.
    - `bash tests/test.sh unit` (runs lib/bin tests plus `tests/check_regressions.sh` inside the selected test container)
    - Focus: argument parsing, endpoint URL handling, fetch builder shape, CDP message framing, artifact path resolution, observation/network schema serialization, health/capabilities clients, SDK error mapping.
    - No browser process required.
+   - Deterministic broadcast fixtures verify recovery after event loss, capture
+     limits, idle-based network quiet after loss, and collector cancellation on drop.
+     A local CDP responder counts body requests to verify known oversized responses
+     are skipped before reading or decoding their body.
 
 3. Regression list
    - Covered by `bash tests/test.sh unit`; it runs `tests/check_regressions.sh` inside the selected test container.
@@ -60,6 +65,8 @@ Fixture pages cover:
 - top-level document load, redirects, script/style/image resources, XHR/fetch JSON, GraphQL-shaped JSON, failed requests, cached requests, and service-worker responses when supported
 - default redaction for `Cookie`, `Authorization`, `Proxy-Authorization`, `Set-Cookie`, and token/secret-like headers
 - `--network-bodies off|xhr|all`, per-body byte limits, UTF-8 text bodies, binary bodies, and body-capture warning paths
+- SDK and real CLI error canaries for URL userinfo and credential query parameters,
+  including unreachable and malformed targets; normal output goldens remain stable
 
 The network tests assert structure and linkage rather than exact event order when CDP does not guarantee ordering across resource types.
 
@@ -73,13 +80,19 @@ Unit tests cover JSON shapes without a browser. Integration tests cover:
 
 ### Browser discovery
 
-The suite respects, in order:
+The suite resolves Chromium in this order:
 
-1. `AFHTTP_TEST_BROWSER_BIN` environment variable (explicit path).
-2. `which chromium`, `which chrome`, `which google-chrome-stable`.
-3. Standard install paths per platform (`/Applications/Google Chrome.app/...`, `/usr/bin/chromium`, `C:\Program Files\Google\Chrome\...`).
+1. `AFHTTP_TEST_BROWSER_BIN` (explicit path). An explicit path is authoritative: if it does not name a file, the browser counts as missing and discovery does **not** fall back to the standard paths.
+2. Without that variable, the standard install paths (`/usr/bin/chromium`, `/usr/bin/chromium-browser`, `/usr/bin/google-chrome`, `/usr/bin/google-chrome-stable`, `/Applications/Google Chrome.app/...`).
 
-When none is found, the suite is **skipped, not failed**, with a clear log line so the CI matrix can either provide a browser or accept the skip.
+The other backends follow the same rule through their own variables (`AFHTTP_TEST_LIGHTPANDA_BIN`, `AFHTTP_TEST_FINGERPRINT_CHROMIUM_BIN`, `AFHTTP_TEST_FOXBRIDGE_BIN`, `AFHTTP_TEST_CAMOUFOX_BIN`).
+
+What a missing backend means is decided by `AFHTTP_TEST_REQUIRE_BACKENDS`, a comma-separated list of backend names (`chromium`, `lightpanda`, `fingerprint-chromium`, `camoufox`):
+
+- A backend **named in the list** must be present. A test that cannot find it **fails** with `required backend <name> is missing` instead of returning early.
+- A backend **not in the list** is optional: its tests print a `(skipping: ...)` line and pass, so a green run does not show that backend was exercised.
+
+The test container sets the list to every backend its image installs (`tests/container-entrypoint.sh`): `chromium` and `lightpanda` always, `fingerprint-chromium` on x86_64, `camoufox` when the image was built with `AFHTTP_TEST_INSTALL_CAMOUFOX=1`. The native CI legs require `chromium`. `tests/check_backend_requirements.sh`, part of the `unit` mode, proves both halves against real test binaries: a required backend pointed at a nonexistent path fails, an optional one skips.
 
 ### Running locally
 
@@ -99,6 +112,10 @@ bash tests/test.sh
 # Full integration suite (Apple container on local macOS)
 bash tests/test.sh integration
 
+# Only the browser download-to-disk tests (browser_navigation_download* in
+# tests/browser_fetch.rs), for iterating on download handling
+bash tests/test.sh download
+
 # The integration mode runs real test files including:
 # tests/browser_fetch.rs, tests/fetch_http_only.rs, tests/health_capabilities.rs,
 # tests/cdp_proxy.rs, tests/cookie_jar_isolation.rs, tests/env_isolation.rs,
@@ -108,10 +125,16 @@ bash tests/test.sh integration
 ### CI (`.github/workflows/ci.yml`)
 
 Linux is covered by the **`integration-docker`** job, which runs the full
-integration suite through the Docker harness (real chromium + every backend +
+integration suite through the Docker harness (real Chromium, available optional backends, and
 KasmVNC, `AFHTTP_NO_SANDBOX=1` so the in-container sandbox is off). There is no
 ubuntu *native* leg: the ubuntu runner's chromium is a confined snap that can't
 complete download-to-disk tests.
+
+Camoufox/foxbridge installation is opt-in with `AFHTTP_TEST_INSTALL_CAMOUFOX=1`.
+Fingerprint Chromium is unavailable on arm64. Those two are the only backends
+left out of `AFHTTP_TEST_REQUIRE_BACKENDS` in the container, so they are the
+only ones whose tests may return early; a passing gate does not demonstrate
+that they were exercised unless the image carries them.
 
 The **native** `integration` matrix validates the binaries actually shipped, and
 runs with Chromium's sandbox **on** (no `AFHTTP_NO_SANDBOX`) since these are

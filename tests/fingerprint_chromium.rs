@@ -74,6 +74,7 @@ async fn spawn_host_with_fingerprint_chromium() -> Option<(String, tempfile::Tem
 #[tokio::test]
 async fn fingerprint_chromium_reports_family_in_capabilities() {
     let Some((endpoint, _tmp)) = spawn_host_with_fingerprint_chromium().await else {
+        support::env::require_backend_if_missing("fingerprint-chromium");
         println!(
             "(skipping: no fingerprint-chromium binary; set AFHTTP_TEST_FINGERPRINT_CHROMIUM_BIN)"
         );
@@ -93,6 +94,7 @@ async fn fingerprint_chromium_reports_family_in_capabilities() {
 #[tokio::test]
 async fn fingerprint_chromium_user_agent_is_stable_within_a_host() {
     let Some((endpoint, tmp)) = spawn_host_with_fingerprint_chromium().await else {
+        support::env::require_backend_if_missing("fingerprint-chromium");
         println!(
             "(skipping: no fingerprint-chromium binary; set AFHTTP_TEST_FINGERPRINT_CHROMIUM_BIN)"
         );

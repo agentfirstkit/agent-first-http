@@ -88,6 +88,7 @@ pub struct AppState {
     launch_ctx: Option<Arc<LaunchContext>>,
     /// Recent-requests ring. `None` = feature disabled.
     pub recent_requests: Option<recent_requests::RecentRequests>,
+    _recent_requests_subscriber: Option<Arc<recent_requests::SubscriberGuard>>,
     /// Real-display takeover proxy target and provider process keepalive.
     pub takeover: Option<TakeoverProxyState>,
     /// Short-lived URL capabilities for browser handoff into `/takeover/*`.
@@ -284,6 +285,19 @@ struct TakeoverUiSessionResponse {
 impl AppState {
     /// Launch the host browser and return a complete, ready-to-serve state.
     pub async fn launch(args: &HostArgs) -> Result<Self, Error> {
+        // An embedder builds `HostArgs` itself and never passes the CLI's
+        // guard. A blank token would compare equal to `?token_secret=` (or a
+        // lone `%20`), so it is a configuration error, not a credential.
+        if args
+            .token
+            .as_deref()
+            .is_some_and(|token| token.trim().is_empty())
+        {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "host token is empty or whitespace-only",
+            ));
+        }
         let takeover = if let Takeover::On { provider } = args.takeover {
             if matches!(args.browser, BrowserChoice::Lightpanda) {
                 return Err(Error::new(
@@ -305,12 +319,13 @@ impl AppState {
         let entry = ProfileEntry { kind, name, handle };
 
         // Start recent-request subscriber if cap > 0.
-        let recent = if args.recent_requests_cap > 0 {
+        let (recent, recent_subscriber) = if args.recent_requests_cap > 0 {
             let ring = recent_requests::RecentRequests::new(args.recent_requests_cap);
-            recent_requests::spawn_subscriber(entry.ws_url().to_string(), ring.clone());
-            Some(ring)
+            let subscriber =
+                recent_requests::spawn_scoped_subscriber(entry.ws_url().to_string(), ring.clone());
+            (Some(ring), Some(Arc::new(subscriber)))
         } else {
-            None
+            (None, None)
         };
 
         Ok(Self {
@@ -326,6 +341,7 @@ impl AppState {
                 display,
             })),
             recent_requests: recent,
+            _recent_requests_subscriber: recent_subscriber,
             takeover,
             handoffs: Arc::new(RwLock::new(Vec::new())),
             cdp_clients: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -358,11 +374,20 @@ async fn serve_tcp(app: Router, addr: SocketAddr) -> Result<(), Error> {
         .local_addr()
         .map_err(|e| Error::new(ErrorCode::IoError, format!("local_addr: {e}")))?;
     emit_host_ready(&format!("tcp:{actual_addr}"));
-    let shutdown = shutdown_signal();
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
+    // Axum moves the shutdown future into a detached task. Keep its signal
+    // tied to this serve scope so cancellation also closes idle connections.
+    let (shutdown_scope, cancelled) = tokio::sync::oneshot::channel::<()>();
+    let served = axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            tokio::select! {
+                _ = shutdown_signal() => {},
+                _ = cancelled => {},
+            }
+        })
         .await
-        .map_err(|e| Error::new(ErrorCode::IoError, format!("listener serve: {e}")))
+        .map_err(|e| Error::new(ErrorCode::IoError, format!("listener serve: {e}")));
+    drop(shutdown_scope);
+    served
 }
 
 #[cfg(unix)]
@@ -389,11 +414,15 @@ async fn serve_unix(app: Router, path: std::path::PathBuf) -> Result<(), Error> 
     tokio::pin!(shutdown);
 
     let mut make_service = app.into_make_service();
+    // Keep accepted connections in the listener's scope: dropping the serve
+    // future aborts them, and completed tasks are reaped while accepting.
+    let mut connections = tokio::task::JoinSet::new();
 
     loop {
         let accepted = tokio::select! {
             biased;
             _ = &mut shutdown => break,
+            Some(_finished) = connections.join_next(), if !connections.is_empty() => continue,
             r = listener.accept() => r,
         };
         let (stream, _peer) = match accepted {
@@ -411,7 +440,7 @@ async fn serve_unix(app: Router, path: std::path::PathBuf) -> Result<(), Error> 
         let Some(tower_service) = tower_service else {
             continue;
         };
-        tokio::spawn(async move {
+        connections.spawn(async move {
             let io = TokioIo::new(stream);
             let hyper_service = hyper::service::service_fn(
                 move |req: axum::http::Request<hyper::body::Incoming>| {
@@ -434,6 +463,7 @@ async fn serve_unix(app: Router, path: std::path::PathBuf) -> Result<(), Error> 
         });
     }
 
+    connections.shutdown().await;
     let _ = std::fs::remove_file(&path_for_cleanup);
     Ok(())
 }
@@ -1065,6 +1095,7 @@ pub fn test_state(token: Option<&str>, health_public: HealthPublic) -> AppState 
         switch_lock: Arc::new(AsyncMutex::new(())),
         launch_ctx: None,
         recent_requests: None,
+        _recent_requests_subscriber: None,
         takeover: None,
         handoffs: Arc::new(RwLock::new(Vec::new())),
         cdp_clients: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -1123,4 +1154,131 @@ pub(crate) fn default_limits() -> BTreeMap<String, serde_json::Value> {
         serde_json::Value::from(DEFAULT_NETWORK_BODY_MAX_BYTES),
     );
     m
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn a_blank_host_token_is_a_configuration_error_before_any_browser_starts() {
+        for token in ["", " ", "\t\n"] {
+            let args = HostArgs {
+                listen: "tcp:127.0.0.1:0".into(),
+                profile: ProfileChoice::Ephemeral,
+                display: crate::host::bootstrap::DisplayMode::Headless,
+                takeover: Takeover::Off,
+                display_quality: 100,
+                browser: BrowserChoice::Auto,
+                browser_bin: Some("/nonexistent-browser-must-not-be-started".into()),
+                token: Some(token.into()),
+                takeover_enabled: false,
+                health_enabled: true,
+                health_public: HealthPublic::Off,
+                engine_envs: Vec::new(),
+                browser_args: Vec::new(),
+                proxy: None,
+                recent_requests_cap: 0,
+                tab_idle_timeout_s: 0,
+            };
+            let error = match AppState::launch(&args).await {
+                Ok(_) => panic!("blank token {token:?} launched a host"),
+                Err(error) => error,
+            };
+            assert_eq!(error.error_code, ErrorCode::InvalidArgument, "{token:?}");
+            assert_eq!(error.detail, "host token is empty or whitespace-only");
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelling_tcp_listener_closes_keepalive_connections_and_releases_state() {
+        let reservation = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("reserve listener address");
+        let address = reservation.local_addr().expect("listener address");
+        drop(reservation);
+        let state = test_state(None, HealthPublic::Minimal);
+        let weak_profile = Arc::downgrade(&state.profile);
+        let listener = tokio::spawn(serve_tcp(build_router(state), address));
+        let mut peer = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Ok(peer) = tokio::net::TcpStream::connect(address).await {
+                    break peer;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("TCP listener ready");
+        peer.write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .expect("write keepalive request");
+        let mut response = [0; 4096];
+        let response_len = tokio::time::timeout(Duration::from_secs(1), peer.read(&mut response))
+            .await
+            .expect("health response ready")
+            .expect("read health response");
+        assert!(response[..response_len].starts_with(b"HTTP/1.1 200"));
+
+        listener.abort();
+        let _joined = listener.await;
+        let mut remaining = Vec::new();
+        tokio::time::timeout(Duration::from_secs(1), peer.read_to_end(&mut remaining))
+            .await
+            .expect("cancelling the listener releases its keepalive socket")
+            .expect("read socket EOF");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while weak_profile.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelling the listener releases its application state");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelling_unix_listener_closes_keepalive_connections_and_releases_state() {
+        let temporary = tempfile::tempdir().expect("temporary listener directory");
+        let path = temporary.path().join("listener.sock");
+        let state = test_state(None, HealthPublic::Minimal);
+        let weak_profile = Arc::downgrade(&state.profile);
+        let listener = tokio::spawn(serve_unix(build_router(state), path.clone()));
+        let mut peer = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Ok(peer) = tokio::net::UnixStream::connect(&path).await {
+                    break peer;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("Unix listener ready");
+        peer.write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .expect("write keepalive request");
+        let mut response = [0; 4096];
+        let response_len = tokio::time::timeout(Duration::from_secs(1), peer.read(&mut response))
+            .await
+            .expect("health response ready")
+            .expect("read health response");
+        assert!(response[..response_len].starts_with(b"HTTP/1.1 200"));
+
+        listener.abort();
+        let _joined = listener.await;
+        let mut remaining = Vec::new();
+        tokio::time::timeout(Duration::from_secs(1), peer.read_to_end(&mut remaining))
+            .await
+            .expect("cancelling the listener releases its keepalive socket")
+            .expect("read socket EOF");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while weak_profile.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelling the listener releases its application state");
+    }
 }

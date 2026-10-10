@@ -81,6 +81,7 @@ async fn spawn_host_with_camoufox() -> Option<(String, tempfile::TempDir)> {
 #[tokio::test]
 async fn camoufox_launches_and_exposes_subset_capability_matrix() {
     let Some((endpoint, _tmp)) = spawn_host_with_camoufox().await else {
+        support::env::require_backend_if_missing("camoufox");
         println!(
             "(skipping: foxbridge or camoufox binary missing; set \
              AFHTTP_TEST_FOXBRIDGE_BIN and AFHTTP_TEST_CAMOUFOX_BIN)"
@@ -104,6 +105,7 @@ async fn camoufox_launches_and_exposes_subset_capability_matrix() {
 #[tokio::test]
 async fn camoufox_refuses_persistent_profile() {
     let Some((foxbridge, _camoufox)) = skip_if_no_camoufox_stack() else {
+        support::env::require_backend_if_missing("camoufox");
         println!(
             "(skipping: foxbridge or camoufox binary missing; set \
              AFHTTP_TEST_FOXBRIDGE_BIN and AFHTTP_TEST_CAMOUFOX_BIN)"

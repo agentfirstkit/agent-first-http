@@ -660,7 +660,9 @@ fn panel_command() -> CommandSpec {
 
 fn upload_command() -> CommandSpec {
     CommandSpec::new(["upload"])
-        .about("Upload a local file into a browser tab's file input via DOM.setFileInputFiles.")
+        .about(
+            "Set a file input from a path visible to both driver and browser; no file bytes are transferred.",
+        )
         .arg(endpoint_arg())
         .arg(token_arg())
         .arg(ArgSpec::option("--tab", "TARGET_ID").about("CDP target id to operate in"))
@@ -668,7 +670,9 @@ fn upload_command() -> CommandSpec {
             ArgSpec::option("--selector", "CSS")
                 .about("CSS selector for the <input type=file> element"),
         )
-        .arg(ArgSpec::option("--file", "PATH").about("Local file to upload"))
+        .arg(ArgSpec::option("--file", "PATH").about(
+            "File accessible at the same absolute path in driver and browser filesystems; the default container has no shared host paths",
+        ))
         .combination(
             Combination::new("upload")
                 .action("upload")

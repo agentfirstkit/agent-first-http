@@ -144,7 +144,7 @@ pub(crate) async fn sync_browser_cookies_to_jar(
     session_id: &str,
     final_url: &str,
     jar_path: &std::path::Path,
-) -> Result<(), Error> {
+) -> Result<usize, Error> {
     let final_url_parsed = Url::parse(final_url).map_err(|e| {
         Error::new(
             ErrorCode::InternalError,
@@ -161,18 +161,22 @@ pub(crate) async fn sync_browser_cookies_to_jar(
         .await?;
     let cookies = match r.get("cookies").and_then(|v| v.as_array()) {
         Some(arr) => arr.clone(),
-        None => return Ok(()),
+        None => return Ok(0),
     };
     if cookies.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
     let mut jar = crate::sdk::profile::cookie_jar::CookieJar::load(jar_path)?;
+    let mut rejected_count = 0;
     for entry in cookies {
-        if let Some(c) = cdp_cookie_to_set_cookie(&entry) {
-            let _accepted = jar.merge(c, &final_url_parsed);
+        if let Some(c) = cdp_cookie_to_set_cookie(&entry)
+            && !jar.merge(c, &final_url_parsed)
+        {
+            rejected_count += 1;
         }
     }
-    jar.persist()
+    jar.persist()?;
+    Ok(rejected_count)
 }
 
 fn cdp_cookie_to_set_cookie(entry: &serde_json::Value) -> Option<cookie::Cookie<'static>> {
@@ -180,8 +184,9 @@ fn cdp_cookie_to_set_cookie(entry: &serde_json::Value) -> Option<cookie::Cookie<
     let value = entry.get("value")?.as_str()?.to_string();
     let mut b = cookie::Cookie::build((name, value));
     if let Some(d) = entry.get("domain").and_then(|v| v.as_str())
-        && !d.is_empty()
+        && d.starts_with('.')
     {
+        // CDP uses a leading dot for domain cookies; bare hosts are host-only.
         b = b.domain(d.to_string());
     }
     if let Some(p) = entry.get("path").and_then(|v| v.as_str())
@@ -256,6 +261,50 @@ mod tests {
         assert_eq!(cookies.len(), 1);
         assert_eq!(cookies[0].name(), "sid");
         assert_eq!(cookies[0].value(), "abc");
+    }
+
+    #[test]
+    fn cdp_cookies_preserve_host_only_and_domain_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        for (domain, request_url, child_url, child_matches) in [
+            (
+                "example.test",
+                "https://example.test/",
+                "https://sub.example.test/",
+                false,
+            ),
+            (
+                ".example.test",
+                "https://example.test/",
+                "https://sub.example.test/",
+                true,
+            ),
+            ("127.0.0.1", "http://127.0.0.1/", "http://127.0.0.2/", false),
+            (
+                "localhost",
+                "http://localhost/",
+                "http://sub.localhost/",
+                false,
+            ),
+        ] {
+            let mut jar =
+                crate::sdk::profile::cookie_jar::CookieJar::load(dir.path().join("jar.json"))
+                    .unwrap();
+            let entry =
+                serde_json::json!({"name": "sid", "value": "abc", "domain": domain, "path": "/"});
+            let cookie = cdp_cookie_to_set_cookie(&entry).unwrap();
+            assert!(jar.merge(cookie, &Url::parse(request_url).unwrap()));
+            assert_eq!(
+                jar.applicable_cookies(&Url::parse(request_url).unwrap())
+                    .len(),
+                1
+            );
+            assert_eq!(
+                !jar.applicable_cookies(&Url::parse(child_url).unwrap())
+                    .is_empty(),
+                child_matches
+            );
+        }
     }
 
     #[test]

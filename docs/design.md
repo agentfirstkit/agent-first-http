@@ -117,7 +117,7 @@ Inline and file-path variants are mutually exclusive per slot: setting one clear
 
 ### CLI flags: long form only
 
-CLI flags use long form only (`--render`, `--endpoint-url`, `--timeout`). No single-letter shorts (`-r`, `-e`, `-t`). Long flags are self-describing and less error-prone in agent-generated commands.
+CLI flags use long form only (`--render`, `--endpoint-url`, `--timeout-ms`). No single-letter shorts (`-r`, `-e`, `-t`). Long flags are self-describing and less error-prone in agent-generated commands.
 
 CLI flag names correspond to JSON field names with hyphens replacing underscores (e.g. `--browser-bin` ↔ JSON `browser_bin`).
 

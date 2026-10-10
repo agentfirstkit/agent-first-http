@@ -2358,6 +2358,38 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn entrypoint_rejects_empty_persisted_token_before_starting_host() {
+        // (persisted token file, AFHTTP_TOKEN_SECRET): blank in either source
+        // must stop the entrypoint before it announces or starts a host.
+        for (persisted, env_token) in [
+            (Some(""), None),
+            (Some(" \n"), None),
+            (None, Some(" ")),
+            (None, Some("\t \n")),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let state = temp.path().join("afhttp");
+            std::fs::create_dir(&state).unwrap();
+            if let Some(persisted) = persisted {
+                std::fs::write(state.join("host-token"), persisted).unwrap();
+            }
+            let script = temp.path().join("entrypoint.sh");
+            std::fs::write(&script, ENTRYPOINT).unwrap();
+            let mut command = std::process::Command::new("sh");
+            command.arg(script).env("XDG_DATA_HOME", temp.path());
+            match env_token {
+                Some(token) => command.env("AFHTTP_TOKEN_SECRET", token),
+                None => command.env_remove("AFHTTP_TOKEN_SECRET"),
+            };
+            let output = command.output().unwrap();
+            assert_eq!(output.status.code(), Some(1), "{persisted:?} {env_token:?}");
+            assert!(String::from_utf8_lossy(&output.stderr).contains("empty host token"));
+            assert!(output.stdout.is_empty());
+        }
+    }
+
     #[test]
     fn entrypoint_generates_base64url_token_secret() {
         assert!(ENTRYPOINT.contains("AFHTTP_TOKEN_SECRET"));

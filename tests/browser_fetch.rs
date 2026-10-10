@@ -1351,6 +1351,46 @@ async fn render_auto_escalates_empty_html_shell_to_browser() {
 }
 
 #[tokio::test]
+async fn browser_navigation_download_timeout_uses_whole_fetch_budget() {
+    let Some((endpoint, tmp, _browser_guard)) = spawn_host_with_browser().await else {
+        println!("(skipping: no chromium)");
+        return;
+    };
+    let fixture = support::fixture_server::spawn().await;
+    let client = Client::connect(&endpoint).unwrap();
+    let started = std::time::Instant::now();
+    let error = client
+        .fetch(format!("{}/unfinished-download.bin", fixture.base_url()))
+        .render(RenderMode::Always)
+        .wait(Wait::Load)
+        .timeout(Duration::from_secs(2))
+        .want([Artifact::Body])
+        .out_dir(tmp.path().to_path_buf())
+        .send_detailed()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.error_code,
+        agent_first_http::shared::error::ErrorCode::NavigationTimeout
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(2800),
+        "download reset the fetch budget: {:?}",
+        started.elapsed()
+    );
+    assert!(
+        error
+            .trace
+            .stages
+            .iter()
+            .any(|stage| stage.name == "capture_download"
+                && stage.status == agent_first_http::sdk::fetch::result::TraceStageStatus::Timeout),
+        "{:?}",
+        error.trace
+    );
+}
+
+#[tokio::test]
 async fn browser_navigation_download_is_captured_in_profile() {
     let Some((endpoint, tmp, _browser_guard)) = spawn_host_with_browser().await else {
         println!("(skipping: no chromium)");

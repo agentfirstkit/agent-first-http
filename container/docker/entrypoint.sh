@@ -23,6 +23,8 @@ else
     AFHTTP_TOKEN_SECRET="$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n')"
     printf '%s' "$AFHTTP_TOKEN_SECRET" > "$TOKEN_FILE"
 fi
+# Whitespace is not a secret: a blank token would authenticate `?token_secret=%20`.
+[ -n "$(printf '%s' "$AFHTTP_TOKEN_SECRET" | tr -d '[:space:]')" ] || { echo "empty host token at $TOKEN_FILE" >&2; exit 1; }
 chmod 600 "$TOKEN_FILE" 2>/dev/null || true
 
 echo "========================================="

@@ -28,13 +28,19 @@ use crate::sdk::endpoint::Endpoint;
 use crate::shared::error::{Error, ErrorCode};
 
 type ReplySender = oneshot::Sender<Result<Value, CdpRemoteError>>;
-type PendingMap = Arc<Mutex<HashMap<i64, ReplySender>>>;
+#[derive(Default)]
+struct PendingRequests {
+    closed: bool,
+    replies: HashMap<i64, ReplySender>,
+}
+
+type PendingMap = Arc<Mutex<PendingRequests>>;
 
 /// One CDP connection.
 pub struct Connection {
     tx: mpsc::UnboundedSender<OutMsg>,
     pending: PendingMap,
-    events_tx: broadcast::Sender<CdpEvent>,
+    events_rx: broadcast::Receiver<CdpEvent>,
     next_id: AtomicI64,
     _reader: JoinHandle<()>,
     _writer: JoinHandle<()>,
@@ -96,9 +102,12 @@ impl Connection {
             None => endpoint_ws_url.to_string(),
         };
         let request = build_ws_request(&url)?;
-        let uri: Uri = url
-            .parse()
-            .map_err(|e| Error::new(ErrorCode::InvalidEndpoint, format!("CDP url {url:?}: {e}")))?;
+        let uri: Uri = url.parse().map_err(|e| {
+            Error::new(
+                ErrorCode::InvalidEndpoint,
+                format!("CDP url {:?}: {e}", redacted_endpoint_url(&url)),
+            )
+        })?;
         let secure = uri
             .scheme_str()
             .is_some_and(|s| s.eq_ignore_ascii_case("wss"));
@@ -112,7 +121,7 @@ impl Connection {
             let host = uri.host().ok_or_else(|| {
                 Error::new(
                     ErrorCode::InvalidEndpoint,
-                    format!("CDP url has no host: {url:?}"),
+                    format!("CDP url has no host: {:?}", redacted_endpoint_url(&url)),
                 )
             })?;
             let port = uri.port_u16().unwrap_or(80);
@@ -121,10 +130,7 @@ impl Connection {
                 .map_err(|e| {
                     Error::new(
                         ErrorCode::HostUnreachable,
-                        format!(
-                            "CDP connect {}: {e}",
-                            agent_first_data::redact_url_secrets(&url)
-                        ),
+                        format!("CDP connect {}: {e}", redacted_endpoint_url(&url)),
                     )
                 })?;
             let (ws, _resp) = tokio_tungstenite::client_async(request, stream)
@@ -181,12 +187,12 @@ impl Connection {
     {
         let (mut sink, mut stream) = ws.split();
 
-        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
-        let (events_tx, _events_rx) = broadcast::channel::<CdpEvent>(256);
+        let pending: PendingMap = Arc::new(Mutex::new(PendingRequests::default()));
+        let (events_tx, events_rx) = broadcast::channel::<CdpEvent>(256);
         let (tx, mut rx) = mpsc::unbounded_channel::<OutMsg>();
 
         let pending_w = pending.clone();
-        let events_w = events_tx.clone();
+        let events_w = events_tx;
         let reader = tokio::spawn(async move {
             while let Some(Ok(msg)) = stream.next().await {
                 match msg {
@@ -203,7 +209,8 @@ impl Connection {
             }
             // On close, fail all pending requests so callers stop waiting.
             let mut map = pending_w.lock().await;
-            for (_, sender) in map.drain() {
+            map.closed = true;
+            for (_, sender) in map.replies.drain() {
                 let _ = sender.send(Err(CdpRemoteError {
                     code: -1,
                     message: "CDP connection closed".into(),
@@ -229,7 +236,7 @@ impl Connection {
         Self {
             tx,
             pending,
-            events_tx,
+            events_rx,
             next_id: AtomicI64::new(1),
             _reader: reader,
             _writer: writer,
@@ -238,7 +245,7 @@ impl Connection {
 
     /// Subscribe to events for the lifetime of this connection.
     pub fn subscribe(&self) -> broadcast::Receiver<CdpEvent> {
-        self.events_tx.subscribe()
+        self.events_rx.resubscribe()
     }
 
     /// Send a CDP command and await the result. `session_id` is `Some` when
@@ -294,15 +301,28 @@ impl Connection {
             )
         })?;
         let (resp_tx, resp_rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, resp_tx);
-        self.tx
-            .send(OutMsg::Text(serialized))
-            .map_err(|_| Error::new(ErrorCode::CdpUnavailable, "CDP writer closed before send"))?;
+        {
+            let mut pending = self.pending.lock().await;
+            if pending.closed {
+                return Err(Error::new(
+                    ErrorCode::CdpUnavailable,
+                    "CDP connection closed",
+                ));
+            }
+            pending.replies.insert(id, resp_tx);
+            if self.tx.send(OutMsg::Text(serialized)).is_err() {
+                pending.replies.remove(&id);
+                return Err(Error::new(
+                    ErrorCode::CdpUnavailable,
+                    "CDP writer closed before send",
+                ));
+            }
+        }
         let received = if let Some(timeout) = timeout {
             match tokio::time::timeout(timeout, resp_rx).await {
                 Ok(value) => value,
                 Err(_) => {
-                    self.pending.lock().await.remove(&id);
+                    self.pending.lock().await.replies.remove(&id);
                     return Err(Error::new(
                         ErrorCode::CdpTimeout,
                         format!("{method}: CDP reply timed out after {timeout:?}"),
@@ -328,7 +348,7 @@ impl Connection {
     where
         F: FnMut(&CdpEvent) -> bool,
     {
-        let mut rx = self.events_tx.subscribe();
+        let mut rx = self.subscribe();
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -359,14 +379,17 @@ impl Connection {
 
 impl Drop for Connection {
     fn drop(&mut self) {
-        let _ = self.tx.send(OutMsg::Close);
+        // A peer may never read or answer Close. Both split halves must stop
+        // owning the socket when the connection's last owner goes away.
+        self._reader.abort();
+        self._writer.abort();
     }
 }
 
 async fn dispatch(msg: Value, pending: &PendingMap, events: &broadcast::Sender<CdpEvent>) {
     if let Some(id) = msg.get("id").and_then(|v| v.as_i64()) {
         let mut map = pending.lock().await;
-        if let Some(sender) = map.remove(&id) {
+        if let Some(sender) = map.replies.remove(&id) {
             if let Some(err) = msg.get("error") {
                 let code = err.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
                 let message = err
@@ -394,9 +417,22 @@ async fn dispatch(msg: Value, pending: &PendingMap, events: &broadcast::Sender<C
     }
 }
 
+fn redacted_endpoint_url(url: &str) -> String {
+    // An invalid or whitespace-containing endpoint may have no complete URL
+    // span for prose redaction. Hide it before debug formatting escapes it.
+    if url.chars().any(char::is_whitespace) || url::Url::parse(url).is_err() {
+        return "***".to_string();
+    }
+    crate::shared::redact::redact_url(url)
+}
+
 fn append_query_pairs(url: &str, pairs: &[(&str, &str)]) -> Result<String, Error> {
-    let mut parsed = url::Url::parse(url)
-        .map_err(|e| Error::new(ErrorCode::InvalidEndpoint, format!("CDP url {url:?}: {e}")))?;
+    let mut parsed = url::Url::parse(url).map_err(|e| {
+        Error::new(
+            ErrorCode::InvalidEndpoint,
+            format!("CDP url {:?}: {e}", redacted_endpoint_url(url)),
+        )
+    })?;
     {
         let mut query = parsed.query_pairs_mut();
         for (key, value) in pairs {
@@ -412,9 +448,12 @@ fn build_ws_request(url: &str) -> Result<Request<()>, Error> {
     // The bearer token is already baked into the URL as `?token_secret=` by the
     // caller; a bearer header would also work, but axum's WebSocketUpgrade
     // ignores it for the upgrade handshake.
-    let uri: Uri = url
-        .parse()
-        .map_err(|e| Error::new(ErrorCode::InvalidEndpoint, format!("CDP url {url:?}: {e}")))?;
+    let uri: Uri = url.parse().map_err(|e| {
+        Error::new(
+            ErrorCode::InvalidEndpoint,
+            format!("CDP url {:?}: {e}", redacted_endpoint_url(url)),
+        )
+    })?;
     let host = uri.authority().map(|a| a.as_str()).unwrap_or("localhost");
     let req = Request::builder()
         .method("GET")
@@ -435,7 +474,7 @@ fn build_ws_request(url: &str) -> Result<Request<()>, Error> {
 }
 
 fn cdp_connect_error(context: &str, url: &str, err: tungstenite::Error) -> Error {
-    let redacted = agent_first_data::redact_url_secrets(url);
+    let redacted = redacted_endpoint_url(url);
     if let tungstenite::Error::Http(resp) = err {
         let status = resp.status();
         if let Some(bytes) = resp.body().as_ref() {
@@ -469,6 +508,114 @@ fn cdp_connect_error(context: &str, url: &str, err: tungstenite::Error) -> Error
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn send_after_reader_closed_fails_without_a_reply_timeout() {
+        use tokio_tungstenite::tungstenite::protocol::Role;
+        let (stream, peer) = tokio::io::duplex(1024);
+        let ws = WebSocketStream::from_raw_socket(stream, Role::Client, None).await;
+        let conn = Connection::from_ws(ws);
+        let mut events = conn.subscribe();
+        drop(peer);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), events.recv())
+                .await
+                .unwrap()
+                .is_err()
+        );
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            conn.send("Target.closeTarget", &serde_json::json!({}), None),
+        )
+        .await
+        .expect("send must not hang after reader exit")
+        .unwrap_err();
+        assert_eq!(error.error_code, ErrorCode::CdpUnavailable);
+        assert!(conn.pending.lock().await.replies.is_empty());
+    }
+
+    #[tokio::test]
+    async fn closed_transport_closes_event_subscriptions_while_connection_is_owned() {
+        use tokio_tungstenite::tungstenite::protocol::Role;
+
+        let (stream, peer) = tokio::io::duplex(1024);
+        let ws = WebSocketStream::from_raw_socket(stream, Role::Client, None).await;
+        let conn = Connection::from_ws(ws);
+        let mut events = conn.subscribe();
+        drop(peer);
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), events.recv())
+                .await
+                .expect("a closed transport ends the event stream"),
+            Err(broadcast::error::RecvError::Closed)
+        ));
+        drop(conn);
+    }
+
+    #[tokio::test]
+    async fn dropping_connection_closes_transport_when_peer_ignores_close() {
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind CDP fixture");
+        let address = listener.local_addr().expect("CDP fixture address");
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept CDP connection");
+            let mut ws = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("accept websocket");
+            // Read raw bytes instead of driving the websocket protocol: this
+            // peer never replies to a Close frame.
+            let mut bytes = [0; 1024];
+            loop {
+                match ws.get_mut().read(&mut bytes).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        });
+        let conn = Connection::connect(&format!("ws://{address}/cdp"), None)
+            .await
+            .expect("open CDP connection");
+        drop(conn);
+        tokio::time::timeout(Duration::from_secs(1), peer)
+            .await
+            .expect("dropping the connection closes the socket without peer cooperation")
+            .expect("peer task completed");
+    }
+
+    #[tokio::test]
+    async fn dropping_connection_cancels_a_blocked_writer() {
+        use tokio::io::AsyncReadExt;
+        use tokio_tungstenite::tungstenite::protocol::Role;
+
+        let (stream, mut peer) = tokio::io::duplex(1);
+        let ws = WebSocketStream::from_raw_socket(stream, Role::Client, None).await;
+        let conn = Connection::from_ws(ws);
+        conn.tx
+            .send(OutMsg::Text("a blocked command".to_string()))
+            .expect("queue command");
+        tokio::task::yield_now().await;
+        drop(conn);
+        let mut bytes = Vec::new();
+        tokio::time::timeout(Duration::from_secs(1), peer.read_to_end(&mut bytes))
+            .await
+            .expect("both split tasks release the blocked transport")
+            .expect("read until transport closes");
+    }
+
+    fn assert_no_endpoint_canaries(err: &Error) {
+        let json = serde_json::to_string(err).expect("serialize error");
+        for text in [&err.detail, &err.to_string(), &json] {
+            assert!(!text.contains("password-canary"), "password leaked: {text}");
+            assert!(!text.contains("query-canary"), "query leaked: {text}");
+            assert!(
+                !text.contains("legacy-canary"),
+                "legacy query leaked: {text}"
+            );
+        }
+    }
+
     #[test]
     fn query_pairs_are_percent_encoded() {
         let url = append_query_pairs("ws://localhost:9222/cdp", &[("token", "a+b&c%20")]).unwrap();
@@ -490,6 +637,53 @@ mod tests {
             "token not redacted: {msg}"
         );
         assert!(!msg.contains("supersecret"), "raw token leaked: {msg}");
+    }
+
+    #[tokio::test]
+    async fn refused_cdp_endpoint_redacts_userinfo_and_query() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().expect("local address").port();
+        drop(listener);
+        let err = Connection::connect(
+            &format!("ws://reader:password-canary@127.0.0.1:{port}/cdp?api_key=legacy-canary"),
+            Some("query-canary"),
+        )
+        .await
+        .err()
+        .expect("closed endpoint must fail");
+        assert_no_endpoint_canaries(&err);
+        assert_eq!(err.error_code, ErrorCode::HostUnreachable);
+        assert!(err.detail.contains("token_secret=***"));
+        assert!(err.detail.contains("api_key=***"));
+    }
+
+    #[test]
+    fn malformed_cdp_url_redacts_append_and_request_errors() {
+        let append_err = append_query_pairs(
+            "ws://reader:password-canary@127.0.0.1:invalid/cdp?token_secret=query-canary",
+            &[("profile", "review")],
+        )
+        .expect_err("invalid port must fail URL append");
+        assert_eq!(append_err.error_code, ErrorCode::InvalidEndpoint);
+        assert_no_endpoint_canaries(&append_err);
+
+        let request_err = build_ws_request(
+            "ws://reader:password-canary@127.0.0.1/cdp path?token_secret=query-canary",
+        )
+        .expect_err("whitespace must fail request URI parsing");
+        assert_eq!(request_err.error_code, ErrorCode::InvalidEndpoint);
+        assert_no_endpoint_canaries(&request_err);
+    }
+
+    #[tokio::test]
+    async fn cdp_endpoint_without_host_redacts_query() {
+        let err = Connection::connect("/cdp?token_secret=query-canary", None)
+            .await
+            .err()
+            .expect("relative endpoint must fail");
+        assert_eq!(err.error_code, ErrorCode::InvalidEndpoint);
+        assert!(err.detail.contains("has no host"));
+        assert_no_endpoint_canaries(&err);
     }
 
     #[test]

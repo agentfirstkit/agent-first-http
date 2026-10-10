@@ -48,7 +48,7 @@ A **shape** is one legal set of arguments that may appear together, under a stab
 - [`afhttp tabs close`](#afhttp-tabs-close) — Close one CDP target by its target id.
 - [`afhttp tabs list`](#afhttp-tabs-list) — List the CDP targets currently attached to a host.
 - [`afhttp ui takeover`](#afhttp-ui-takeover) — Put the takeover panel in front of a person and block until that session ends.
-- [`afhttp upload`](#afhttp-upload) — Upload a local file into a browser tab's file input via DOM.setFileInputFiles.
+- [`afhttp upload`](#afhttp-upload) — Set a file input from a path visible to both driver and browser; no file bytes are transferred.
 
 ### `afhttp capabilities`
 
@@ -545,7 +545,7 @@ Arguments across every shape above:
 
 ### `afhttp upload`
 
-Upload a local file into a browser tab's file input via DOM.setFileInputFiles.
+Set a file input from a path visible to both driver and browser; no file bytes are transferred.
 
 ```
 afhttp upload [--endpoint-url <URL>] [--token-secret <SOURCE>] --tab <TARGET_ID> --selector <CSS> --file <PATH>
@@ -557,7 +557,7 @@ afhttp upload [--endpoint-url <URL>] [--token-secret <SOURCE>] --tab <TARGET_ID>
 | `--token-secret` | Token for a protected host; falls back to AFHTTP_TOKEN_SECRET, then to the discovered host's own token (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, container:NAME, literal:VALUE) |
 | `--tab` | CDP target id to operate in |
 | `--selector` | CSS selector for the <input type=file> element |
-| `--file` | Local file to upload |
+| `--file` | File accessible at the same absolute path in driver and browser filesystems; the default container has no shared host paths |
 
 ## Exit codes
 

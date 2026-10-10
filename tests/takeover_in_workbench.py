@@ -241,7 +241,7 @@ def main():
 
     print("== building ==")
     run(["cargo", "build", "--features", "cli"], cwd=WORKSPACE)
-    run(["cargo", "build", "--features", "serve", "--bin", "afui"], cwd=AFUI_SOURCE)
+    run(["cargo", "build", "--bin", "afui"], cwd=AFUI_SOURCE)
     target = os.environ.get("CARGO_TARGET_DIR", f"{WORKSPACE}/target")
     afhttp = f"{target}/debug/afhttp"
     afui = f"{target}/debug/afui"

@@ -251,6 +251,7 @@ pub async fn spawn() -> Fixture {
         .route("/404", get(four_oh_four))
         .route("/redirect", get(redirect))
         .route("/download.bin", get(download_bin))
+        .route("/unfinished-download.bin", get(unfinished_download_bin))
         .route("/sse", get(sse));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local_addr");
@@ -261,6 +262,23 @@ pub async fn spawn() -> Fixture {
         addr,
         _handle: handle,
     }
+}
+
+async fn unfinished_download_bin() -> Response {
+    use futures::StreamExt;
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    let chunks = futures::stream::once(async {
+        Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"partial download"))
+    })
+    .chain(futures::stream::pending());
+    Response::builder()
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(
+            header::CONTENT_DISPOSITION,
+            "attachment; filename=unfinished.bin",
+        )
+        .body(axum::body::Body::from_stream(chunks))
+        .unwrap()
 }
 
 async fn download_bin() -> Response {

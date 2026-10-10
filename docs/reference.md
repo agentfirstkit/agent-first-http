@@ -159,7 +159,7 @@ reaches the target, the result carries the usual artifacts and no `next_action`.
 | `navigation_duration_ms` | Browser-path only: wall-clock from `Page.navigate` to the wait condition resolving. |
 | `wait_mode` | Browser-path wait mode (`auto`, `load`, `idle`, `selector`, `selector_visible`, or `ms`). |
 | `wait_satisfied_by` | Mechanical readiness condition that allowed capture, such as `network_quiet_dom_text_stable`, `load`, `selector`, or `network_idle_event`. |
-| `network_quiet` / `dom_stable` / `text_stable` | `--wait auto` booleans showing whether afhttp's own network collector and DOM/text stabilization checks were satisfied at capture time. |
+| `network_quiet` / `dom_stable` / `text_stable` | `--wait auto` booleans report the last readiness samples, before artifact capture. A network sample stays idle-based after event loss or a capture limit: every network event still counts as activity even when its request was not retained, so readiness degrades from "no pending request" to "no network event for the idle window" rather than waiting out the deadline. The loss itself is reported by warnings and the final summary without rewriting this trace. Skipping or truncating response bodies does not change readiness. |
 | `capture_reason` | Why artifacts were captured, for example `wait_satisfied`, `readiness_timeout`, or `download`. |
 | `cookie_jar_file` | Absolute cookie jar path used for this fetch, when a jar was resolved. |
 | `cookie_jar_warning` | Structured note when `/profile` was unavailable and implicit cookie-jar persistence was disabled. |
@@ -323,6 +323,15 @@ Each `entries[]` item may include:
 | `body_file` | Optional captured response body path under `network-bodies/`. |
 | `hints` | Mechanical payload hints such as JSON and GraphQL metadata. |
 
+The summary optionally includes `events_dropped` (missing CDP events) and
+`truncated` (a capture limit was reached). Missing values mean zero and false.
+Network capture retains at most 4,096 entries; counts cover retained entries
+and cannot establish complete page activity after loss or truncation. Console
+capture retains at most 4,096 events and uses the same two diagnostic fields
+at the top level of `console.json`. Existing entries continue to receive
+lifecycle updates after the entry cap, and the main document has a reserved
+slot.
+
 Sensitive request/response headers and credential-bearing URL components are
 redacted by default in `network.json`: cookies, authorization values,
 token/secret-like header names, URL userinfo, and known secret query
@@ -339,6 +348,17 @@ Network body capture modes:
 | `all` | Attempt every exposed response body up to the configured per-body limit. |
 
 Body capture failures become warnings, not fetch failures. `--capture-ws` and `--capture-sse` write WebSocket/SSE payloads to frame/event files and may expose bearer tokens, session identifiers, chat content, or other PII.
+
+Stream payload capture retains at most 4,096 request keys per stream kind and
+1,024 frames/events per request. Capture truncation or event loss also emits a
+network warning if no `network_file` was requested.
+
+Known oversized `encodedDataLength` or `Content-Length` causes network body
+capture to skip `Network.getResponseBody` and emit `network_body_truncated`.
+For unknown sizes, afhttp still retrieves and decodes the response before
+keeping its configured prefix. Compressed size is not decoded size, so this
+filter does not bound peak memory. The separate `body_file` artifact is not
+subject to `--network-body-max-bytes`.
 
 When `--wait auto` is used, XHR/fetch/EventSource body capture is enabled by
 default so the network artifact can explain pages whose visible DOM is only a
@@ -520,7 +540,7 @@ Examples below are representative `error` / Chromium `errorText` strings.
 | `pending_xhr_at_capture` | `pending XHR/fetch/EventSource at capture` | Treat `status: 200` as incomplete acquisition until network payloads are checked. |
 | `observation_empty` | `observation contained zero projected nodes` | Fall back to rendered/text/network artifacts or retry after readiness improves. |
 | `readiness_timeout` | `--wait auto captured before all readiness signals settled` | Partial capture succeeded; inspect warnings/trace/network before bounded retry. |
-| `network_body_truncated` | `body for 1234.1 truncated to 10485760 bytes` | Increase `--network-body-max-bytes` if the omitted suffix matters. |
+| `network_body_truncated` | `body for 1234.1 truncated to 10485760 bytes` | Increase `--network-body-max-bytes` if a skipped body or omitted suffix matters. |
 | `profile_not_found` | `profile "work" does not exist` | Create/select an existing profile name. |
 | `profile_delete_locked` | `profile "work" is locked; refusing delete` | Stop the owning host before delete/prune. |
 | `profile_invalid_name` | `profile name "../work" is invalid` | Use a simple non-hidden profile name without path separators. |

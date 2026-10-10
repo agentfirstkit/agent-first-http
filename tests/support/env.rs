@@ -2,16 +2,31 @@
 
 use std::path::PathBuf;
 
+/// Missing required backends fail the test instead of becoming a green skip.
+pub fn require_backend_if_missing(backend: &str) {
+    let required = std::env::var("AFHTTP_TEST_REQUIRE_BACKENDS").unwrap_or_default();
+    assert!(
+        !required.split(',').any(|name| name.trim() == backend),
+        "required backend {backend} is missing; AFHTTP_TEST_REQUIRE_BACKENDS={required}"
+    );
+}
+
 /// Resolve the chromium / chrome binary for the browser integration tests.
-/// Honors `AFHTTP_TEST_BROWSER_BIN` first, then falls back to `which`-style
-/// discovery; returns `None` so tests can `skip` rather than `fail` when no
-/// browser is installed.
+/// An explicit `AFHTTP_TEST_BROWSER_BIN` is authoritative, including a missing
+/// path. Without an override, probe the standard installation paths. Missing
+/// optional browsers may skip; required backends fail through the shared guard.
 pub fn discover_browser() -> Option<PathBuf> {
+    let browser = discover_browser_path();
+    if browser.is_none() {
+        require_backend_if_missing("chromium");
+    }
+    browser
+}
+
+fn discover_browser_path() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("AFHTTP_TEST_BROWSER_BIN") {
         let path = PathBuf::from(p);
-        if path.exists() {
-            return Some(path);
-        }
+        return path.is_file().then_some(path);
     }
     for candidate in [
         "/usr/bin/chromium",
@@ -37,6 +52,7 @@ macro_rules! skip_if_no_browser {
         match $crate::support::env::discover_browser() {
             Some(p) => p,
             None => {
+                $crate::support::env::require_backend_if_missing("chromium");
                 println!("(skipping: no browser binary; set AFHTTP_TEST_BROWSER_BIN)");
                 return;
             }
@@ -50,9 +66,7 @@ macro_rules! skip_if_no_browser {
 pub fn discover_lightpanda() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("AFHTTP_TEST_LIGHTPANDA_BIN") {
         let path = PathBuf::from(p);
-        if path.exists() {
-            return Some(path);
-        }
+        return path.is_file().then_some(path);
     }
     let standard = PathBuf::from("/usr/local/bin/lightpanda");
     if standard.exists() {
@@ -68,9 +82,7 @@ pub fn discover_lightpanda() -> Option<PathBuf> {
 pub fn discover_fingerprint_chromium() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("AFHTTP_TEST_FINGERPRINT_CHROMIUM_BIN") {
         let path = PathBuf::from(p);
-        if path.exists() {
-            return Some(path);
-        }
+        return path.is_file().then_some(path);
     }
     let standard = PathBuf::from("/usr/local/bin/fingerprint-chromium");
     if standard.exists() {
@@ -88,13 +100,11 @@ pub fn discover_fingerprint_chromium() -> Option<PathBuf> {
 pub fn discover_brave() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("AFHTTP_TEST_BRAVE_BIN") {
         let path = PathBuf::from(p);
-        if path.exists() {
-            return Some(path);
-        }
+        return path.is_file().then_some(path);
     }
     for candidate in ["/usr/bin/brave-browser", "/usr/bin/brave"] {
         let path = PathBuf::from(candidate);
-        if path.exists() {
+        if path.is_file() {
             return Some(path);
         }
     }
@@ -107,13 +117,11 @@ pub fn discover_brave() -> Option<PathBuf> {
 pub fn discover_chrome() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("AFHTTP_TEST_CHROME_BIN") {
         let path = PathBuf::from(p);
-        if path.exists() {
-            return Some(path);
-        }
+        return path.is_file().then_some(path);
     }
     for candidate in ["/usr/bin/google-chrome-stable", "/usr/bin/google-chrome"] {
         let path = PathBuf::from(candidate);
-        if path.exists() {
+        if path.is_file() {
             return Some(path);
         }
     }
@@ -139,9 +147,7 @@ pub fn discover_kasmvnc() -> Option<PathBuf> {
 fn discover_simple_bin(env_var: &str, default_name: &str) -> Option<PathBuf> {
     if let Ok(p) = std::env::var(env_var) {
         let path = PathBuf::from(p);
-        if path.exists() {
-            return Some(path);
-        }
+        return path.is_file().then_some(path);
     }
     for dir in ["/usr/local/bin", "/usr/bin"] {
         let standard = PathBuf::from(dir).join(default_name);

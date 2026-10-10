@@ -55,6 +55,7 @@ IMAGE_STAMP="$SPORE_DIR/target/.container-image-stamp-${TEST_CONTAINER_RUNTIME}-
 DOCKERFILE="$SPORE_DIR/tests/Dockerfile.test"
 BUILD_INPUTS=(
   "$DOCKERFILE"
+  "$SPORE_DIR/tests/container-entrypoint.sh"
   "$SPORE_DIR/container/docker/install-backends.sh"
   "$SPORE_DIR/container/docker/install-browser-policy.sh"
 )

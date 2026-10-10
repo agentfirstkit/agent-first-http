@@ -1,5 +1,7 @@
-//! `afhttp upload` subcommand — inject a local file into an `<input type=file>`
-//! using the privileged CDP `DOM.setFileInputFiles` primitive.
+//! `afhttp upload` injects a path into an `<input type=file>` using the privileged
+//! CDP `DOM.setFileInputFiles` primitive. The driver validates the file locally;
+//! the browser must see the same file at the same absolute path. No bytes cross
+//! the connection, and the default host container shares no host directories.
 
 use std::path::PathBuf;
 

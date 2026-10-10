@@ -2,24 +2,35 @@
 //!
 //! Each collector spawns a tokio task that drains a CDP event stream
 //! (`Connection::subscribe`) into a shared in-memory aggregate. The task
-//! is aborted on [`NetworkCollector::finish`] / [`ConsoleCollector::finish`];
+//! is aborted on finish or drop;
 //! whatever has been observed up to that point is returned.
 
-use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, broadcast};
 use tokio::task::JoinHandle;
 
-use crate::sdk::cdp::ws_client::Connection;
+use crate::sdk::cdp::ws_client::{CdpEvent, Connection};
 use crate::sdk::fetch::artifacts::{
     console::{ConsoleEvent, ConsoleLevel, ConsoleLog},
     network::{NetworkEntry, NetworkEntryState, NetworkLog, NetworkSummary, NetworkTiming},
 };
 use crate::shared::redact;
+
+const NETWORK_ENTRY_LIMIT: usize = 4096;
+const CONSOLE_EVENT_LIMIT: usize = 4096;
+const STREAM_EVENT_LIMIT_PER_REQUEST: usize = 1024;
+
+#[derive(Default)]
+struct StreamEvents {
+    events: Vec<Value>,
+    /// Retained after a drain so repeated drains cannot reset the limit.
+    captured_total: usize,
+}
 
 /// Per-request slot. Held until `loadingFinished` / `loadingFailed` lands.
 struct NetworkSlot {
@@ -71,14 +82,16 @@ struct NetworkInner {
     slots: HashMap<String, NetworkSlot>,
     main_request_id: Option<String>,
     /// Request IDs whose loadingFinished has been seen since the last drain.
-    finished: Vec<String>,
+    finished: BTreeSet<String>,
     /// WebSocket frames keyed by requestId. Populated when capture_ws=true.
-    ws_frames: HashMap<String, Vec<Value>>,
+    ws_frames: HashMap<String, StreamEvents>,
     /// SSE events keyed by requestId. Populated when capture_sse=true.
-    sse_events: HashMap<String, Vec<Value>>,
+    sse_events: HashMap<String, StreamEvents>,
     /// Last time any network event changed the aggregate. Used for the
     /// default readiness wait instead of Chrome's lifecycle-only networkIdle.
     last_activity: Option<Instant>,
+    events_dropped: u64,
+    truncated: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -96,13 +109,31 @@ impl NetworkCollector {
         capture_ws: bool,
         capture_sse: bool,
     ) -> Self {
+        Self::from_receiver(conn.subscribe(), redact_headers, capture_ws, capture_sse)
+    }
+
+    fn from_receiver(
+        mut rx: broadcast::Receiver<CdpEvent>,
+        redact_headers: bool,
+        capture_ws: bool,
+        capture_sse: bool,
+    ) -> Self {
         let inner = Arc::new(Mutex::new(NetworkInner::default()));
         let main_notify = Arc::new(Notify::new());
-        let mut rx = conn.subscribe();
         let inner_w = inner.clone();
         let notify_w = main_notify.clone();
         let task = tokio::spawn(async move {
-            while let Ok(ev) = rx.recv().await {
+            loop {
+                let ev = match rx.recv().await {
+                    Ok(ev) => ev,
+                    Err(broadcast::error::RecvError::Lagged(count)) => {
+                        let mut guard = inner_w.lock().await;
+                        guard.events_dropped = guard.events_dropped.saturating_add(count);
+                        guard.last_activity = Some(Instant::now());
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                };
                 let mut guard = inner_w.lock().await;
                 let touched_main = handle_event(&mut guard, &ev, redact_headers);
                 if capture_ws {
@@ -128,13 +159,13 @@ impl NetworkCollector {
     /// Return all collected WebSocket frames, keyed by requestId.
     pub async fn take_ws_frames(&self) -> HashMap<String, Vec<Value>> {
         let mut guard = self.inner.lock().await;
-        std::mem::take(&mut guard.ws_frames)
+        take_stream_events(&mut guard.ws_frames)
     }
 
     /// Return all collected SSE events, keyed by requestId.
     pub async fn take_sse_events(&self) -> HashMap<String, Vec<Value>> {
         let mut guard = self.inner.lock().await;
-        std::mem::take(&mut guard.sse_events)
+        take_stream_events(&mut guard.sse_events)
     }
 
     /// Wait until the main-document entry has a status or failure, or
@@ -168,7 +199,7 @@ impl NetworkCollector {
     /// drained.
     pub async fn take_finished(&self) -> Vec<String> {
         let mut guard = self.inner.lock().await;
-        std::mem::take(&mut guard.finished)
+        std::mem::take(&mut guard.finished).into_iter().collect()
     }
 
     /// Look up the current state of an entry by request_id (e.g. to read
@@ -191,7 +222,11 @@ impl NetworkCollector {
     }
 
     /// Mechanical network quiet signal for readiness: no pending/responded
-    /// requests, and no Network.* activity for at least `idle`.
+    /// requests and no Network.* activity for at least `idle`. Event loss and
+    /// capture truncation do not block the signal: every Network.* event still
+    /// stamps `last_activity` whether or not its request was retained, so a
+    /// request hidden by loss keeps the page busy for as long as it produces
+    /// events, and the diagnostics report the loss separately.
     pub async fn quiet_snapshot(&self, idle: Duration) -> NetworkQuietSnapshot {
         let guard = self.inner.lock().await;
         let pending_by_resource_type =
@@ -232,7 +267,9 @@ impl NetworkCollector {
         let mut guard = self.inner.lock().await;
         let mut entries: Vec<NetworkEntry> = guard.slots.drain().map(|(_, s)| s.entry).collect();
         entries.sort_by(|a, b| a.request_id.cmp(&b.request_id));
-        let summary = summarize_entries(&entries, self.redact_headers);
+        let mut summary = summarize_entries(&entries, self.redact_headers);
+        summary.events_dropped = guard.events_dropped;
+        summary.truncated = guard.truncated;
         NetworkLog {
             schema_version: super::network::NETWORK_SCHEMA_VERSION,
             main_request_id: guard.main_request_id.clone(),
@@ -247,6 +284,12 @@ impl NetworkCollector {
     }
 }
 
+impl Drop for NetworkCollector {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 /// Returns `true` when the event mutated the main-document entry (set
 /// the main_request_id, updated its status, finished, or failed it) so
 /// the caller can wake `main_notify` waiters.
@@ -255,9 +298,20 @@ fn handle_event(
     ev: &crate::sdk::cdp::ws_client::CdpEvent,
     redact_headers: bool,
 ) -> bool {
+    // Preserve the metadata activity signal. Events rejected by the request
+    // limit still count; uncaptured streams and unrelated CDP events do not.
+    if matches!(
+        ev.method.as_str(),
+        "Network.requestWillBeSent"
+            | "Network.responseReceived"
+            | "Network.loadingFinished"
+            | "Network.loadingFailed"
+            | "Network.requestServedFromCache"
+    ) {
+        inner.last_activity = Some(Instant::now());
+    }
     match ev.method.as_str() {
         "Network.requestWillBeSent" => {
-            inner.last_activity = Some(Instant::now());
             let req_id = string_field(&ev.params, "requestId");
             let frame_id = ev
                 .params
@@ -275,6 +329,19 @@ fn handle_event(
                 .and_then(|v| v.as_str())
                 .unwrap_or("Other")
                 .to_string();
+            // Reserve one slot for the main document if subresources arrive
+            // first. Existing requests keep receiving their state updates.
+            let limit = if inner.main_request_id.is_none() && resource_type != "Document" {
+                NETWORK_ENTRY_LIMIT - 1
+            } else {
+                NETWORK_ENTRY_LIMIT
+            };
+            if req_id.is_empty()
+                || (!inner.slots.contains_key(&req_id) && inner.slots.len() >= limit)
+            {
+                inner.truncated = true;
+                return false;
+            }
             if resource_type == "Document" && inner.main_request_id.is_none() {
                 inner.main_request_id = Some(req_id.clone());
             }
@@ -321,7 +388,7 @@ fn handle_event(
                     .entry
                     .hints
                     .insert("redirected".into(), Value::Bool(true));
-                inner.finished.push(req_id.clone());
+                inner.finished.insert(req_id.clone());
             }
             let mut entry = default_entry();
             entry.request_id = req_id.clone();
@@ -364,7 +431,6 @@ fn handle_event(
             return inner.main_request_id.as_deref() == Some(req_id.as_str());
         }
         "Network.responseReceived" => {
-            inner.last_activity = Some(Instant::now());
             let req_id = string_field(&ev.params, "requestId");
             let response = &ev.params["response"];
             let status = response
@@ -406,29 +472,30 @@ fn handle_event(
             return inner.main_request_id.as_deref() == Some(req_id.as_str());
         }
         "Network.loadingFinished" => {
-            inner.last_activity = Some(Instant::now());
             let req_id = string_field(&ev.params, "requestId");
             let timestamp = ev
                 .params
                 .get("timestamp")
                 .and_then(|v| v.as_f64())
                 .unwrap_or(0.0);
-            let encoded = ev.params.get("encodedDataLength").and_then(|v| v.as_u64());
+            let encoded = ev
+                .params
+                .get("encodedDataLength")
+                .filter(|v| v.as_f64().is_some_and(|n| n.is_finite() && n >= 0.0));
             if let Some(s) = inner.slots.get_mut(&req_id) {
                 s.entry.timing.end_monotonic_ms = Some((timestamp * 1000.0) as u64);
                 s.entry.state = NetworkEntryState::Finished;
                 if let Some(n) = encoded {
                     s.entry
                         .hints
-                        .insert("encoded_data_length".into(), Value::from(n));
+                        .insert("encoded_data_length".into(), n.clone());
                 }
+                inner.finished.insert(req_id.clone());
             }
             let is_main = inner.main_request_id.as_deref() == Some(req_id.as_str());
-            inner.finished.push(req_id);
             return is_main;
         }
         "Network.loadingFailed" => {
-            inner.last_activity = Some(Instant::now());
             let req_id = string_field(&ev.params, "requestId");
             let err = ev
                 .params
@@ -439,13 +506,12 @@ fn handle_event(
             if let Some(s) = inner.slots.get_mut(&req_id) {
                 s.entry.failure = Some(err);
                 s.entry.state = NetworkEntryState::Failed;
+                inner.finished.insert(req_id.clone());
             }
             let is_main = inner.main_request_id.as_deref() == Some(req_id.as_str());
-            inner.finished.push(req_id);
             return is_main;
         }
         "Network.requestServedFromCache" => {
-            inner.last_activity = Some(Instant::now());
             let req_id = string_field(&ev.params, "requestId");
             if let Some(s) = inner.slots.get_mut(&req_id) {
                 s.entry
@@ -512,6 +578,8 @@ fn summarize_entries(entries: &[NetworkEntry], redacted: bool) -> NetworkSummary
         pending_by_resource_type,
         captured_body_files,
         redacted,
+        events_dropped: 0,
+        truncated: false,
     }
 }
 
@@ -534,19 +602,49 @@ where
 // -- Console collector -------------------------------------------------------
 
 pub struct ConsoleCollector {
-    inner: Arc<Mutex<Vec<ConsoleEvent>>>,
+    inner: Arc<Mutex<ConsoleInner>>,
     task: JoinHandle<()>,
+}
+
+#[derive(Default)]
+struct ConsoleInner {
+    events: Vec<ConsoleEvent>,
+    events_dropped: u64,
+    truncated: bool,
 }
 
 impl ConsoleCollector {
     pub fn start(conn: &Connection) -> Self {
-        let inner: Arc<Mutex<Vec<ConsoleEvent>>> = Arc::new(Mutex::new(Vec::new()));
-        let mut rx = conn.subscribe();
+        Self::from_receiver(conn.subscribe())
+    }
+
+    fn from_receiver(mut rx: broadcast::Receiver<CdpEvent>) -> Self {
+        let inner = Arc::new(Mutex::new(ConsoleInner::default()));
         let inner_w = inner.clone();
         let task = tokio::spawn(async move {
-            while let Ok(ev) = rx.recv().await {
+            loop {
+                let ev = match rx.recv().await {
+                    Ok(ev) => ev,
+                    Err(broadcast::error::RecvError::Lagged(count)) => {
+                        let mut guard = inner_w.lock().await;
+                        guard.events_dropped = guard.events_dropped.saturating_add(count);
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                };
+                if !matches!(
+                    ev.method.as_str(),
+                    "Runtime.consoleAPICalled" | "Runtime.exceptionThrown"
+                ) {
+                    continue;
+                }
+                let mut guard = inner_w.lock().await;
+                if guard.events.len() >= CONSOLE_EVENT_LIMIT {
+                    guard.truncated = true;
+                    continue;
+                }
                 if let Some(console_event) = map_console_event(&ev) {
-                    inner_w.lock().await.push(console_event);
+                    guard.events.push(console_event);
                 }
             }
         });
@@ -555,15 +653,63 @@ impl ConsoleCollector {
 
     pub async fn finish(self) -> ConsoleLog {
         self.task.abort();
-        let events = std::mem::take(&mut *self.inner.lock().await);
+        let mut guard = self.inner.lock().await;
+        let events = std::mem::take(&mut guard.events);
         ConsoleLog {
             schema_version: super::console::CONSOLE_SCHEMA_VERSION,
             events,
+            events_dropped: guard.events_dropped,
+            truncated: guard.truncated,
         }
     }
 }
 
+impl Drop for ConsoleCollector {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+fn take_stream_events(map: &mut HashMap<String, StreamEvents>) -> HashMap<String, Vec<Value>> {
+    map.iter_mut()
+        .filter_map(|(request_id, bucket)| {
+            if bucket.events.is_empty() {
+                None
+            } else {
+                Some((request_id.clone(), std::mem::take(&mut bucket.events)))
+            }
+        })
+        .collect()
+}
+
+fn push_stream_event(
+    map: &mut HashMap<String, StreamEvents>,
+    request_id: String,
+    event: Value,
+) -> bool {
+    if !map.contains_key(&request_id) && map.len() >= NETWORK_ENTRY_LIMIT {
+        return false;
+    }
+    let bucket = map.entry(request_id).or_default();
+    if bucket.captured_total >= STREAM_EVENT_LIMIT_PER_REQUEST {
+        return false;
+    }
+    bucket.captured_total += 1;
+    bucket.events.push(event);
+    true
+}
+
 fn handle_ws_event(inner: &mut NetworkInner, ev: &crate::sdk::cdp::ws_client::CdpEvent) {
+    if !matches!(
+        ev.method.as_str(),
+        "Network.webSocketFrameSent"
+            | "Network.webSocketFrameReceived"
+            | "Network.webSocketFrameError"
+    ) {
+        return;
+    }
+    // Called only when WS capture is enabled. Activity precedes cap rejection.
+    inner.last_activity = Some(Instant::now());
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -574,7 +720,7 @@ fn handle_ws_event(inner: &mut NetworkInner, ev: &crate::sdk::cdp::ws_client::Cd
             if req_id.is_empty() {
                 return;
             }
-            let response = ev.params.get("response").cloned().unwrap_or_default();
+            let response = &ev.params["response"];
             let frame = serde_json::json!({
                 "type": "sent",
                 "opcode": response.get("opcode").and_then(|v| v.as_u64()).unwrap_or(1),
@@ -582,14 +728,16 @@ fn handle_ws_event(inner: &mut NetworkInner, ev: &crate::sdk::cdp::ws_client::Cd
                 "payload": response.get("payloadData").and_then(|v| v.as_str()).unwrap_or(""),
                 "timestamp_epoch_ms": now_ms,
             });
-            inner.ws_frames.entry(req_id).or_default().push(frame);
+            if !push_stream_event(&mut inner.ws_frames, req_id, frame) {
+                inner.truncated = true;
+            }
         }
         "Network.webSocketFrameReceived" => {
             let req_id = string_field(&ev.params, "requestId");
             if req_id.is_empty() {
                 return;
             }
-            let response = ev.params.get("response").cloned().unwrap_or_default();
+            let response = &ev.params["response"];
             let frame = serde_json::json!({
                 "type": "received",
                 "opcode": response.get("opcode").and_then(|v| v.as_u64()).unwrap_or(1),
@@ -597,7 +745,9 @@ fn handle_ws_event(inner: &mut NetworkInner, ev: &crate::sdk::cdp::ws_client::Cd
                 "payload": response.get("payloadData").and_then(|v| v.as_str()).unwrap_or(""),
                 "timestamp_epoch_ms": now_ms,
             });
-            inner.ws_frames.entry(req_id).or_default().push(frame);
+            if !push_stream_event(&mut inner.ws_frames, req_id, frame) {
+                inner.truncated = true;
+            }
         }
         "Network.webSocketFrameError" => {
             let req_id = string_field(&ev.params, "requestId");
@@ -614,7 +764,9 @@ fn handle_ws_event(inner: &mut NetworkInner, ev: &crate::sdk::cdp::ws_client::Cd
                 "error": error,
                 "timestamp_epoch_ms": now_ms,
             });
-            inner.ws_frames.entry(req_id).or_default().push(frame);
+            if !push_stream_event(&mut inner.ws_frames, req_id, frame) {
+                inner.truncated = true;
+            }
         }
         _ => {}
     }
@@ -624,6 +776,8 @@ fn handle_sse_event(inner: &mut NetworkInner, ev: &crate::sdk::cdp::ws_client::C
     if ev.method != "Network.eventSourceMessageReceived" {
         return;
     }
+    // Called only when SSE capture is enabled. Activity precedes cap rejection.
+    inner.last_activity = Some(Instant::now());
     let req_id = string_field(&ev.params, "requestId");
     if req_id.is_empty() {
         return;
@@ -637,7 +791,9 @@ fn handle_sse_event(inner: &mut NetworkInner, ev: &crate::sdk::cdp::ws_client::C
             .map(|t| (t * 1000.0) as u64)
             .unwrap_or(0),
     });
-    inner.sse_events.entry(req_id).or_default().push(event);
+    if !push_stream_event(&mut inner.sse_events, req_id, event) {
+        inner.truncated = true;
+    }
 }
 
 fn map_console_event(ev: &crate::sdk::cdp::ws_client::CdpEvent) -> Option<ConsoleEvent> {
@@ -744,4 +900,332 @@ fn stack_frame_origin(stack: Option<&Value>) -> (Option<String>, Option<u32>) {
         .and_then(|v| v.as_u64())
         .map(|n| n as u32);
     (url, line)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn event(method: &str, params: Value) -> CdpEvent {
+        CdpEvent {
+            method: method.into(),
+            session_id: Some("capture".into()),
+            params,
+        }
+    }
+
+    fn request(request_id: &str, resource_type: &str) -> CdpEvent {
+        event(
+            "Network.requestWillBeSent",
+            json!({
+                "requestId": request_id,
+                "type": resource_type,
+                "request": {"url": "https://example.test/data", "method": "GET"},
+            }),
+        )
+    }
+
+    fn console(text: &str) -> CdpEvent {
+        event(
+            "Runtime.consoleAPICalled",
+            json!({"args": [{"value": text}]}),
+        )
+    }
+
+    #[tokio::test]
+    async fn collectors_continue_after_a_lagged_burst_and_report_loss() {
+        let (tx, rx) = broadcast::channel(256);
+        let mut network = NetworkCollector::from_receiver(rx, true, false, false);
+        let mut console_collector = ConsoleCollector::from_receiver(tx.subscribe());
+        let network_guard = network.inner.lock().await;
+        let console_guard = console_collector.inner.lock().await;
+        tx.send(console("before burst")).unwrap();
+        // Both collectors are held at their aggregate lock while CDP bursts.
+        tokio::task::yield_now().await;
+        for index in 0..600 {
+            tx.send(event("Test.burst", json!({"index": index})))
+                .unwrap();
+        }
+        tx.send(request("late", "Document")).unwrap();
+        tx.send(event(
+            "Network.responseReceived",
+            json!({"requestId": "late", "response": {"status": 200}}),
+        ))
+        .unwrap();
+        tx.send(event(
+            "Network.loadingFinished",
+            json!({"requestId": "late", "encodedDataLength": 1000.0}),
+        ))
+        .unwrap();
+        tx.send(console("after burst")).unwrap();
+        drop(tx);
+        drop(network_guard);
+        drop(console_guard);
+        tokio::time::timeout(Duration::from_secs(1), &mut network.task)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), &mut console_collector.task)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Loss is reported, not turned into an endless wait: the retained
+        // late request finished and nothing else is active.
+        assert!(network.quiet_snapshot(Duration::ZERO).await.quiet);
+        let log = network.finish().await;
+        assert!(log.summary.events_dropped > 0);
+        assert_eq!(log.entries.len(), 1);
+        assert_eq!(log.entries[0].state, NetworkEntryState::Finished);
+        assert_eq!(log.entries[0].hints["encoded_data_length"], json!(1000.0));
+        let log = console_collector.finish().await;
+        assert!(log.events_dropped > 0);
+        assert!(log.events.iter().any(|entry| entry.text == "after burst"));
+    }
+
+    #[tokio::test]
+    async fn dropping_collectors_aborts_their_receivers() {
+        let (tx, rx) = broadcast::channel(256);
+        let network = NetworkCollector::from_receiver(rx, true, true, true);
+        let console_collector = ConsoleCollector::from_receiver(tx.subscribe());
+        let network_inner = Arc::downgrade(&network.inner);
+        let console_inner = Arc::downgrade(&console_collector.inner);
+        assert_eq!(tx.receiver_count(), 2);
+        drop(network);
+        drop(console_collector);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while tx.receiver_count() > 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(network_inner.upgrade().is_none());
+        assert!(console_inner.upgrade().is_none());
+    }
+
+    #[tokio::test]
+    async fn uncaptured_stream_events_do_not_delay_network_quiet() {
+        for capture_streams in [false, true] {
+            let (tx, rx) = broadcast::channel(16);
+            let mut collector =
+                NetworkCollector::from_receiver(rx, true, capture_streams, capture_streams);
+            tx.send(event(
+                "Network.webSocketFrameReceived",
+                json!({"requestId": "background"}),
+            ))
+            .unwrap();
+            tx.send(event(
+                "Network.eventSourceMessageReceived",
+                json!({"requestId": "background"}),
+            ))
+            .unwrap();
+            tx.send(event(
+                "Network.dataReceived",
+                json!({"requestId": "background"}),
+            ))
+            .unwrap();
+            drop(tx);
+            tokio::time::timeout(Duration::from_secs(1), &mut collector.task)
+                .await
+                .unwrap()
+                .unwrap();
+            let inner = collector.inner.lock().await;
+            assert_eq!(inner.last_activity.is_some(), capture_streams);
+            assert_eq!(inner.ws_frames.len(), usize::from(capture_streams));
+            assert_eq!(inner.sse_events.len(), usize::from(capture_streams));
+            drop(inner);
+            assert_eq!(
+                collector
+                    .quiet_snapshot(Duration::from_secs(60))
+                    .await
+                    .quiet,
+                !capture_streams
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn request_and_finished_limits_preserve_the_main_document_and_updates() {
+        let mut inner = NetworkInner::default();
+        for index in 0..NETWORK_ENTRY_LIMIT + 8 {
+            handle_event(&mut inner, &request(&format!("xhr-{index}"), "XHR"), true);
+        }
+        assert_eq!(inner.slots.len(), NETWORK_ENTRY_LIMIT - 1);
+        assert!(inner.truncated);
+        assert!(handle_event(&mut inner, &request("main", "Document"), true));
+        assert_eq!(inner.slots.len(), NETWORK_ENTRY_LIMIT);
+        assert_eq!(inner.main_request_id.as_deref(), Some("main"));
+        handle_event(
+            &mut inner,
+            &event(
+                "Network.responseReceived",
+                json!({"requestId": "xhr-0", "response": {"status": 201}}),
+            ),
+            true,
+        );
+        for index in 0..NETWORK_ENTRY_LIMIT * 2 {
+            handle_event(
+                &mut inner,
+                &event("Network.loadingFinished", json!({"requestId": "xhr-0"})),
+                true,
+            );
+            handle_event(
+                &mut inner,
+                &event(
+                    "Network.loadingFinished",
+                    json!({"requestId": format!("unknown-{index}")}),
+                ),
+                true,
+            );
+        }
+        assert_eq!(inner.finished.len(), 1);
+        assert_eq!(inner.slots["xhr-0"].entry.status, Some(201));
+        assert_eq!(
+            inner.slots["xhr-0"].entry.state,
+            NetworkEntryState::Finished
+        );
+        inner.last_activity = Some(Instant::now() - Duration::from_secs(60));
+        handle_event(&mut inner, &request("rejected", "XHR"), true);
+        assert!(inner.last_activity.unwrap().elapsed() < Duration::from_secs(1));
+
+        // With every retained request finished, truncation is reported in the
+        // summary but does not hold readiness: rejected requests still stamp
+        // activity, so the idle window covers them.
+        for slot in inner.slots.values_mut() {
+            slot.entry.state = NetworkEntryState::Finished;
+        }
+        let (_tx, rx) = broadcast::channel(1);
+        let collector = NetworkCollector::from_receiver(rx, true, false, false);
+        *collector.inner.lock().await = inner;
+        assert!(
+            !collector
+                .quiet_snapshot(Duration::from_secs(60))
+                .await
+                .quiet
+        );
+        assert!(collector.quiet_snapshot(Duration::ZERO).await.quiet);
+        assert!(collector.finish().await.summary.truncated);
+    }
+
+    #[test]
+    fn stream_limits_bound_unknown_keys_and_survive_drains() {
+        let mut inner = NetworkInner::default();
+        for index in 0..NETWORK_ENTRY_LIMIT + 8 {
+            handle_ws_event(
+                &mut inner,
+                &event(
+                    "Network.webSocketFrameReceived",
+                    json!({"requestId": format!("stream-{index}"), "response": {"payloadData": "frame"}}),
+                ),
+            );
+            handle_sse_event(
+                &mut inner,
+                &event(
+                    "Network.eventSourceMessageReceived",
+                    json!({"requestId": format!("stream-{index}"), "data": "event"}),
+                ),
+            );
+        }
+        assert!(inner.slots.is_empty());
+        assert_eq!(inner.ws_frames.len(), NETWORK_ENTRY_LIMIT);
+        assert_eq!(inner.sse_events.len(), NETWORK_ENTRY_LIMIT);
+        for _ in 0..STREAM_EVENT_LIMIT_PER_REQUEST + 8 {
+            handle_ws_event(
+                &mut inner,
+                &event(
+                    "Network.webSocketFrameSent",
+                    json!({"requestId": "stream-0"}),
+                ),
+            );
+            handle_sse_event(
+                &mut inner,
+                &event(
+                    "Network.eventSourceMessageReceived",
+                    json!({"requestId": "stream-0"}),
+                ),
+            );
+        }
+        let ws = take_stream_events(&mut inner.ws_frames);
+        let sse = take_stream_events(&mut inner.sse_events);
+        assert_eq!(ws["stream-0"].len(), STREAM_EVENT_LIMIT_PER_REQUEST);
+        assert_eq!(sse["stream-0"].len(), STREAM_EVENT_LIMIT_PER_REQUEST);
+        assert!(inner.truncated);
+        assert!(!push_stream_event(
+            &mut inner.ws_frames,
+            "stream-0".into(),
+            json!({})
+        ));
+        assert!(!push_stream_event(
+            &mut inner.sse_events,
+            "stream-0".into(),
+            json!({})
+        ));
+        assert!(!push_stream_event(
+            &mut inner.ws_frames,
+            "new-after-drain".into(),
+            json!({})
+        ));
+        assert!(!push_stream_event(
+            &mut inner.sse_events,
+            "new-after-drain".into(),
+            json!({})
+        ));
+        assert!(take_stream_events(&mut inner.ws_frames).is_empty());
+        assert!(take_stream_events(&mut inner.sse_events).is_empty());
+        inner.last_activity = Some(Instant::now() - Duration::from_secs(60));
+        handle_ws_event(
+            &mut inner,
+            &event(
+                "Network.webSocketFrameError",
+                json!({"requestId": "stream-0"}),
+            ),
+        );
+        assert!(inner.last_activity.unwrap().elapsed() < Duration::from_secs(1));
+        inner.last_activity = Some(Instant::now() - Duration::from_secs(60));
+        handle_sse_event(
+            &mut inner,
+            &event(
+                "Network.eventSourceMessageReceived",
+                json!({"requestId": "stream-0"}),
+            ),
+        );
+        assert!(inner.last_activity.unwrap().elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn console_capture_has_a_fixed_event_limit() {
+        let (tx, rx) = broadcast::channel(CONSOLE_EVENT_LIMIT * 2);
+        let mut collector = ConsoleCollector::from_receiver(rx);
+        for _ in 0..CONSOLE_EVENT_LIMIT + 8 {
+            tx.send(console("entry")).unwrap();
+        }
+        drop(tx);
+        tokio::time::timeout(Duration::from_secs(1), &mut collector.task)
+            .await
+            .unwrap()
+            .unwrap();
+        let log = collector.finish().await;
+        assert_eq!(log.events.len(), CONSOLE_EVENT_LIMIT);
+        assert!(log.truncated);
+        assert_eq!(log.events_dropped, 0);
+    }
+
+    #[test]
+    fn capture_stats_are_optional_for_legacy_artifacts() {
+        let console: ConsoleLog =
+            serde_json::from_value(json!({"schema_version": 2, "events": []})).unwrap();
+        assert_eq!(console.events_dropped, 0);
+        assert!(!console.truncated);
+        let value = serde_json::to_value(console).unwrap();
+        assert!(value.get("events_dropped").is_none());
+        assert!(value.get("truncated").is_none());
+        let value = serde_json::to_value(NetworkSummary::default()).unwrap();
+        assert!(value.get("events_dropped").is_none());
+        assert!(value.get("truncated").is_none());
+        let summary: NetworkSummary = serde_json::from_value(value).unwrap();
+        assert_eq!(summary.events_dropped, 0);
+        assert!(!summary.truncated);
+    }
 }

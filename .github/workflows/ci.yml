@@ -64,7 +64,7 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - name: Unit + bin tests
-        run: cargo test --lib --bins --features sdk,cli
+        run: cargo test --lib --bins --test host_token_sources --features sdk,cli
       - name: Regression list
         run: bash tests/check_regressions.sh
 
@@ -97,6 +97,7 @@ jobs:
         run: ${{ matrix.install }}
       - name: Browser integration suite
         env:
+          AFHTTP_TEST_REQUIRE_BACKENDS: chromium
           AFHTTP_TEST_BROWSER_BIN: ${{ matrix.browser_bin }}
           # Tests poll the deep fetch/host future chain on tokio worker threads;
           # bump their stack so Windows' small default doesn't overflow (the CLI
@@ -114,8 +115,8 @@ jobs:
 
   # Full integration suite through the Docker harness. The cross-platform
   # `integration` job above is a portability smoke (chromium-only flows); this
-  # job runs every integration test with all backends (lightpanda, camoufox,
-  # fingerprint-chromium) and KasmVNC present — the paths the apt-chromium
+  # job requires chromium, lightpanda, and fingerprint-chromium on x86_64,
+  # plus KasmVNC. Camoufox remains opt-in in the test image — the paths the apt-chromium
   # runners cannot exercise. This is the real integration gate.
   integration-docker:
     runs-on: ubuntu-latest

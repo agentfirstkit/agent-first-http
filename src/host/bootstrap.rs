@@ -161,18 +161,74 @@ pub fn install_rustls_provider() {
 pub async fn run(args: HostArgs) -> Result<(), Error> {
     install_rustls_provider();
     let state = AppState::launch(&args).await?;
-    if args.tab_idle_timeout_s > 0 {
-        crate::host::reaper::spawn(
+    serve_with_reaper(state, &args.listen, args.tab_idle_timeout_s).await
+}
+
+async fn serve_with_reaper(
+    state: AppState,
+    listen: &str,
+    tab_idle_timeout_s: u64,
+) -> Result<(), Error> {
+    let _reaper = (tab_idle_timeout_s > 0).then(|| {
+        crate::host::reaper::spawn_scoped(
             state.clone(),
-            std::time::Duration::from_secs(args.tab_idle_timeout_s),
-        );
-    }
-    state.serve(&args.listen).await
+            std::time::Duration::from_secs(tab_idle_timeout_s),
+        )
+    });
+    state.serve(listen).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn browser_state() -> (
+        AppState,
+        std::sync::Weak<crate::host::browser::BrowserHandle>,
+    ) {
+        let browser = std::sync::Arc::new(crate::host::browser::BrowserHandle::synthetic(
+            std::path::PathBuf::new(),
+        ));
+        let weak = std::sync::Arc::downgrade(&browser);
+        let state = crate::host::listener::test_state(None, HealthPublic::Minimal)
+            .with_default_browser(browser);
+        (state, weak)
+    }
+
+    async fn assert_browser_released(weak: std::sync::Weak<crate::host::browser::BrowserHandle>) {
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while weak.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the stopped host releases its browser handle");
+    }
+
+    #[tokio::test]
+    async fn listener_failure_stops_the_reaper_and_releases_the_browser() {
+        let (state, weak) = browser_state();
+        assert!(
+            serve_with_reaper(state, "invalid-listener", 900)
+                .await
+                .is_err()
+        );
+        assert_browser_released(weak).await;
+    }
+
+    #[tokio::test]
+    async fn cancelling_the_host_stops_the_reaper_and_releases_the_browser() {
+        let (state, weak) = browser_state();
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                serve_with_reaper(state, "tcp:127.0.0.1:0", 900),
+            )
+            .await
+            .is_err()
+        );
+        assert_browser_released(weak).await;
+    }
 
     #[test]
     fn browser_choice_default_is_auto() {

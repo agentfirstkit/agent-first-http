@@ -44,12 +44,14 @@ pub struct BrowserHandle {
     pub profile_path: PathBuf,
     /// Browser-initiated downloads are captured inside the active profile.
     pub download_dir: PathBuf,
+    // Fields drop in declaration order: stop the backend before deleting its
+    // temporary profile or releasing the persistent profile lock.
+    _keepalive: BackendKeepalive,
     /// `Some(path)` for the runtime tempdir backing an ephemeral profile.
     /// Dropping the TempDir removes it from disk.
     pub _ephemeral_dir: Option<tempfile::TempDir>,
     /// Held for persistent profiles so lifecycle tooling can detect active use.
     pub _profile_lock: Option<crate::sdk::profile::lock::Guard>,
-    _keepalive: BackendKeepalive,
     /// Tail of the browser subprocess's stderr, capped at [`STDERR_RING_CAP`]
     /// lines.
     pub stderr_ring: Arc<Mutex<VecDeque<String>>>,

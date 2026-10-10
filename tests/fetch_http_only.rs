@@ -626,6 +626,143 @@ async fn cli_fetch_error_envelope_includes_trace() {
     );
 }
 
+const ERROR_PASSWORD_CANARY: &str = "AFHTTPErrorPasswordCanary";
+const ERROR_TOKEN_CANARY: &str = "AFHTTPErrorTokenCanary";
+const ERROR_LEGACY_KEY_CANARY: &str = "AFHTTPErrorLegacyKeyCanary";
+
+fn assert_error_canaries_absent(text: &str) {
+    for canary in [
+        ERROR_PASSWORD_CANARY,
+        ERROR_TOKEN_CANARY,
+        ERROR_LEGACY_KEY_CANARY,
+    ] {
+        assert!(!text.contains(canary), "URL credential leaked: {text}");
+    }
+}
+
+fn redacted_cli_error(output: &std::process::Output) -> serde_json::Value {
+    assert!(!output.status.success(), "command unexpectedly succeeded");
+    assert_error_canaries_absent(&String::from_utf8_lossy(&output.stdout));
+    assert_error_canaries_absent(&String::from_utf8_lossy(&output.stderr));
+    let event: serde_json::Value = serde_json::from_slice(&output.stderr).expect("error JSON");
+    assert_eq!(event["kind"], "error");
+    agent_first_data::validate_protocol_event(&event, true).expect("strict error event");
+    assert!(event["trace"].is_object(), "error missing trace: {event}");
+    event
+}
+
+#[tokio::test]
+async fn http_failure_redacts_url_credentials_in_sdk_and_cli() {
+    // Select a loopback port rather than assuming a fixed port is unused.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("reserve loopback port");
+    let address = listener.local_addr().expect("loopback address");
+    drop(listener);
+    let url = format!(
+        "http://observer:{ERROR_PASSWORD_CANARY}@{address}/will-fail?token_secret={ERROR_TOKEN_CANARY}&api_key={ERROR_LEGACY_KEY_CANARY}"
+    );
+    let tmpdir = tempfile::tempdir().expect("tempdir");
+    let client = Client::http_only().expect("HTTP-only client");
+    let failure = client
+        .fetch(&url)
+        .render(RenderMode::None)
+        .no_cookie_jar()
+        .timeout(Duration::from_secs(5))
+        .out_dir(tmpdir.path().to_path_buf())
+        .send_detailed()
+        .await
+        .err()
+        .expect("closed port must fail");
+    assert_eq!(failure.error_code, ErrorCode::TargetUnreachable);
+    assert!(failure.retryable);
+    assert_error_canaries_absent(&failure.detail);
+    assert_error_canaries_absent(&serde_json::to_string(&failure).expect("fetch error JSON"));
+    let error = failure.as_error();
+    assert_error_canaries_absent(&error.detail);
+    assert_error_canaries_absent(&error.to_string());
+    assert_error_canaries_absent(&serde_json::to_string(&error).expect("SDK error JSON"));
+    assert_eq!(failure.trace.timeout_ms, 5000);
+    assert_eq!(failure.trace.current_stage, "navigate");
+    assert!(
+        failure
+            .trace
+            .stages
+            .iter()
+            .any(|stage| { stage.name == "navigate" && stage.status == TraceStageStatus::Error }),
+        "HTTP error must retain its failed navigate stage"
+    );
+
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_afhttp"))
+        .args(["fetch", &url, "--render", "none", "--no-cookie-jar"])
+        .args([
+            "--timeout-ms",
+            "5000",
+            "--output",
+            "json",
+            "--output-to",
+            "split",
+        ])
+        .arg("--out")
+        .arg(tmpdir.path())
+        .current_dir(tmpdir.path())
+        .env_remove("AFHTTP_ENDPOINT_URL")
+        .env_remove("AFHTTP_TOKEN_SECRET")
+        .output()
+        .await
+        .expect("run afhttp");
+    let event = redacted_cli_error(&output);
+    assert_eq!(event["error"]["code"], "target_unreachable");
+    assert_eq!(event["trace"]["timeout_ms"], 5000);
+    assert_eq!(event["trace"]["render_mode"], "none");
+    assert!(event["trace"]["stages"].as_array().is_some_and(|stages| {
+        stages
+            .iter()
+            .any(|stage| stage["name"] == "navigate" && stage["status"] == "error")
+    }));
+}
+
+#[tokio::test]
+async fn cli_malformed_target_redacts_url_credentials() {
+    let tmpdir = tempfile::tempdir().expect("tempdir");
+    let url = format!(
+        "http://observer:{ERROR_PASSWORD_CANARY}@127.0.0.1:invalid/will-fail?token_secret={ERROR_TOKEN_CANARY}&api_key={ERROR_LEGACY_KEY_CANARY}"
+    );
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_afhttp"))
+        .args(["fetch", &url, "--render", "none", "--no-cookie-jar"])
+        .args(["--output", "json", "--output-to", "split"])
+        .arg("--out")
+        .arg(tmpdir.path())
+        .current_dir(tmpdir.path())
+        .env_remove("AFHTTP_ENDPOINT_URL")
+        .env_remove("AFHTTP_TOKEN_SECRET")
+        .output()
+        .await
+        .expect("run afhttp");
+    let event = redacted_cli_error(&output);
+    assert_eq!(event["error"]["code"], "io_error");
+    assert_eq!(event["trace"]["render_mode"], "none");
+}
+
+#[tokio::test]
+async fn cli_invalid_endpoint_redacts_url_credentials() {
+    // The unsupported scheme fails before host discovery or browser startup.
+    let endpoint = format!(
+        "ftp://observer:{ERROR_PASSWORD_CANARY}@127.0.0.1/cdp?token_secret={ERROR_TOKEN_CANARY}&api_key={ERROR_LEGACY_KEY_CANARY}"
+    );
+    let tmpdir = tempfile::tempdir().expect("tempdir");
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_afhttp"))
+        .args(["health", "--endpoint-url", &endpoint])
+        .args(["--output", "json", "--output-to", "split"])
+        .current_dir(tmpdir.path())
+        .env_remove("AFHTTP_TOKEN_SECRET")
+        .output()
+        .await
+        .expect("run afhttp");
+    let event = redacted_cli_error(&output);
+    assert_eq!(event["error"]["code"], "invalid_endpoint");
+}
+
 #[tokio::test]
 async fn cli_fetch_rejects_legacy_timeout_flag() {
     let fixture = support::fixture_server::spawn().await;

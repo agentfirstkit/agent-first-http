@@ -17,11 +17,11 @@ set -euo pipefail
 # Pinned versions for direct-download backends — bump these (and re-verify both
 # images build) together. Apt-backed Chrome and Brave track their vendors'
 # stable repositories.
-FINGERPRINT_CHROMIUM_VERSION="148.0.7778.215"
-CAMOUFOX_RELEASE="v152.0.4-beta.30"
-CAMOUFOX_X86_BUILD="152.0.4-beta.30"
-CAMOUFOX_ARM_BUILD="152.0.4-beta.30"
-GO_VERSION="1.27.1"
+FINGERPRINT_CHROMIUM_VERSION="150.0.7871.186"
+CAMOUFOX_RELEASE="v156.0.1-beta.36"
+CAMOUFOX_X86_BUILD="156.0.1-beta.36"
+CAMOUFOX_ARM_BUILD="156.0.1-beta.36"
+GO_VERSION="1.27.2"
 KASMVNC_VERSION="1.5.0"
 
 arch="$(uname -m)"
@@ -105,7 +105,16 @@ install_camoufox() {
     rm -rf /usr/local/go "$GOPATH"
     download /tmp/cf.zip "$cf_url"
     mkdir -p /opt/camoufox
-    unzip -q /tmp/cf.zip -d /opt/camoufox
+    # Since 156, the archive bundles fonts whose local and central headers spell
+    # their Japanese names differently. unzip extracts them under the central
+    # name and exits 1, its "warnings only" status; anything above that is a
+    # real failure.
+    local unzip_status=0
+    unzip -q /tmp/cf.zip -d /opt/camoufox || unzip_status=$?
+    if [ "$unzip_status" -gt 1 ]; then
+        echo "camoufox archive did not extract (unzip exit $unzip_status)" >&2
+        return 1
+    fi
     rm /tmp/cf.zip
     local cf_bin
     cf_bin="$(find /opt/camoufox -maxdepth 4 -name camoufox -type f -executable 2>/dev/null | head -1)"

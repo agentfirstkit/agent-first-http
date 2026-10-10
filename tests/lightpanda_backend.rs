@@ -67,6 +67,7 @@ async fn spawn_host_with_lightpanda() -> Option<(String, tempfile::TempDir)> {
 #[tokio::test]
 async fn lightpanda_launches_and_exposes_subset_capability_matrix() {
     let Some((endpoint, _tmp)) = spawn_host_with_lightpanda().await else {
+        support::env::require_backend_if_missing("lightpanda");
         println!("(skipping: no lightpanda binary; set AFHTTP_TEST_LIGHTPANDA_BIN)");
         return;
     };
@@ -87,6 +88,7 @@ async fn lightpanda_launches_and_exposes_subset_capability_matrix() {
 #[tokio::test]
 async fn lightpanda_refuses_persistent_profile() {
     let Some(bin) = support::env::discover_lightpanda() else {
+        support::env::require_backend_if_missing("lightpanda");
         println!("(skipping: no lightpanda binary; set AFHTTP_TEST_LIGHTPANDA_BIN)");
         return;
     };

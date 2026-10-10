@@ -260,7 +260,7 @@ fn write_text(text: &str, output_to: OutputTo) -> ExitCode {
 /// programming or environment fault rather than a caller mistake, so it reports
 /// before any output contract has been resolved.
 fn emit_startup_error(code: &str, message: &str) -> ExitCode {
-    let event = match agent_first_data::json_error(code, message).build() {
+    let event = match crate::shared::afdata::error_builder(code, message).build() {
         Ok(event) => event,
         Err(_) => return ExitCode::from(4),
     };
