@@ -78,18 +78,23 @@ pub(crate) async fn close_target_preserving_browser(
                 && page["url"].as_str() == Some("about:blank#afhttp-window-anchor")
         });
         if !anchor_exists {
-            let replacement = conn
+            let guarded = match conn
                 .send(
                     "Target.createTarget",
                     &serde_json::json!({"url":"about:blank#afhttp-window-anchor", "background":true}),
                     None,
                 )
-                .await?;
-            if replacement["targetId"]
-                .as_str()
-                .filter(|id| !id.is_empty() && *id != target_id)
-                .is_none()
+                .await
             {
+                Ok(replacement) => replacement["targetId"]
+                    .as_str()
+                    .is_some_and(|id| !id.is_empty() && id != target_id),
+                // A browser that holds a single page has no window to lose
+                // and cannot host an anchor; closing its page is safe.
+                Err(error) if refuses_second_target(&error) => true,
+                Err(error) => return Err(error),
+            };
+            if !guarded {
                 return Err(Error::new(
                     ErrorCode::CdpError,
                     "cannot close the last browser window: replacement target was not created",
@@ -118,6 +123,12 @@ pub(crate) async fn close_target_preserving_browser(
             "safe target cleanup timed out; tab may remain open",
         )
     })?
+}
+
+/// Lightpanda answers `Target.createTarget` with `TargetAlreadyLoaded` while
+/// its one page exists.
+fn refuses_second_target(error: &Error) -> bool {
+    error.error_code == ErrorCode::CdpError && error.detail.ends_with(": TargetAlreadyLoaded")
 }
 
 pub async fn detach_from_target(conn: &Connection, session_id: &str) -> Result<(), Error> {
@@ -204,5 +215,50 @@ mod tests {
             conn.close();
             peer.await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn safe_cleanup_closes_the_only_page_of_a_single_target_browser() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut closed = false;
+            while let Some(Ok(message)) = ws.next().await {
+                let tokio_tungstenite::tungstenite::Message::Text(text) = message else {
+                    continue;
+                };
+                let request: Value = serde_json::from_str(&text).unwrap();
+                let id = &request["id"];
+                let response = match request["method"].as_str().unwrap() {
+                    "Target.getTargets" => {
+                        serde_json::json!({"id":id,"result":{"targetInfos":[{"type":"page","targetId":"only"}]}})
+                    }
+                    "Target.createTarget" => {
+                        serde_json::json!({"id":id,"error":{"code":-31998,"message":"TargetAlreadyLoaded"}})
+                    }
+                    "Target.closeTarget" => {
+                        closed = true;
+                        serde_json::json!({"id":id,"result":{"success":true}})
+                    }
+                    method => panic!("unexpected CDP method: {method}"),
+                };
+                ws.send(tokio_tungstenite::tungstenite::Message::Text(
+                    response.to_string().into(),
+                ))
+                .await
+                .unwrap();
+            }
+            closed
+        });
+        let conn = Connection::connect(&format!("ws://{addr}"), None)
+            .await
+            .unwrap();
+        close_target_preserving_browser(&conn, "only", Duration::from_secs(1))
+            .await
+            .unwrap();
+        conn.close();
+        assert!(peer.await.unwrap(), "the only page must be closed");
     }
 }

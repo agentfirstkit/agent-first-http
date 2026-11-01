@@ -25,6 +25,7 @@ use agent_first_http::host::bootstrap::{
 };
 use agent_first_http::host::{browser, listener::router_for_tests, listener::test_state};
 use agent_first_http::sdk::Client;
+use agent_first_http::sdk::fetch::RenderMode;
 use agent_first_http::shared::error::ErrorCode;
 use tokio::net::TcpListener;
 
@@ -83,6 +84,29 @@ async fn lightpanda_launches_and_exposes_subset_capability_matrix() {
         caps.artifacts.contains_key("body"),
         "body capability entry must exist",
     );
+}
+
+#[tokio::test]
+async fn lightpanda_serves_consecutive_browser_fetches() {
+    let Some((endpoint, _tmp)) = spawn_host_with_lightpanda().await else {
+        support::env::require_backend_if_missing("lightpanda");
+        println!("(skipping: no lightpanda binary; set AFHTTP_TEST_LIGHTPANDA_BIN)");
+        return;
+    };
+    let fixture = support::fixture_server::spawn().await;
+    let client = Client::connect(&endpoint).expect("client");
+    // Lightpanda holds one page at a time, so each fetch must close its page
+    // before the next one can open.
+    for attempt in 0..3 {
+        let result = client
+            .fetch(format!("{}/plain.html", fixture.base_url()))
+            .render(RenderMode::Always)
+            .timeout(Duration::from_secs(15))
+            .send()
+            .await
+            .unwrap_or_else(|error| panic!("fetch {attempt}: {error:?}"));
+        assert_eq!(result.status, 200, "fetch {attempt}");
+    }
 }
 
 #[tokio::test]
