@@ -12,6 +12,12 @@ pub struct HealthResponse {
     pub code: String,
     pub status: String,
     pub version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<String>,
+    /// Live takeover checks; absent on older hosts. Capabilities describe
+    /// configuration support and must not be used as evidence of liveness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub takeover: Option<TakeoverHealth>,
     pub uptime_s: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backend: Option<BackendInfo>,
@@ -24,6 +30,18 @@ pub struct HealthResponse {
     pub tabs_active: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capabilities_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TakeoverHealth {
+    pub configured: bool,
+    /// None when the host does not supervise this process.
+    pub browser_running: Option<bool>,
+    pub cdp_connected: bool,
+    pub display_connected: bool,
+    pub ready: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,7 +80,7 @@ impl Client {
             )
         })?;
         if !status.is_success() {
-            if let Ok(err) = crate::shared::afdata::decode_error(&bytes) {
+            if let Ok(err) = crate::shared::events::decode_error(&bytes) {
                 return Err(err);
             }
             return Err(Error::new(
@@ -73,6 +91,6 @@ impl Client {
                 ),
             ));
         }
-        crate::shared::afdata::decode_result(&bytes)
+        crate::shared::events::decode_result(&bytes)
     }
 }

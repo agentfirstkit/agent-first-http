@@ -16,59 +16,24 @@
 mod support;
 
 use agent_first_http::host::bootstrap::HealthPublic;
-use agent_first_http::host::listener::{AppState, router_for_tests, test_state};
+use agent_first_http::host::listener::{AppState, test_state};
 
+/// The host's own unix-socket listener, not a copy of it: what a request
+/// arriving on the socket is told — including that a token-less host answers
+/// it, since no web page can reach a unix socket — is decided there.
 #[cfg(unix)]
 async fn spawn_unix_listener(state: AppState, sock: std::path::PathBuf) {
-    use hyper_util::rt::{TokioExecutor, TokioIo};
-    use hyper_util::server::conn::auto;
-    use tokio::net::UnixListener;
-    use tower::Service;
-
-    let _ = std::fs::remove_file(&sock);
-    let listener = UnixListener::bind(&sock).expect("bind");
-    let app = router_for_tests(state);
-    let mut make_service = app.into_make_service();
+    let listen = format!("unix:{}", sock.display());
     tokio::spawn(async move {
-        loop {
-            let (stream, _) = match listener.accept().await {
-                Ok(p) => p,
-                Err(_) => break,
-            };
-            let tower_service = match futures::future::poll_fn(|cx| {
-                <_ as Service<axum::http::Request<axum::body::Body>>>::poll_ready(
-                    &mut make_service,
-                    cx,
-                )
-            })
-            .await
-            {
-                Ok(()) => make_service.call(()).await.expect("svc"),
-                Err(_) => break,
-            };
-            tokio::spawn(async move {
-                let io = TokioIo::new(stream);
-                let svc = hyper::service::service_fn(
-                    move |req: axum::http::Request<hyper::body::Incoming>| {
-                        let mut tower_service = tower_service.clone();
-                        async move {
-                            let (parts, body) = req.into_parts();
-                            let req =
-                                axum::http::Request::from_parts(parts, axum::body::Body::new(body));
-                            <_ as Service<axum::http::Request<axum::body::Body>>>::call(
-                                &mut tower_service,
-                                req,
-                            )
-                            .await
-                        }
-                    },
-                );
-                let _ = auto::Builder::new(TokioExecutor::new())
-                    .serve_connection(io, svc)
-                    .await;
-            });
-        }
+        let _served = state.serve(&listen).await;
     });
+    for _ in 0..100 {
+        if sock.exists() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("the unix listener never bound {}", sock.display());
 }
 
 #[cfg(unix)]

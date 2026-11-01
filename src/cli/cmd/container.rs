@@ -1,5 +1,5 @@
 //! `afhttp container` subcommand. Builds the host image and runs it under
-//! Docker, Podman, or Apple Container — one command to stand up a long-lived
+//! Apple Container, Podman, or Docker — one command to stand up a long-lived
 //! afhttp *host* locally, the orchestration counterpart to `afhttp host` (the
 //! in-container browser process). It embeds the canonical `container/docker/
 //! Dockerfile` and by default selects its `downloader` stage, which pulls the
@@ -7,8 +7,19 @@
 //! brew-only user needs no source tree. `--from-source` instead selects the
 //! `builder` stage to compile from a checkout. See docs/deployment.md.
 
+mod inspection;
+mod process;
+
+#[cfg(test)]
+use inspection::parse_container_state;
+use inspection::{
+    container_running, image_exists, inspect_container_image, inspect_container_state,
+};
+
+use process::{
+    capture, exec_inherit, exec_to_log, exec_to_log_without_header, tail_lines_from_file,
+};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use agent_first_data::value_source::SecretString;
 use serde::Serialize;
@@ -92,7 +103,6 @@ pub struct UninstallArgs {
 #[derive(Debug)]
 pub struct StatusArgs {
     pub common: CommonArgs,
-    pub port: u16,
     pub reveal_token_secret: bool,
 }
 
@@ -177,7 +187,7 @@ async fn install_result(args: &mut InstallArgs) -> Result<InstallResult, Error> 
     let backends = resolve_backends(&args.with);
     validate_install_args(args, &backends)?;
     let runtime = resolve_runtime(args.common.runtime)?;
-    let image = image_tag();
+    let image = image_tag(&backends);
     let profile = effective_profile(args);
     let shm_size = effective_shm_size(args);
     let log_file = container_operation_log_file(&args.common.name)?;
@@ -211,6 +221,7 @@ async fn install_result(args: &mut InstallArgs) -> Result<InstallResult, Error> 
 
     // Recreate cleanly. The profile + token live in the named volume, so the
     // token is stable across recreation.
+    refuse_foreign_container(runtime, &args.common.name)?;
     let _ = capture(runtime.bin(), &["stop".into(), args.common.name.clone()]);
     let _ = capture(runtime.bin(), &["rm".into(), args.common.name.clone()]);
 
@@ -269,8 +280,21 @@ struct UninstallResult {
     purged: bool,
 }
 
+/// `image rm` is the one spelling Docker, Podman and Apple `container` share;
+/// Apple has no `rmi`, so purge silently kept the image there.
+fn image_remove_args(image: &str) -> Vec<String> {
+    vec!["image".into(), "rm".into(), image.to_string()]
+}
+
 fn uninstall(args: UninstallArgs) -> Result<(), Error> {
     let runtime = resolve_runtime(args.common.runtime)?;
+    refuse_foreign_container(runtime, &args.common.name)?;
+    // The tag names the backend set the image was built with, which only the
+    // container still knows; once it is removed, nothing does.
+    let container_image = args
+        .purge
+        .then(|| inspect_container_image(runtime, &args.common.name))
+        .flatten();
     let _ = capture(runtime.bin(), &["stop".into(), args.common.name.clone()]);
     let removed = capture(runtime.bin(), &["rm".into(), args.common.name.clone()])
         .map(|o| o.status.success())
@@ -278,8 +302,8 @@ fn uninstall(args: UninstallArgs) -> Result<(), Error> {
 
     let mut image_removed = false;
     if args.purge {
-        let image = image_tag();
-        image_removed = capture(runtime.bin(), &["rmi".into(), image])
+        let image = container_image.unwrap_or_else(|| image_tag(&[]));
+        image_removed = capture(runtime.bin(), &image_remove_args(&image))
             .map(|o| o.status.success())
             .unwrap_or(false);
         if let Ok(ctx) = cache_context_dir() {
@@ -306,10 +330,20 @@ struct StatusResult {
     runtime: &'static str,
     container: String,
     running: bool,
-    endpoint: String,
+    /// Absent when the container publishes no port for its listener.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    endpoint: Option<String>,
     driver_version: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     host_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    host_build: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backend_connected: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    takeover_health: Option<crate::sdk::health::TakeoverHealth>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    takeover_configured: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     version_match: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -346,8 +380,18 @@ async fn status(args: StatusArgs) -> Result<(), Error> {
         .as_ref()
         .map(|s| s.running)
         .unwrap_or_else(|| container_running(runtime, &args.common.name));
-    let endpoint = endpoint_url(args.port);
+    // The port the container actually publishes, never an assumed default: the
+    // token goes to whatever answers there, so a guessed port could hand it to
+    // another process.
+    let host_port = state.as_ref().and_then(|s| s.host_port);
+    let endpoint = host_port.map(endpoint_url);
     let mut warnings = Vec::new();
+    if running && host_port.is_none() {
+        warnings.push(format!(
+            "container `{}` publishes no host port for its afhttp listener; the host was not contacted",
+            args.common.name
+        ));
+    }
 
     let token = if running {
         match read_token(runtime, &args.common.name).await {
@@ -362,8 +406,13 @@ async fn status(args: StatusArgs) -> Result<(), Error> {
     };
     let client_command = token
         .as_ref()
-        .map(|_| client_command(&args.common.name, args.port));
+        .zip(host_port)
+        .map(|(_, port)| client_command(&args.common.name, port));
     let mut host_version = None;
+    let mut host_build = None;
+    let mut backend_connected = None;
+    let mut takeover_health = None;
+    let mut takeover_configured = None;
     let mut version_match = None;
     let mut profile_kind = None;
     let mut profile = None;
@@ -371,13 +420,22 @@ async fn status(args: StatusArgs) -> Result<(), Error> {
     let mut backend = None;
     let mut provider = None;
     let mut takeover_ready = None;
-    if running && let Some(token) = token.as_deref() {
-        let client = crate::sdk::Client::connect(&endpoint)?.with_token(token.to_string());
+    if running
+        && let Some(token) = token.as_deref()
+        && let Some(endpoint) = endpoint.as_deref()
+    {
+        let client = crate::sdk::Client::connect(endpoint)?.with_token(token.to_string());
         match client.health().await {
             Ok(health) => {
                 let version_warning = host_version_warning(&args.common.name, &health.version);
                 if let Some(warning) = version_warning {
                     warnings.push(warning);
+                }
+                host_build = health.build;
+                backend_connected = health.backend.map(|backend| backend.connected);
+                takeover_health = health.takeover;
+                if let Some(error) = health.backend_error {
+                    warnings.push(format!("browser health: {}", error.error));
                 }
                 version_match = Some(health.version == VERSION);
                 host_version = Some(health.version);
@@ -392,7 +450,19 @@ async fn status(args: StatusArgs) -> Result<(), Error> {
             Ok(caps) => {
                 profile_backend = profile_kind.as_ref().map(|_| caps.backend.family.clone());
                 provider = caps.takeover.provider.clone();
-                takeover_ready = Some(is_hard_site_capabilities(&caps));
+                let configured = is_hard_site_capabilities(&caps);
+                takeover_configured = Some(configured);
+                takeover_ready =
+                    live_takeover_ready(configured, backend_connected, takeover_health.as_ref());
+                if takeover_ready.is_none() {
+                    warnings.push("host does not report live display health; takeover readiness is unknown (configured support alone is insufficient)".into());
+                }
+                if let Some(reason) = takeover_health
+                    .as_ref()
+                    .and_then(|health| health.reason.as_ref())
+                {
+                    warnings.push(format!("takeover health: {reason}"));
+                }
                 backend = Some(caps.backend);
             }
             Err(e) => warnings.push(format!("could not read /capabilities: {}", e.detail)),
@@ -414,6 +484,10 @@ async fn status(args: StatusArgs) -> Result<(), Error> {
         endpoint,
         driver_version: VERSION,
         host_version,
+        host_build,
+        backend_connected,
+        takeover_health,
+        takeover_configured,
         version_match,
         profile_kind,
         profile,
@@ -528,21 +602,28 @@ fn resolve_runtime(explicit: Option<Runtime>) -> Result<Runtime, Error> {
     if let Some(r) = explicit {
         return Ok(r);
     }
-    if let Some(v) = std::env::var_os("AFHTTP_CONTAINER_RUNTIME") {
-        return runtime_from_str(v.to_string_lossy().trim());
+    if let Some(v) = runtime_from_env(|name| std::env::var_os(name)) {
+        return runtime_from_str(&v);
     }
-    if on_path("docker") {
-        Ok(Runtime::Docker)
-    } else if on_path("podman") {
-        Ok(Runtime::Podman)
-    } else if on_path("container") {
-        Ok(Runtime::Apple)
-    } else {
-        Err(Error::new(
+    match crate::runtime_selection::detect_runtime() {
+        Some(runtime) => runtime_from_str(runtime),
+        None => Err(Error::new(
             ErrorCode::InvalidArgument,
-            "no container runtime found: install Docker, Podman, or Apple `container`, or pass --runtime",
-        ))
+            "no container runtime found: install Apple `container`, Podman, or Docker, or pass --runtime",
+        )),
     }
+}
+
+/// The runtime the environment names, first `AFHTTP_CONTAINER_RUNTIME` and then
+/// `AF_CONTAINER_RUNTIME`. A variable set to nothing (or only whitespace) is
+/// unset, as it is to the shell selector: `AFHTTP_CONTAINER_RUNTIME=` is how a
+/// caller clears an inherited value, not a request for a runtime named "".
+fn runtime_from_env(get: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<String> {
+    ["AFHTTP_CONTAINER_RUNTIME", "AF_CONTAINER_RUNTIME"]
+        .iter()
+        .filter_map(|name| get(name))
+        .map(|value| value.to_string_lossy().trim().to_string())
+        .find(|value| !value.is_empty())
 }
 
 pub(crate) fn runtime_from_str(value: &str) -> Result<Runtime, Error> {
@@ -552,16 +633,9 @@ pub(crate) fn runtime_from_str(value: &str) -> Result<Runtime, Error> {
         "apple" | "container" => Ok(Runtime::Apple),
         other => Err(Error::new(
             ErrorCode::InvalidArgument,
-            format!("invalid container runtime '{other}': expected docker, podman, or apple"),
+            format!("invalid container runtime '{other}': expected apple, podman, or docker"),
         )),
     }
-}
-
-fn on_path(bin: &str) -> bool {
-    let Some(paths) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&paths).any(|dir| dir.join(bin).is_file())
 }
 
 /// Apple's runtime needs its daemon started first; on Docker this is a no-op.
@@ -574,8 +648,64 @@ fn start_daemon(runtime: Runtime) {
 
 // ── arg builders (pure, unit-tested) ─────────────────────────────────────────
 
-fn image_tag() -> String {
-    format!("{IMAGE_REPO}:{VERSION}")
+/// The image identity: this binary's version plus the backend set built into
+/// it. A tag that carried only the version let an install with a different
+/// `--with` set reuse an image built without those backends; naming the set
+/// makes a different set a different image. The set is written in [`BACKENDS`]
+/// order, so the same set always spells the same tag however `--with` ordered
+/// it. Every component name is already a legal tag character run.
+fn image_tag(backends: &[Backend]) -> String {
+    let mut tag = format!("{IMAGE_REPO}:{VERSION}");
+    for backend in BACKENDS.iter().filter(|b| backends.contains(b)) {
+        tag.push('-');
+        tag.push_str(backend.name);
+    }
+    tag
+}
+
+/// Refuse to stop, remove, re-own the volume of, or purge the image of a
+/// container that afhttp did not create. `--name` is free-form, and the
+/// container already holding a name may be someone's database; only one run
+/// from an `afhttp-host` image is afhttp's to replace. No container by that
+/// name is fine.
+fn refuse_foreign_container(runtime: Runtime, name: &str) -> Result<(), Error> {
+    match inspect_container_image(runtime, name) {
+        Some(image) if !is_host_image(&image) => Err(Error::new(
+            ErrorCode::InvalidArgument,
+            format!(
+                "container {name:?} runs image {image:?}, not an afhttp host;                  choose another --name or remove it yourself"
+            ),
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Whether an image reference names an afhttp host image, whatever registry
+/// prefix the runtime reports it under (`localhost/…`, `docker.io/library/…`).
+fn is_host_image(reference: &str) -> bool {
+    reference
+        .rsplit('/')
+        .next()
+        .is_some_and(|last| last.starts_with(&format!("{IMAGE_REPO}:")))
+}
+
+/// Whether `name` is usable as a container name.
+///
+/// The name is spliced into runtime argv as `--name NAME` and `-v
+/// NAME-data:/data`: a `/` would turn the named volume into a bind mount of a
+/// host path, and a leading `-` would be read as a flag. The accepted set is
+/// the one Docker itself enforces, `[A-Za-z0-9][A-Za-z0-9_.-]*`.
+pub(crate) fn validate_container_name(name: &str) -> Result<(), Error> {
+    let mut chars = name.chars();
+    let valid = chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'));
+    if valid {
+        return Ok(());
+    }
+    Err(Error::new(
+        ErrorCode::InvalidArgument,
+        "--name: expected a letter or digit followed by letters, digits, `_`, `.` or `-`",
+    ))
 }
 
 fn volume_name(name: &str) -> String {
@@ -590,11 +720,11 @@ fn endpoint_url(port: u16) -> String {
 /// with a `<host-token>` for the caller to substitute.
 ///
 /// The standard container needs nothing said about it: a client with no
-/// endpoint discovers exactly this one and reads its token. Any other name or
-/// port has to be named, and `container:NAME` is how its token is read without
-/// going through the shell.
+/// endpoint discovers exactly this one, reads the port it publishes, and reads
+/// its token. Any other name has to be named, and `container:NAME` is how its
+/// token is read without going through the shell.
 fn client_command(name: &str, port: u16) -> String {
-    if name == DEFAULT_CONTAINER_NAME && port == DEFAULT_CONTAINER_PORT {
+    if name == DEFAULT_CONTAINER_NAME {
         return "afhttp fetch https://example.com".to_string();
     }
     format!(
@@ -910,9 +1040,10 @@ fn validate_container_image_host_args(
         .and_then(takeover_backend)
         && !container_image_hard_site_components(runtime, image, backend)
     {
-        // The image tag carries only the version, not the backend set, so an
-        // image built for the other takeover browser is reused as-is. Name the
-        // rebuild that adds this one rather than the generic source rebuild.
+        // The tag names the backend set, so this only fires for an image whose
+        // contents do not match its tag (built by hand, or a failed layer).
+        // Name the rebuild that adds this one rather than the generic source
+        // rebuild.
         return Err(Error::new(
             ErrorCode::BackendUnsupported,
             format!(
@@ -966,6 +1097,22 @@ async fn validate_running_hard_site(endpoint: &str, token: &str) -> Result<(), E
     validate_hard_site_capabilities(&caps)
 }
 
+fn live_takeover_ready(
+    configured: bool,
+    backend_connected: Option<bool>,
+    health: Option<&crate::sdk::health::TakeoverHealth>,
+) -> Option<bool> {
+    if !configured || backend_connected == Some(false) {
+        return Some(false);
+    }
+    health.map(|health| {
+        health.ready
+            && health.cdp_connected
+            && health.display_connected
+            && health.browser_running != Some(false)
+    })
+}
+
 fn is_hard_site_capabilities(caps: &crate::sdk::capabilities::CapabilitiesResponse) -> bool {
     takeover_backend(&caps.backend.family).is_some()
         && caps.takeover.supported
@@ -990,7 +1137,9 @@ pub(crate) async fn discover_default_local_host(
             e.detail
         ))
     })?;
-    let running = inspect_container_state(runtime, DEFAULT_CONTAINER_NAME)
+    let state = inspect_container_state(runtime, DEFAULT_CONTAINER_NAME);
+    let running = state
+        .as_ref()
         .map(|s| s.running)
         .unwrap_or_else(|| container_running(runtime, DEFAULT_CONTAINER_NAME));
     if !running {
@@ -998,6 +1147,15 @@ pub(crate) async fn discover_default_local_host(
             "default local container `{DEFAULT_CONTAINER_NAME}` is not running"
         )));
     }
+    // The token is sent to the port the container publishes and to no other:
+    // whatever listens on an assumed default is not necessarily this host.
+    let Some(port) = state.as_ref().and_then(|s| s.host_port) else {
+        return Err(local_host_error(format!(
+            "default local container `{DEFAULT_CONTAINER_NAME}` is running, but {} reports no \
+             published host port for its afhttp listener",
+            runtime.label()
+        )));
+    };
 
     let token_secret = match token_override {
         Some(token) => Some(SecretString::new(token)),
@@ -1008,7 +1166,7 @@ pub(crate) async fn discover_default_local_host(
             ))
         })?),
     };
-    let endpoint = endpoint_url(DEFAULT_CONTAINER_PORT);
+    let endpoint = endpoint_url(port);
     let client = match &token_secret {
         Some(token) => crate::sdk::Client::connect(&endpoint)?.with_token(token.expose_secret()),
         None => crate::sdk::Client::connect(&endpoint)?,
@@ -1071,6 +1229,14 @@ pub(crate) async fn discover_default_takeover_host(
 /// starting: the caller named an existing host and is about to talk to it, so a
 /// container that cannot answer now is an argument error, not a race to wait out.
 pub(crate) fn read_host_token(name: &str) -> Result<SecretString, Error> {
+    // The name lands in `exec NAME cat …`, where a leading `-` would be read
+    // as an exec flag; `--name` is held to the same rule.
+    if validate_container_name(name).is_err() {
+        return Err(container_token_error(
+            name,
+            "not a container name (a letter or digit followed by letters, digits, `_`, `.` or `-`)",
+        ));
+    }
     let runtime = resolve_runtime(None).map_err(|e| {
         container_token_error(
             name,
@@ -1350,168 +1516,40 @@ fn run_args(
 
 // ── process plumbing ─────────────────────────────────────────────────────────
 
-fn spawn_error(bin: &str, err: &std::io::Error) -> Error {
-    if err.kind() == std::io::ErrorKind::NotFound {
-        Error::new(
-            ErrorCode::InvalidArgument,
-            format!("container runtime `{bin}` not found on PATH"),
-        )
-    } else {
-        Error::new(
-            ErrorCode::IoError,
-            format!("spawning `{bin}` failed: {err}"),
-        )
-    }
-}
-
-/// Run a runtime command, inheriting stdio so the user sees build/run progress.
-fn exec_inherit(bin: &str, args: &[String]) -> Result<(), Error> {
-    let status = Command::new(bin)
-        .args(args)
-        .status()
-        .map_err(|e| spawn_error(bin, &e))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(Error::new(
-            ErrorCode::InternalError,
-            format!("`{bin} {}` failed ({status})", args.join(" ")),
-        ))
-    }
-}
-
-/// Run a runtime command with stdout/stderr appended to a log file, keeping
-/// CLI stdout reserved for the final AFDATA envelope.
-fn exec_to_log(bin: &str, args: &[String], log_file: &Path) -> Result<(), Error> {
-    exec_to_log_impl(bin, args, log_file, true)
-}
-
-fn exec_to_log_without_header(bin: &str, args: &[String], log_file: &Path) -> Result<(), Error> {
-    exec_to_log_impl(bin, args, log_file, false)
-}
-
-fn exec_to_log_impl(
-    bin: &str,
-    args: &[String],
-    log_file: &Path,
-    write_header: bool,
-) -> Result<(), Error> {
-    use std::io::Write;
-
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_file)
-        .map_err(|e| {
-            Error::new(
-                ErrorCode::IoError,
-                format!("open log file {}: {e}", log_file.display()),
-            )
-        })?;
-    if write_header {
-        writeln!(file, "\n$ {bin} {}", args.join(" ")).map_err(|e| {
-            Error::new(
-                ErrorCode::IoError,
-                format!("write log file {}: {e}", log_file.display()),
-            )
-        })?;
-    }
-    let stdout = file.try_clone().map_err(|e| {
+/// Where operation logs go: this user's cache, not a shared temp directory.
+///
+/// A build log can quote build args and a runtime's own output; under a
+/// world-writable `/tmp` another user could read it, or pre-create the
+/// directory and own it. The directory is created owner-only.
+fn container_log_dir() -> Result<PathBuf, Error> {
+    let base = dirs::cache_dir().ok_or_else(|| {
         Error::new(
             ErrorCode::IoError,
-            format!("clone log file {}: {e}", log_file.display()),
+            "cannot resolve a per-user cache dir for container logs: set HOME or XDG_CACHE_HOME",
         )
     })?;
-    let stderr = file.try_clone().map_err(|e| {
-        Error::new(
-            ErrorCode::IoError,
-            format!("clone log file {}: {e}", log_file.display()),
-        )
-    })?;
-    let status = Command::new(bin)
-        .args(args)
-        .stdout(stdout)
-        .stderr(stderr)
-        .status()
-        .map_err(|e| spawn_error(bin, &e))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(Error::new(
-            ErrorCode::InternalError,
-            format!(
-                "`{bin} {}` failed ({status}); full output was written to {}",
-                args.join(" "),
-                log_file.display()
-            ),
-        ))
-    }
+    Ok(base.join("afhttp").join("container-logs"))
 }
 
-fn tail_lines_from_file(path: &Path, max_lines: usize) -> Result<(Vec<String>, bool), Error> {
-    use std::io::{Read, Seek, SeekFrom};
-
-    const MAX_TAIL_BYTES: u64 = 256 * 1024;
-    let mut file = std::fs::File::open(path).map_err(|e| {
-        Error::new(
-            ErrorCode::IoError,
-            format!("open container log file {}: {e}", path.display()),
-        )
-    })?;
-    let len = file
-        .metadata()
-        .map_err(|e| {
-            Error::new(
-                ErrorCode::IoError,
-                format!("stat container log file {}: {e}", path.display()),
-            )
-        })?
-        .len();
-    let start = len.saturating_sub(MAX_TAIL_BYTES);
-    file.seek(SeekFrom::Start(start)).map_err(|e| {
-        Error::new(
-            ErrorCode::IoError,
-            format!("seek container log file {}: {e}", path.display()),
-        )
-    })?;
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf).map_err(|e| {
-        Error::new(
-            ErrorCode::IoError,
-            format!("read container log file {}: {e}", path.display()),
-        )
-    })?;
-    let text = String::from_utf8_lossy(&buf);
-    let mut lines: Vec<&str> = text.lines().collect();
-    let truncated_by_bytes = start > 0;
-    if truncated_by_bytes && !text.starts_with('\n') && !lines.is_empty() {
-        lines.remove(0);
-    }
-    let truncated = truncated_by_bytes || lines.len() > max_lines;
-    let tail_lines = lines
-        .iter()
-        .skip(lines.len().saturating_sub(max_lines))
-        .map(|line| (*line).to_string())
-        .collect();
-    Ok((tail_lines, truncated))
-}
-
-/// Run a runtime command capturing stdout/stderr.
-fn capture(bin: &str, args: &[String]) -> Result<std::process::Output, Error> {
-    Command::new(bin)
-        .args(args)
-        .output()
-        .map_err(|e| spawn_error(bin, &e))
-}
-
-fn container_operation_log_file(name: &str) -> Result<PathBuf, Error> {
-    let dir = std::env::temp_dir().join("afhttp-container-logs");
-    std::fs::create_dir_all(&dir).map_err(|e| {
+fn create_private_dir(dir: &Path) -> Result<(), Error> {
+    let io = |e: std::io::Error| {
         Error::new(
             ErrorCode::IoError,
             format!("create container log dir {}: {e}", dir.display()),
         )
-    })?;
+    };
+    std::fs::create_dir_all(dir).map_err(io)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).map_err(io)?;
+    }
+    Ok(())
+}
+
+fn container_operation_log_file(name: &str) -> Result<PathBuf, Error> {
+    let dir = container_log_dir()?;
+    create_private_dir(&dir)?;
     let safe_name: String = name
         .chars()
         .map(|c| {
@@ -1523,82 +1561,6 @@ fn container_operation_log_file(name: &str) -> Result<PathBuf, Error> {
         })
         .collect();
     Ok(dir.join(format!("{safe_name}-{}.log", uuid::Uuid::new_v4())))
-}
-
-fn image_exists(runtime: Runtime, image: &str) -> bool {
-    capture(
-        runtime.bin(),
-        &["image".into(), "inspect".into(), image.to_string()],
-    )
-    .map(|o| o.status.success())
-    .unwrap_or(false)
-}
-
-#[derive(Debug, Clone)]
-struct ContainerState {
-    running: bool,
-    exit_code: Option<i64>,
-}
-
-fn inspect_container_state(runtime: Runtime, name: &str) -> Option<ContainerState> {
-    let out = capture(runtime.bin(), &["inspect".into(), name.to_string()]).ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let value: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
-    parse_container_state(&value)
-}
-
-/// Read a container's state out of whichever `inspect` shape the runtime emits.
-///
-/// Docker and Podman answer `{"State": {"Running": bool, "ExitCode": n}}`.
-/// Apple answers `{"status": {"state": "running"}}` — a string, under a
-/// different key, with no exit code anywhere. Reading only the first shape made
-/// this return `None` on Apple for every container, and the caller's fallback
-/// then ran `container ps`, which that runtime does not have (`Plugin
-/// 'container-ps' not found`). Between them, every container on Apple looked
-/// stopped, and `install` reported a host that was running perfectly as having
-/// "exited before /health became ready".
-fn parse_container_state(value: &serde_json::Value) -> Option<ContainerState> {
-    let first = value
-        .as_array()
-        .and_then(|arr| arr.first())
-        .unwrap_or(value);
-
-    if let Some(state) = first.get("State") {
-        return Some(ContainerState {
-            running: state
-                .get("Running")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false),
-            exit_code: state.get("ExitCode").and_then(serde_json::Value::as_i64),
-        });
-    }
-
-    let state = first
-        .get("status")
-        .and_then(|status| status.get("state"))
-        .and_then(serde_json::Value::as_str)?;
-    Some(ContainerState {
-        running: state.eq_ignore_ascii_case("running"),
-        exit_code: None,
-    })
-}
-
-fn container_running(runtime: Runtime, name: &str) -> bool {
-    if let Some(state) = inspect_container_state(runtime, name) {
-        return state.running;
-    }
-    // Apple lists containers with `ls` and has no `ps` subcommand at all, so
-    // asking for `ps` there failed and reported every container as stopped.
-    let list = if runtime == Runtime::Apple {
-        "ls"
-    } else {
-        "ps"
-    };
-    capture(runtime.bin(), &[list.into()])
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains(name))
-        .unwrap_or(false)
 }
 
 /// Read the bearer token the entrypoint persisted to the data volume. The
@@ -1729,21 +1691,18 @@ fn container_logs_summary(runtime: Runtime, name: &str) -> String {
     let mut summary = lines.into_iter().rev().collect::<Vec<_>>().join(" | ");
     const MAX: usize = 4000;
     if summary.len() > MAX {
-        let start = summary.len() - MAX;
-        summary = format!("...{}", &summary[start..]);
+        summary = format!("...{}", byte_suffix(&summary, MAX));
     }
     summary
 }
 
-/// Report why the image build failed, from what the builder actually said.
-///
-/// This used to assert a cause it had never checked — that no release asset
-/// existed for the target — and send the reader to `--from-source`, which
-/// compiles afhttp and its browser stack from scratch. When the real failure was
-/// a file missing from the embedded context, that advice pointed at a build two
-/// orders of magnitude slower than the one that had just failed, chasing a
-/// release asset that was published and downloadable the whole time. A confident
-/// wrong cause is worse than none, because it is the one that gets acted on.
+/// At most the last `max` bytes of `text`, starting on a character boundary:
+/// runtime logs carry page titles and messages in any script.
+fn byte_suffix(text: &str, max: usize) -> &str {
+    let start = text.ceil_char_boundary(text.len().saturating_sub(max));
+    &text[start..]
+}
+
 /// A one-shot root container that gives the data volume to the image's user.
 ///
 /// Named rather than numeric: the account is defined once in the Dockerfile, and
@@ -1766,6 +1725,15 @@ fn data_volume_chown_args(name: &str, image: &str) -> Vec<String> {
     ]
 }
 
+/// Report why the image build failed, from what the builder actually said.
+///
+/// This used to assert a cause it had never checked — that no release asset
+/// existed for the target — and send the reader to `--from-source`, which
+/// compiles afhttp and its browser stack from scratch. When the real failure was
+/// a file missing from the embedded context, that advice pointed at a build two
+/// orders of magnitude slower than the one that had just failed, chasing a
+/// release asset that was published and downloadable the whole time. A confident
+/// wrong cause is worse than none, because it is the one that gets acted on.
 fn build_failed_error(target: &str, log_file: &Path) -> Error {
     let log = std::fs::read_to_string(log_file).unwrap_or_default();
     // The target is stated either way: it is what was being built, which is a
@@ -1818,17 +1786,15 @@ fn downloader_fetch_failed(log: &str) -> bool {
 
 // ── embedded build context ───────────────────────────────────────────────────
 
+/// The per-user cache dir, resolved the way the container logs beside it are,
+/// so a native Windows shell (no `HOME`) builds too.
 fn cache_context_dir() -> Result<PathBuf, Error> {
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-        .ok_or_else(|| {
-            Error::new(
-                ErrorCode::IoError,
-                "cannot resolve cache dir: set HOME or XDG_CACHE_HOME",
-            )
-        })?;
+    let base = dirs::cache_dir().ok_or_else(|| {
+        Error::new(
+            ErrorCode::IoError,
+            "cannot resolve a per-user cache dir for the build context: set HOME or XDG_CACHE_HOME",
+        )
+    })?;
     Ok(base.join("afhttp").join("container").join(VERSION))
 }
 
@@ -1897,6 +1863,14 @@ fn dockerfile_copied_context_files(dockerfile: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn purge_removes_the_image_with_a_command_every_runtime_has() {
+        assert_eq!(
+            image_remove_args("afhttp-host:1"),
+            ["image", "rm", "afhttp-host:1"]
+        );
+    }
+
     /// Every runtime's `inspect` shape has to be readable, including Apple's.
     ///
     /// Apple puts the state under `status.state` as a string; Docker and Podman
@@ -1904,6 +1878,56 @@ mod tests {
     /// answer `None` for every Apple container, and the caller then fell back to
     /// `container ps`, a subcommand Apple does not have — so a perfectly healthy
     /// host was reported as having "exited before /health became ready".
+    #[test]
+    fn log_tail_never_splits_a_character() {
+        let text = format!("{}\u{2026}tail", "a".repeat(10));
+        // The cut at three bytes from the end of the ellipsis would land inside it.
+        assert_eq!(byte_suffix(&text, 6), "tail");
+        assert_eq!(byte_suffix(&text, 7), "\u{2026}tail");
+        assert_eq!(byte_suffix("short", 4000), "short");
+        assert_eq!(byte_suffix("\u{6d4b}\u{8bd5}", 4), "\u{8bd5}");
+        for text in ["", "ascii", "界🙂tail"] {
+            assert_eq!(byte_suffix(text, 0), "");
+            assert_eq!(byte_suffix(text, usize::MAX), text);
+            for limit in 0..=text.len() {
+                let suffix = byte_suffix(text, limit);
+                assert!(suffix.len() <= limit);
+                assert!(text.ends_with(suffix));
+            }
+        }
+    }
+
+    #[test]
+    fn running_container_and_configured_display_do_not_imply_ready_browser() {
+        use crate::sdk::health::TakeoverHealth;
+        assert_eq!(live_takeover_ready(true, Some(false), None), Some(false));
+        assert_eq!(live_takeover_ready(true, Some(true), None), None);
+        let mut health = TakeoverHealth {
+            configured: true,
+            browser_running: Some(false),
+            cdp_connected: false,
+            display_connected: true,
+            ready: false,
+            reason: Some("browser exited".into()),
+        };
+        assert_eq!(
+            live_takeover_ready(true, Some(false), Some(&health)),
+            Some(false)
+        );
+        health.browser_running = Some(true);
+        health.cdp_connected = true;
+        health.ready = true;
+        assert_eq!(
+            live_takeover_ready(true, Some(true), Some(&health)),
+            Some(true)
+        );
+        health.display_connected = false;
+        assert_eq!(
+            live_takeover_ready(true, Some(true), Some(&health)),
+            Some(false)
+        );
+    }
+
     #[test]
     fn container_state_is_read_from_every_runtime_shape() {
         // Apple: the real shape, trimmed to what is read.
@@ -2210,8 +2234,12 @@ mod tests {
             runtime: "docker",
             container: "afhttp-host".into(),
             running: true,
-            endpoint: "ws://127.0.0.1:9222".into(),
+            endpoint: Some("ws://127.0.0.1:9222".into()),
             driver_version: VERSION,
+            host_build: None,
+            backend_connected: None,
+            takeover_health: None,
+            takeover_configured: None,
             host_version: Some(VERSION.into()),
             version_match: Some(true),
             profile_kind: Some("persistent".into()),
@@ -2251,9 +2279,13 @@ mod tests {
             runtime: "docker",
             container: "afhttp-host".into(),
             running: false,
-            endpoint: "ws://127.0.0.1:9222".into(),
+            endpoint: Some("ws://127.0.0.1:9222".into()),
             driver_version: VERSION,
             host_version: None,
+            host_build: None,
+            backend_connected: None,
+            takeover_health: None,
+            takeover_configured: None,
             version_match: None,
             profile_kind: None,
             profile: None,
@@ -2347,6 +2379,38 @@ mod tests {
 
     /// The container token source reports which container it tried and how to
     /// look at it, and never invents a token when the read fails.
+    #[test]
+    fn only_an_afhttp_host_image_is_ours_to_replace() {
+        for ours in [
+            "afhttp-host:0.15.0",
+            "afhttp-host:0.15.0-chrome",
+            "localhost/afhttp-host:0.15.0",
+            "docker.io/library/afhttp-host:0.15.0",
+        ] {
+            assert!(is_host_image(ours), "{ours}");
+        }
+        for theirs in [
+            "postgres:16",
+            "afhttp-host-fork:1",
+            "example/not-afhttp-host",
+        ] {
+            assert!(!is_host_image(theirs), "{theirs}");
+        }
+    }
+
+    #[test]
+    fn a_container_token_source_must_name_a_container_not_an_exec_flag() {
+        for name in ["-e", "--user=root", "a/b", ""] {
+            let err = read_host_token(name).unwrap_err();
+            assert_eq!(err.error_code, ErrorCode::InvalidArgument, "{name}");
+            assert!(
+                err.detail.contains("not a container name"),
+                "{name}: {}",
+                err.detail
+            );
+        }
+    }
+
     #[test]
     fn a_container_token_error_names_the_container_and_the_way_to_inspect_it() {
         let err = container_token_error("scratch", "the container is not running");
@@ -2809,6 +2873,88 @@ mod tests {
     fn the_standard_container_needs_no_endpoint_or_token_on_the_command() {
         let cmd = client_command(DEFAULT_CONTAINER_NAME, DEFAULT_CONTAINER_PORT);
         assert_eq!(cmd, "afhttp fetch https://example.com");
+        // Discovery reads the published port, so another port needs no
+        // endpoint either.
+        let cmd = client_command(DEFAULT_CONTAINER_NAME, 9333);
+        assert_eq!(cmd, "afhttp fetch https://example.com");
+    }
+
+    #[test]
+    fn the_image_tag_names_the_backend_set() {
+        let brave = resolve_backends(&["kasmvnc".into(), "brave".into()]);
+        let chrome = resolve_backends(&["chrome".into(), "kasmvnc".into()]);
+        assert_eq!(image_tag(&[]), format!("afhttp-host:{VERSION}"));
+        assert_eq!(
+            image_tag(&brave),
+            format!("afhttp-host:{VERSION}-brave-kasmvnc")
+        );
+        assert_ne!(image_tag(&brave), image_tag(&chrome));
+        // The same set spells the same tag whatever order `--with` gave it in.
+        let reordered = resolve_backends(&["brave".into(), "kasmvnc".into()]);
+        assert_eq!(image_tag(&brave), image_tag(&reordered));
+        let every: Vec<String> = BACKENDS.iter().map(|b| b.name.to_string()).collect();
+        let tag = image_tag(&resolve_backends(&every));
+        let (_, suffix) = tag.split_once(':').unwrap();
+        // Docker caps a tag at 128 characters.
+        assert!(suffix.len() <= 128, "{tag}");
+    }
+
+    #[test]
+    fn container_names_that_would_become_paths_or_flags_are_refused() {
+        for good in ["afhttp-host", "a", "9lives", "work_1.2-x"] {
+            assert!(validate_container_name(good).is_ok(), "{good}");
+        }
+        for bad in [
+            "", "-rm", "../x", "/etc", "a/b", ".hidden", "_x", "a b", "a:b", "é",
+        ] {
+            let err = validate_container_name(bad).unwrap_err();
+            assert_eq!(err.error_code, ErrorCode::InvalidArgument, "{bad}");
+        }
+    }
+
+    #[test]
+    fn an_empty_runtime_variable_counts_as_unset() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == name)
+                    .map(|(_, v)| std::ffi::OsString::from(v))
+            }
+        };
+        assert_eq!(runtime_from_env(env(&[])), None);
+        assert_eq!(
+            runtime_from_env(env(&[("AFHTTP_CONTAINER_RUNTIME", "")])),
+            None
+        );
+        assert_eq!(
+            runtime_from_env(env(&[
+                ("AFHTTP_CONTAINER_RUNTIME", " "),
+                ("AF_CONTAINER_RUNTIME", "podman")
+            ])),
+            Some("podman".to_string())
+        );
+        assert_eq!(
+            runtime_from_env(env(&[
+                ("AFHTTP_CONTAINER_RUNTIME", "docker"),
+                ("AF_CONTAINER_RUNTIME", "podman")
+            ])),
+            Some("docker".to_string())
+        );
+        // A set, non-empty value that names nothing is still an error, not a
+        // reason to auto-detect.
+        assert!(runtime_from_str("dokcer").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_log_dir_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("afhttp").join("container-logs");
+        create_private_dir(&dir).unwrap();
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
     }
 
     /// Any other container has to be named, and its token is read from it

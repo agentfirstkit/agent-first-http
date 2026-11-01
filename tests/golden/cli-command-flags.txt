@@ -164,7 +164,7 @@ command skill uninstall
   shape skill-uninstall-one-agent -> skill_uninstall
 command container
 command container install
-  arg runtime --runtime <docker|podman|apple>
+  arg runtime --runtime <apple|podman|docker>
   arg name --name =afhttp-host
   arg port --port =9222
   arg profile --profile
@@ -179,18 +179,17 @@ command container install
   shape container-install -> container_install
   shape container-install-from-source -> container_install
 command container uninstall
-  arg runtime --runtime <docker|podman|apple>
+  arg runtime --runtime <apple|podman|docker>
   arg name --name =afhttp-host
   arg purge --purge
   shape container-uninstall -> container_uninstall
 command container status
-  arg runtime --runtime <docker|podman|apple>
+  arg runtime --runtime <apple|podman|docker>
   arg name --name =afhttp-host
-  arg port --port =9222
   arg reveal_token_secret --reveal-token-secret
   shape container-status -> container_status
 command container logs
-  arg runtime --runtime <docker|podman|apple>
+  arg runtime --runtime <apple|podman|docker>
   arg name --name =afhttp-host
   arg follow --follow
   arg raw --raw

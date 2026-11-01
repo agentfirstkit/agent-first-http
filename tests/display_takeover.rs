@@ -36,6 +36,186 @@ use support::takeover_host::{
     spawn_host_with_state as spawn_display_router_with_state,
 };
 
+#[cfg(unix)]
+#[tokio::test]
+async fn browser_exit_degrades_live_display_and_blocks_takeover() {
+    support::ensure_rustls_provider();
+    let Some(bin) = support::env::discover_browser() else {
+        return;
+    };
+    let args = HostArgs {
+        listen: "tcp:127.0.0.1:0".into(),
+        profile: ProfileChoice::Ephemeral,
+        display: DisplayMode::Headless,
+        takeover: Takeover::Off,
+        display_quality: 100,
+        browser: BrowserChoice::Chromium,
+        browser_bin: Some(bin),
+        token: None,
+        takeover_enabled: true,
+        health_enabled: true,
+        health_public: HealthPublic::Off,
+        engine_envs: Vec::new(),
+        browser_args: Vec::new(),
+        proxy: None,
+        recent_requests_cap: 0,
+        tab_idle_timeout_s: 0,
+    };
+    let browser = Arc::new(
+        agent_first_http::host::browser::launch(&args)
+            .await
+            .unwrap(),
+    );
+    let pid = browser.process_id.unwrap();
+    let provider_port = spawn_fake_kasm().await;
+    let state = test_state(Some("test-token"), HealthPublic::Off)
+        .with_default_browser(browser)
+        .with_takeover_for_tests(provider_port);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router_for_tests(state)).await;
+    });
+    let base = format!("http://{addr}");
+    let client = agent_first_http::sdk::Client::connect(&base)
+        .unwrap()
+        .with_token("test-token");
+    let health = client.health().await.unwrap();
+    assert!(health.takeover.unwrap().ready);
+    let session = client.takeover_ui_session().await.unwrap();
+    assert!(
+        tokio::process::Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status()
+            .await
+            .unwrap()
+            .success()
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(8);
+    let health = loop {
+        let health = client.health().await.unwrap();
+        if !health.backend.as_ref().unwrap().connected
+            && health.takeover.as_ref().unwrap().browser_running == Some(false)
+        {
+            break health;
+        }
+        assert!(std::time::Instant::now() < deadline, "browser did not exit");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(health.status, "degraded");
+    let takeover = health.takeover.unwrap();
+    assert!(takeover.configured);
+    assert_eq!(takeover.browser_running, Some(false));
+    assert!(!takeover.cdp_connected);
+    assert!(takeover.display_connected, "VNC remains alive");
+    assert!(!takeover.ready);
+    assert!(takeover.reason.unwrap().contains("browser process exited"));
+    assert_eq!(
+        client
+            .takeover_handoff(None, None)
+            .await
+            .unwrap_err()
+            .error_code,
+        ErrorCode::CdpUnavailable
+    );
+    let secret = handoff_secret_of(session.takeover_url_secret());
+    let renewal = reqwest::Client::new()
+        .put(format!("{base}/takeover/ui-session"))
+        .header(reqwest::header::AUTHORIZATION, format!("Handoff {secret}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(renewal.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    for path in ["/takeover/handoff", "/takeover/ui-session"] {
+        let response = reqwest::Client::new()
+            .post(format!("{base}{path}"))
+            .bearer_auth("test-token")
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    }
+    let response = reqwest::Client::new()
+        .get(format!("{base}/takeover/panel/"))
+        .bearer_auth("test-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    let body = response.json::<serde_json::Value>().await.unwrap();
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("browser process exited")
+    );
+    agent_first_data::validate_protocol_event(&body, true).unwrap();
+}
+
+#[tokio::test]
+async fn panel_html_watches_authenticated_live_health() {
+    let provider = spawn_fake_kasm().await;
+    let base = spawn_display_router(Some("secret"), provider).await;
+    let http = reqwest::Client::new();
+    let response = http
+        .get(format!("{base}/takeover/panel/index.html"))
+        .bearer_auth("secret")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body = response.text().await.unwrap();
+    assert!(body.contains("Display client"));
+    assert!(body.contains("new URL('./afhttp-status', location.href)"));
+    assert!(body.contains("Browser or display connection lost"));
+    assert!(!body.contains("handoff_secret="));
+    let response = http
+        .get(format!("{base}/takeover/panel/afhttp-status"))
+        .bearer_auth("secret")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body = response.json::<serde_json::Value>().await.unwrap();
+    agent_first_data::validate_protocol_event(&body, true).unwrap();
+    assert_eq!(body["result"]["ready"], true);
+    assert_eq!(
+        http.get(format!("{base}/takeover/panel/afhttp-status"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn takeover_probes_cdp_when_public_health_endpoint_is_disabled() {
+    support::ensure_rustls_provider();
+    let provider = spawn_fake_kasm().await;
+    let cdp = support::takeover_host::spawn_fake_browser().await;
+    let mut state = test_state(Some("secret"), HealthPublic::Off)
+        .with_default_browser(Arc::new(BrowserHandle::synthetic_at(
+            cdp,
+            std::path::PathBuf::new(),
+        )))
+        .with_takeover_for_tests(provider);
+    state.health_enabled = false;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router_for_tests(state)).await;
+    });
+    let client = agent_first_http::sdk::Client::connect(&format!("http://{addr}"))
+        .unwrap()
+        .with_token("secret");
+    assert!(client.health().await.is_err());
+    assert!(client.takeover_handoff(None, None).await.is_ok());
+    let session = client.takeover_ui_session().await.unwrap();
+    assert!(session.revoke().await.unwrap());
+}
+
 /// A host with no display provider at all — the one shape the shared helper
 /// deliberately cannot build, because every other test needs a provider.
 async fn spawn_screencast_only_router(token: Option<&str>) -> String {

@@ -1,11 +1,16 @@
 //! Render-mode state machine.
 //!
 //! `RenderMode::None` uses the HTTP fast path (no browser). `Auto` tries
-//! HTTP first and escalates to the browser on connect failure / 5xx;
-//! `Always` skips the entire HTTP attempt.
+//! HTTP first and, for GET and HEAD, escalates to the browser when the HTTP
+//! attempt fails (other than `invalid_argument`), returns status >= 400,
+//! classifies as a bot wall or challenge, looks like an empty HTML shell, or
+//! the caller wants a content artifact. Other methods are never sent twice:
+//! their HTTP outcome is the result. `Always` skips the HTTP attempt.
 
 mod browser;
 mod cookie_jar_resolve;
+
+pub(crate) use browser::TARGET_CLEANUP_TIMEOUT;
 mod http_only;
 mod request_opts;
 
@@ -26,7 +31,9 @@ use crate::shared::ids::RequestId;
 pub enum RenderMode {
     /// HTTP only; never start a browser.
     None,
-    /// HTTP first; escalate to browser on connect/5xx/non-HTML.
+    /// HTTP first; for GET/HEAD, escalate to the browser on HTTP failure,
+    /// status >= 400, a challenge page, an empty HTML shell, or a requested
+    /// content artifact.
     #[default]
     Auto,
     /// Always use the browser.
@@ -134,7 +141,13 @@ pub(crate) async fn execute(
                 trace.render_decision = RenderDecision::HttpOnly;
                 trace.render_used = false;
             });
-            match http_only::http_only(
+            let resendable = builder.method_is_idempotent();
+            if !resendable {
+                // This fetch can never escalate, so a browser-only option is
+                // refused before the request is sent, not after.
+                browser::reject_http_only_evaluate(&request_options)?;
+            }
+            let outcome = http_only::http_only(
                 &builder,
                 &request_options,
                 request_id.clone(),
@@ -143,8 +156,13 @@ pub(crate) async fn execute(
                 None,
                 &deadline,
             )
-            .await
-            {
+            .await;
+            if !resendable {
+                // The server may already have acted on this request; the
+                // browser would send it a second time.
+                return outcome.map(|o| o.result);
+            }
+            match outcome {
                 Ok(o) if o.result.status < 400 => {
                     if let Some(classification) =
                         http_only::classify_http_body(&o.body_bytes, o.content_type.as_deref())

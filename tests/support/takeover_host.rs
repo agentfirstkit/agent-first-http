@@ -29,6 +29,12 @@ pub async fn spawn_fake_provider() -> u16 {
         // settings survived the trip.
         .route("/", get(echo_request))
         .route("/echo", get(echo_request))
+        .route(
+            "/index.html",
+            get(|| async {
+                axum::response::Html("<!doctype html><html><body>Display client</body></html>")
+            }),
+        )
         .route("/ws", get(fake_ws));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind fake");
     let port = listener.local_addr().expect("addr").port();
@@ -69,7 +75,15 @@ pub async fn spawn_host(token: Option<&str>, upstream_port: u16) -> String {
 /// way a profile switch and a host shutdown drive it, not over HTTP.
 pub async fn spawn_host_with_state(token: Option<&str>, upstream_port: u16) -> (String, AppState) {
     super::ensure_rustls_provider();
-    let state = test_state(token, HealthPublic::Off).with_takeover_for_tests(upstream_port);
+    let browser = spawn_fake_browser().await;
+    let state = test_state(token, HealthPublic::Off)
+        .with_takeover_for_tests(upstream_port)
+        .with_default_browser(std::sync::Arc::new(
+            agent_first_http::host::browser::BrowserHandle::synthetic_at(
+                browser,
+                std::path::PathBuf::new(),
+            ),
+        ));
     let app = router_for_tests(state.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind host");
     let addr = listener.local_addr().expect("addr");
@@ -113,4 +127,25 @@ pub fn handoff_secret_of(takeover_url: &str) -> String {
         .find(|(k, _)| k == "handoff_secret")
         .map(|(_, v)| v.into_owned())
         .expect("handoff query")
+}
+
+/// CDP peer for handoff tests: configuration support is separate from whether
+/// the backend actually answers. Tests can swap the profile to an exited peer.
+pub async fn spawn_fake_browser() -> String {
+    async fn cdp(ws: WebSocketUpgrade) -> impl IntoResponse {
+        ws.on_upgrade(|socket| async move {
+            let (mut tx, mut rx) = socket.split();
+            while let Some(Ok(Message::Text(text))) = rx.next().await {
+                let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+                let response = json!({"id":value["id"], "result":{"targetInfos":[{"type":"page","targetId":"page-1"}]}});
+                if tx.send(Message::Text(response.to_string().into())).await.is_err() { break; }
+            }
+        })
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, axum::Router::new().route("/cdp", get(cdp))).await;
+    });
+    format!("ws://{addr}/cdp")
 }

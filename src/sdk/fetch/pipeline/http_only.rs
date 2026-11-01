@@ -16,9 +16,10 @@ use crate::shared::ids::RequestId;
 use crate::shared::time::duration_ms;
 
 use super::super::page_classification;
-use super::cookie_jar_resolve::persist_set_cookies;
+use super::cookie_jar_resolve::{persist_off_runtime, persist_set_cookies};
 use super::request_opts::{
-    BodyPayload, PreparedRequestOptions, prepare_cookie, validate_cookie_scope,
+    BodyPayload, PreparedRequestOptions, is_origin_scoped_header, prepare_cookie,
+    validate_cookie_scope,
 };
 
 pub(super) struct HttpOnlyOutcome {
@@ -48,7 +49,7 @@ pub(super) async fn http_only(
         http_owned = build_per_fetch_http_client(builder).await?;
         &http_owned
     } else {
-        builder.client.http()
+        builder.client.target_http()
     };
 
     deadline.update_trace(|trace| {
@@ -177,7 +178,8 @@ async fn send_http_response(
             .iter()
             .filter_map(|value| value.to_str().ok().map(String::from))
             .collect::<Vec<_>>();
-        persist_set_cookies(jar_path, &cookies, response.url())?;
+        let (jar_path, set_from) = (jar_path.clone(), response.url().clone());
+        persist_off_runtime(move || persist_set_cookies(&jar_path, &cookies, &set_from)).await?;
         let status = response.status().as_u16();
         if !matches!(status, 301 | 302 | 303 | 307 | 308) {
             return Ok(response);
@@ -199,17 +201,9 @@ async fn send_http_response(
             // The server chose this Location; the caller's arguments were fine.
             .ok_or_else(|| Error::new(ErrorCode::IoError, "invalid HTTP redirect location"))?;
         if url.origin() != next.origin() {
-            options.headers.retain(|header| {
-                !matches!(
-                    header.name.as_str(),
-                    "authorization"
-                        | "proxy-authorization"
-                        | "cookie"
-                        | "cookie2"
-                        | "host"
-                        | "www-authenticate"
-                )
-            });
+            options
+                .headers
+                .retain(|header| !is_origin_scoped_header(header.name.as_str()));
             options.raw_cookie_header = None;
             options.raw_cookie_pairs.clear();
             options.cookies.clear();
@@ -222,7 +216,7 @@ async fn send_http_response(
             options.headers.retain(|header| {
                 !matches!(
                     header.name.as_str(),
-                    "content-type" | "content-length" | "transfer-encoding"
+                    "content-type" | "content-encoding" | "content-length" | "transfer-encoding"
                 )
             });
         }
@@ -270,8 +264,10 @@ fn resolve_jar_cookies<'a>(
 }
 
 async fn build_per_fetch_http_client(builder: &FetchBuilder) -> Result<reqwest::Client, Error> {
-    let mut b =
-        reqwest::Client::builder().user_agent(concat!("afhttp/", env!("CARGO_PKG_VERSION")));
+    // No `Referer` on redirects reqwest follows; see `base_http_builder`.
+    let mut b = reqwest::Client::builder()
+        .user_agent(concat!("afhttp/", env!("CARGO_PKG_VERSION")))
+        .referer(false);
     if builder.cookie_jar.path.is_some() {
         b = b.redirect(reqwest::redirect::Policy::none());
     }
@@ -336,26 +332,35 @@ async fn read_body_with_cap(
         .await
         .map_err(|e| Error::new(ErrorCode::IoError, format!("HTTP body: {e}")))?
     {
-        if buf.len() >= cap_usize {
-            continue;
-        }
         let remaining = cap_usize - buf.len();
-        if chunk.len() <= remaining {
-            buf.extend_from_slice(&chunk);
-        } else {
+        if chunk.len() > remaining {
+            // Bytes past the cap arrived: keep the prefix and stop. Returning
+            // drops the response, which closes the connection rather than
+            // draining a body nobody will store.
             buf.extend_from_slice(&chunk[..remaining]);
+            return Ok((buf, Some(cap)));
         }
+        buf.extend_from_slice(&chunk);
     }
-    let truncated = if buf.len() == cap_usize {
-        Some(cap)
-    } else {
-        None
-    };
-    Ok((buf, truncated))
+    // A body of exactly `cap` bytes is complete, not truncated.
+    Ok((buf, None))
 }
 
 fn classify_http_error(err: &reqwest::Error) -> ErrorCode {
-    classify_http_error_parts(err.is_timeout(), err.is_connect(), &format!("{err:#}"))
+    classify_http_error_parts(err.is_timeout(), err.is_connect(), &error_causes(err))
+}
+
+/// The transport's own wording, from the error's source chain. reqwest's
+/// top-level message quotes the request URL, and a URL that happens to
+/// contain "dns" or "cert" must not decide the bucket.
+fn error_causes(err: &reqwest::Error) -> String {
+    let mut causes = Vec::new();
+    let mut source = std::error::Error::source(err);
+    while let Some(cause) = source {
+        causes.push(cause.to_string());
+        source = cause.source();
+    }
+    causes.join(": ")
 }
 
 pub(crate) fn classify_http_error_parts(
@@ -754,36 +759,239 @@ mod tests {
         );
     }
 
+    /// Serve `count` connections, answering each with `response`; returns
+    /// the request lines seen.
+    fn serve(
+        listener: tokio::net::TcpListener,
+        count: usize,
+        response: &'static [u8],
+    ) -> tokio::task::JoinHandle<Vec<String>> {
+        use tokio::io::AsyncWriteExt;
+        tokio::spawn(async move {
+            let mut seen = Vec::new();
+            for _ in 0..count {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request = read_fixture_request(&mut stream).await;
+                seen.push(request.lines().next().unwrap_or_default().to_string());
+                let _ = stream.write_all(response).await;
+            }
+            seen
+        })
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
-    async fn http_only_request_failure_redacts_sdk_error_urls() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-        let port = listener.local_addr().expect("local address").port();
-        drop(listener);
-        let out = tempfile::tempdir().expect("output directory");
-        let client = crate::sdk::Client::http_only().expect("HTTP-only client");
-        let err = client
-            .fetch(format!(
-                "http://reader:password-canary@127.0.0.1:{port}/path?token_secret=query-canary&api_key=legacy-canary&safe=ok"
-            ))
+    async fn target_fetch_on_a_unix_endpoint_client_goes_to_the_target() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/page", listener.local_addr().unwrap());
+        let server = serve(
+            listener,
+            1,
+            b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\ntarget",
+        );
+        let dir = tempfile::tempdir().unwrap();
+        // The host socket does not exist: anything sent there fails.
+        let client = crate::sdk::Client::connect(&format!(
+            "unix:{}",
+            dir.path().join("host.sock").display()
+        ))
+        .unwrap();
+        let result = client
+            .fetch(url)
             .render(crate::sdk::fetch::RenderMode::None)
+            .out_dir(dir.path().join("out"))
             .want([Artifact::Body])
-            .out_dir(out.path().to_path_buf())
             .timeout(std::time::Duration::from_secs(2))
             .send()
             .await
-            .expect_err("closed endpoint must fail");
-        assert_eq!(err.error_code, ErrorCode::TargetUnreachable);
-        assert!(err.detail.contains("token_secret=***"));
-        assert!(err.detail.contains("api_key=***"));
-        let display = err.to_string();
-        let json = serde_json::to_string(&err).expect("serialize SDK error");
-        for text in [&err.detail, &display, &json] {
-            assert!(!text.contains("password-canary"), "password leaked: {text}");
-            assert!(!text.contains("query-canary"), "query leaked: {text}");
-            assert!(
-                !text.contains("legacy-canary"),
-                "legacy query leaked: {text}"
-            );
+            .unwrap();
+        assert_eq!(result.status, 200);
+        assert_eq!(std::fs::read(result.body_file.unwrap()).unwrap(), b"target");
+        assert_eq!(server.await.unwrap(), ["GET /page HTTP/1.1"]);
+    }
+
+    #[tokio::test]
+    async fn auto_mode_returns_a_failed_post_instead_of_resending_it() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/submit", listener.local_addr().unwrap());
+        let server = serve(
+            listener,
+            1,
+            b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 4\r\nConnection: close\r\n\r\nfail",
+        );
+        let dir = tempfile::tempdir().unwrap();
+        // A hostless client: escalating would fail with render_unavailable.
+        let client = crate::sdk::Client::http_only().unwrap();
+        let result = client
+            .fetch(url.clone())
+            .method("POST")
+            .body(b"order=1".to_vec())
+            .out_dir(dir.path().join("out"))
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(result.status, 500);
+        assert_eq!(
+            result.trace.render_decision,
+            crate::sdk::fetch::result::RenderDecision::HttpOnly
+        );
+        assert_eq!(server.await.unwrap(), ["POST /submit HTTP/1.1"]);
+
+        // A GET with the same answer still escalates.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/page", listener.local_addr().unwrap());
+        let server = serve(
+            listener,
+            1,
+            b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 4\r\nConnection: close\r\n\r\nfail",
+        );
+        let error = client
+            .fetch(url)
+            .out_dir(dir.path().join("out"))
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await
+            .unwrap_err();
+        assert_eq!(error.error_code, ErrorCode::RenderUnavailable);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn retries_resend_only_get_and_head() {
+        use tokio::io::AsyncWriteExt;
+        for (method, attempts) in [("POST", 1), ("PUT", 1), ("GET", 3), ("HEAD", 3)] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/op", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let mut accepted = 0;
+                // Each attempt is answered by closing the connection, a
+                // retryable io_error; stop counting once no attempt follows.
+                while let Ok(Ok((mut stream, _))) =
+                    tokio::time::timeout(std::time::Duration::from_millis(500), listener.accept())
+                        .await
+                {
+                    accepted += 1;
+                    read_fixture_request(&mut stream).await;
+                    let _ = stream.shutdown().await;
+                }
+                accepted
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let client = crate::sdk::Client::http_only().unwrap();
+            let error = client
+                .fetch(url)
+                .render(crate::sdk::fetch::RenderMode::None)
+                .method(method)
+                .retry(2)
+                .backoff_ms(0)
+                .out_dir(dir.path().join("out"))
+                .timeout(std::time::Duration::from_secs(2))
+                .send()
+                .await
+                .unwrap_err();
+            assert!(error.retryable, "{method}: {error:?}");
+            assert_eq!(server.await.unwrap(), attempts, "{method}");
         }
+    }
+
+    #[tokio::test]
+    async fn max_response_bytes_stops_reading_and_flags_only_real_overflow() {
+        use tokio::io::AsyncWriteExt;
+        let dir = tempfile::tempdir().unwrap();
+        let client = crate::sdk::Client::http_only().unwrap();
+
+        // Exactly the cap: complete, not truncated.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/exact", listener.local_addr().unwrap());
+        let server = serve(
+            listener,
+            1,
+            b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nabcd",
+        );
+        let result = client
+            .fetch(url)
+            .render(crate::sdk::fetch::RenderMode::None)
+            .max_response_bytes(4)
+            .out_dir(dir.path().join("out"))
+            .want([Artifact::Body])
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            result
+                .warnings
+                .iter()
+                .all(|w| w.code != ErrorCode::NetworkBodyTruncated),
+            "{:?}",
+            result.warnings
+        );
+        assert_eq!(std::fs::read(result.body_file.unwrap()).unwrap(), b"abcd");
+        server.await.unwrap();
+
+        // An endless body: the fetch returns the prefix instead of reading
+        // until the deadline.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/endless", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_fixture_request(&mut stream).await;
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+                .await
+                .unwrap();
+            while stream.write_all(b"400\r\n").await.is_ok()
+                && stream.write_all(&[b'x'; 1024]).await.is_ok()
+                && stream.write_all(b"\r\n").await.is_ok()
+            {}
+        });
+        let started = std::time::Instant::now();
+        let result = client
+            .fetch(url)
+            .render(crate::sdk::fetch::RenderMode::None)
+            .max_response_bytes(4)
+            .out_dir(dir.path().join("out"))
+            .want([Artifact::Body])
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await
+            .unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.code == ErrorCode::NetworkBodyTruncated)
+        );
+        assert_eq!(std::fs::read(result.body_file.unwrap()).unwrap(), b"xxxx");
+        // Dropping the response closed the connection, so the writer stops.
+        tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn error_classification_ignores_words_in_the_url() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let dir = tempfile::tempdir().unwrap();
+        let client = crate::sdk::Client::http_only().unwrap();
+        let error = client
+            .fetch(format!("http://127.0.0.1:{port}/dns/tls/ssl/certificate"))
+            .render(crate::sdk::fetch::RenderMode::None)
+            .out_dir(dir.path().join("out"))
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await
+            .unwrap_err();
+        assert_eq!(error.error_code, ErrorCode::TargetUnreachable, "{error:?}");
+        // The SDK still reports the URL it was given.
+        assert!(
+            error.detail.contains("/dns/tls/ssl/certificate"),
+            "{error:?}"
+        );
     }
 }

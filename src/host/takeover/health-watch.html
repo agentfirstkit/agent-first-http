@@ -1,0 +1,25 @@
+<script>
+(() => {
+  const statusUrl = new URL('./afhttp-status', location.href);
+  let failures = 0;
+  let banner;
+  async function check() {
+    try {
+      const response = await fetch(statusUrl, { cache: 'no-store', signal: AbortSignal.timeout(8000) });
+      if (!response.ok) throw new Error('Takeover connection unavailable');
+      failures = 0;
+      banner?.remove();
+      banner = undefined;
+    } catch (_) {
+      if (++failures >= 2 && !banner) {
+        banner = document.createElement('div');
+        banner.setAttribute('role', 'alert');
+        banner.textContent = 'Browser or display connection lost. The host may still be running. Your profile data has been preserved. Check host health before reopening takeover.';
+        banner.style.cssText = 'position:fixed;inset:0 0 auto;z-index:2147483647;background:#861b1b;color:white;padding:20px;font:16px sans-serif';
+        document.body.appendChild(banner);
+      }
+    } finally { setTimeout(check, 5000); }
+  }
+  setTimeout(check, 5000);
+})();
+</script>

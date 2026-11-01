@@ -160,60 +160,55 @@ pub async fn capture(
             Some(session_id),
         )
         .await?;
-    let mut nodes: Vec<Node> = Vec::new();
-    let mut forms: Vec<Form> = Vec::new();
-    let mut frames: Vec<Frame> = vec![Frame {
-        frame_id: "main".into(),
-        frame_url: crate::shared::redact::redact_url(url),
-    }];
-    let mut focused_ref: Option<String> = None;
-    let mut truncated: Option<ObservationTruncation> = None;
-    if let Some(s) = dom["result"]["value"].as_str() {
-        let v: serde_json::Value = serde_json::from_str(s).unwrap_or(serde_json::Value::Null);
-        if let Ok(parsed_nodes) =
-            serde_json::from_value::<Vec<Node>>(v.get("nodes").cloned().unwrap_or_default())
-        {
-            nodes = parsed_nodes;
-        }
-        if let Ok(parsed_forms) =
-            serde_json::from_value::<Vec<Form>>(v.get("forms").cloned().unwrap_or_default())
-        {
-            forms = parsed_forms;
-        }
-        if let Ok(parsed_frames) =
-            serde_json::from_value::<Vec<Frame>>(v.get("frames").cloned().unwrap_or_default())
-            && !parsed_frames.is_empty()
-        {
-            frames = parsed_frames
-                .into_iter()
-                .map(|mut frame| {
-                    frame.frame_url = crate::shared::redact::redact_url(&frame.frame_url);
-                    frame
-                })
-                .collect();
-        }
-        focused_ref = v
-            .get("focused_ref")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
-        if let Ok(parsed_truncation) = serde_json::from_value::<ObservationTruncation>(
-            v.get("truncated").cloned().unwrap_or_default(),
-        ) {
-            truncated = Some(parsed_truncation);
-        }
-    }
+    let raw = dom["result"]["value"].as_str().ok_or_else(|| {
+        Error::new(
+            ErrorCode::ArtifactCaptureFailed,
+            "observation snapshot did not return a JSON string",
+        )
+    })?;
+    let snapshot = parse_snapshot(raw)?;
 
     Ok(Observation {
         schema_version: OBSERVATION_SCHEMA_VERSION,
-        page_url: crate::shared::redact::redact_url(url),
+        page_url: url.to_string(),
         title,
         viewport,
-        frames,
-        nodes,
-        forms,
-        focused_ref,
-        truncated,
+        frames: snapshot.frames,
+        nodes: snapshot.nodes,
+        forms: snapshot.forms,
+        focused_ref: snapshot.focused_ref,
+        truncated: snapshot.truncated,
     })
+}
+
+#[derive(Debug, Deserialize)]
+struct Snapshot {
+    nodes: Vec<Node>,
+    forms: Vec<Form>,
+    frames: Vec<Frame>,
+    focused_ref: Option<String>,
+    truncated: Option<ObservationTruncation>,
+}
+
+fn parse_snapshot(raw: &str) -> Result<Snapshot, Error> {
+    let mut deserializer = serde_json::Deserializer::from_str(raw);
+    let snapshot = serde_path_to_error::deserialize(&mut deserializer).map_err(|error| {
+        Error::new(
+            ErrorCode::ArtifactCaptureFailed,
+            format!(
+                "decode observation snapshot at {}: {}",
+                error.path(),
+                error.inner()
+            ),
+        )
+    })?;
+    deserializer.end().map_err(|error| {
+        Error::new(
+            ErrorCode::ArtifactCaptureFailed,
+            format!("decode observation snapshot: {error}"),
+        )
+    })?;
+    Ok(snapshot)
 }
 
 const OBSERVATION_JS: &str = include_str!("../../../../assets/observation/snapshot.js");
@@ -289,6 +284,17 @@ mod tests {
         let parsed: Observation = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.nodes.len(), 1);
         assert_eq!(parsed.nodes[0].role, "button");
+    }
+
+    #[test]
+    fn invalid_snapshot_reports_node_field_instead_of_empty_nodes() {
+        let error = parse_snapshot(r#"{"nodes":[{"ref":"obs-0","frame_id":"main","role":"link","visible":true,"enabled":true,"href":{}}],"forms":[],"frames":[]}"#).unwrap_err();
+        assert_eq!(error.error_code, ErrorCode::ArtifactCaptureFailed);
+        assert!(error.detail.contains("nodes[0].href"), "{}", error.detail);
+        assert!(parse_snapshot("undefined").is_err());
+        assert!(parse_snapshot(r#"{"forms":[],"frames":[]}"#).is_err());
+        let empty = parse_snapshot(r#"{"nodes":[],"forms":[],"frames":[]}"#).unwrap();
+        assert!(empty.nodes.is_empty());
     }
 
     #[test]

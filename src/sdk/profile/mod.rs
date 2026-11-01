@@ -61,7 +61,9 @@ pub fn list(profile_root: Option<&Path>) -> Result<Vec<ProfileEntry>, Error> {
         })?;
         for entry in read.flatten() {
             let path = entry.path();
-            if !path.is_dir() {
+            // `file_type` does not follow links: a link planted in the root is
+            // not a profile, and prune would otherwise empty whatever it names.
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
                 continue;
             }
             let name = match path.file_name().and_then(|s| s.to_str()) {
@@ -184,18 +186,76 @@ pub fn delete(
     }
     let root = root_or_default(profile_root);
     let (backend, dir) = resolve_backend_scoped_profile(&root, name, backend)?;
-    if lock::probe(&dir) {
-        return Err(Error::new(
+    remove_profile_dir(&dir).map_err(|e| match e.error_code {
+        ErrorCode::ProfileLocked => Error::new(
             ErrorCode::ProfileDeleteLocked,
             format!("profile {backend}/{name:?} is locked; cannot delete"),
-        ));
-    }
-    std::fs::remove_dir_all(&dir).map_err(|e| {
+        ),
+        _ => e,
+    })
+}
+
+/// Remove a profile directory while holding its lock.
+///
+/// Checking the lock and then deleting left a window in which a host could
+/// acquire the profile and have its browser data removed underneath it.
+/// Holding the guard across the removal closes that: a host that tries to
+/// acquire meanwhile gets `profile_locked`. A lock file that cannot be opened
+/// is an error here, never "unlocked" — not knowing is not permission.
+///
+/// Everything but the lock file goes while the lock is held. The lock file
+/// itself and the then-empty directory go after the guard drops, because
+/// Windows will not delete a file that is open. A host that claims the profile
+/// in that last moment finds an empty directory, and the `remove_dir` below
+/// fails rather than delete what it has started writing.
+///
+/// Returns `profile_locked` when a host holds the profile.
+fn remove_profile_dir(dir: &Path) -> Result<(), Error> {
+    let io = |what: &str, path: &Path, e: std::io::Error| {
         Error::new(
             ErrorCode::IoError,
-            format!("remove_dir_all({}): {e}", dir.display()),
+            format!("{what}({}): {e}", path.display()),
         )
-    })
+    };
+    // Never through a link (or a Windows junction, which std reports as one):
+    // the lock and every removal below would land in the directory it names.
+    let kind = std::fs::symlink_metadata(dir)
+        .map_err(|e| io("symlink_metadata", dir, e))?
+        .file_type();
+    if !kind.is_dir() {
+        return Err(Error::new(
+            ErrorCode::InvalidArgument,
+            format!(
+                "{} is not a profile directory (a link or a file); remove it by hand",
+                dir.display()
+            ),
+        ));
+    }
+    let guard = lock::Guard::acquire(dir)?;
+    let lockfile = lock::lockfile(dir);
+    for entry in std::fs::read_dir(dir).map_err(|e| io("read_dir", dir, e))? {
+        let entry = entry.map_err(|e| io("read_dir", dir, e))?;
+        let path = entry.path();
+        if path == lockfile {
+            continue;
+        }
+        let is_dir = entry
+            .file_type()
+            .map_err(|e| io("file_type", &path, e))?
+            .is_dir();
+        if is_dir {
+            std::fs::remove_dir_all(&path).map_err(|e| io("remove_dir_all", &path, e))?;
+        } else {
+            std::fs::remove_file(&path).map_err(|e| io("remove_file", &path, e))?;
+        }
+    }
+    drop(guard);
+    match std::fs::remove_file(&lockfile) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(io("remove_file", &lockfile, e)),
+    }
+    std::fs::remove_dir(dir).map_err(|e| io("remove_dir", dir, e))
 }
 
 fn resolve_backend_scoped_profile(
@@ -255,18 +315,24 @@ pub fn read_profile_meta(path: &Path) -> Result<meta::ProfileMeta, Error> {
             format!("read profile metadata {}: {e}", path.display()),
         )
     })?;
+    // The name is fine; the file beside it is not. `io_error`, not retryable:
+    // reading it again gives the same bytes.
     serde_json::from_str::<meta::ProfileMeta>(&s).map_err(|e| {
         Error::new(
-            ErrorCode::ProfileInvalidName,
+            ErrorCode::IoError,
             format!(
-                "profile metadata {} is not schema v{}: {e}; delete/recreate this profile",
+                "profile metadata {} is not schema v{}: {e}; back up this profile and restore or repair only afhttp-profile.json. Browser data is separate; do not delete the profile directory",
                 path.display(),
                 meta::ProfileMeta::SCHEMA_VERSION
             ),
         )
+        .with_retryable(false)
     })
 }
 
+/// Check the metadata against the path it was found at. A mismatch is a
+/// metadata fault (`io_error`, not retryable), not an invalid name: the name
+/// the caller gave is valid, and it is the file that disagrees with it.
 pub fn validate_profile_meta(
     meta: &meta::ProfileMeta,
     backend: &str,
@@ -275,36 +341,39 @@ pub fn validate_profile_meta(
 ) -> Result<(), Error> {
     if meta.schema_version != meta::ProfileMeta::SCHEMA_VERSION {
         return Err(Error::new(
-            ErrorCode::ProfileInvalidName,
+            ErrorCode::IoError,
             format!(
-                "profile metadata at {} has schema_version {}; expected {}; delete/recreate this profile",
+                "profile metadata at {} has schema_version {}; expected {}; back up this profile and restore compatible afhttp-profile.json metadata; preserve browser data",
                 dir.join("afhttp-profile.json").display(),
                 meta.schema_version,
                 meta::ProfileMeta::SCHEMA_VERSION
             ),
-        ));
+        )
+        .with_retryable(false));
     }
     if meta.backend != backend {
         return Err(Error::new(
-            ErrorCode::ProfileInvalidName,
+            ErrorCode::IoError,
             format!(
-                "profile metadata backend {:?} does not match path backend {:?} at {}; delete/recreate this profile",
+                "profile metadata backend {:?} does not match path backend {:?} at {}; back up this profile and repair afhttp-profile.json or select the matching backend; preserve browser data",
                 meta.backend,
                 backend,
                 dir.display()
             ),
-        ));
+        )
+        .with_retryable(false));
     }
     if meta.name != name {
         return Err(Error::new(
-            ErrorCode::ProfileInvalidName,
+            ErrorCode::IoError,
             format!(
-                "profile metadata name {:?} does not match path name {:?} at {}; delete/recreate this profile",
+                "profile metadata name {:?} does not match path name {:?} at {}; back up this profile and repair afhttp-profile.json or select the matching name; preserve browser data",
                 meta.name,
                 name,
                 dir.display()
             ),
-        ));
+        )
+        .with_retryable(false));
     }
     Ok(())
 }
@@ -318,6 +387,8 @@ pub fn prune(
     let now = SystemTime::now();
     let mut removed = Vec::new();
     for entry in entries {
+        // Advisory only: the lock is taken for real before anything is
+        // removed, and a profile a host claimed since is skipped then.
         if entry.locked {
             continue;
         }
@@ -335,12 +406,11 @@ pub fn prune(
             continue;
         }
         if !dry_run {
-            std::fs::remove_dir_all(&entry.path).map_err(|e| {
-                Error::new(
-                    ErrorCode::IoError,
-                    format!("remove_dir_all({}): {e}", entry.path.display()),
-                )
-            })?;
+            match remove_profile_dir(&entry.path) {
+                Ok(()) => {}
+                Err(e) if e.error_code == ErrorCode::ProfileLocked => continue,
+                Err(e) => return Err(e),
+            }
         }
         removed.push(entry);
     }
@@ -381,6 +451,21 @@ mod tests {
         )
         .unwrap();
         dir
+    }
+
+    #[test]
+    fn empty_metadata_diagnoses_metadata_and_preserves_browser_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let metadata = dir.path().join("afhttp-profile.json");
+        let cookies = dir.path().join("Cookies");
+        std::fs::write(&metadata, b"").unwrap();
+        std::fs::write(&cookies, b"browser cookie data").unwrap();
+        let error = read_profile_meta(&metadata).unwrap_err();
+        assert!(error.detail.contains("EOF"));
+        assert!(error.detail.contains("Browser data is separate"));
+        assert!(error.detail.contains("do not delete the profile directory"));
+        assert!(!error.detail.contains("delete/recreate"));
+        assert_eq!(std::fs::read(cookies).unwrap(), b"browser cookie data");
     }
 
     #[test]
@@ -450,6 +535,34 @@ mod tests {
         let dir = touch_profile(tmp.path(), "brave", "work");
         delete("work", "work", Some("brave"), Some(tmp.path())).unwrap();
         assert!(!dir.exists());
+    }
+
+    /// A link in the profile root is not a profile: listing skips it, so
+    /// prune never sees it, and delete refuses it before taking a lock or
+    /// removing anything in the directory it names.
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_profile_directory_is_never_emptied() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let keep = outside.path().join("keep.txt");
+        std::fs::write(&keep, b"not a profile").unwrap();
+        std::fs::create_dir_all(tmp.path().join("brave")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), tmp.path().join("brave").join("linked"))
+            .unwrap();
+
+        assert!(list(Some(tmp.path())).unwrap().is_empty());
+        assert!(
+            prune(Duration::ZERO, false, Some(tmp.path()))
+                .unwrap()
+                .is_empty()
+        );
+        let err = delete("linked", "linked", Some("brave"), Some(tmp.path()))
+            .err()
+            .unwrap();
+        assert_eq!(err.error_code, ErrorCode::InvalidArgument);
+        assert_eq!(std::fs::read(&keep).unwrap(), b"not a profile");
+        assert!(!lock::lockfile(outside.path()).exists());
     }
 
     #[test]
@@ -549,7 +662,71 @@ mod tests {
         )
         .unwrap();
         let err = info("work", Some("brave"), Some(tmp.path())).err().unwrap();
-        assert_eq!(err.error_code, ErrorCode::ProfileInvalidName);
+        assert_eq!(err.error_code, ErrorCode::IoError);
+        assert!(!err.retryable);
         assert!(err.detail.contains("backend"));
+    }
+
+    /// The name is valid; only the file is wrong, so the code must not blame
+    /// the name.
+    #[test]
+    fn corrupt_metadata_is_not_reported_as_an_invalid_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("brave").join("work");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("afhttp-profile.json"), b"{not json").unwrap();
+        let err = info("work", Some("brave"), Some(tmp.path())).err().unwrap();
+        assert_eq!(err.error_code, ErrorCode::IoError);
+        assert!(!err.retryable);
+
+        let mut meta = meta::ProfileMeta::new("other", "brave");
+        std::fs::write(
+            dir.join("afhttp-profile.json"),
+            serde_json::to_string(&meta).unwrap(),
+        )
+        .unwrap();
+        let err = info("work", Some("brave"), Some(tmp.path())).err().unwrap();
+        assert_eq!(err.error_code, ErrorCode::IoError);
+        assert!(err.detail.contains("name"));
+
+        meta.name = "work".into();
+        meta.schema_version = 1;
+        std::fs::write(
+            dir.join("afhttp-profile.json"),
+            serde_json::to_string(&meta).unwrap(),
+        )
+        .unwrap();
+        let err = info("work", Some("brave"), Some(tmp.path())).err().unwrap();
+        assert_eq!(err.error_code, ErrorCode::IoError);
+    }
+
+    /// The removal holds the lock, so a host cannot claim the profile while
+    /// its data is being removed; and a held lock stops the removal before
+    /// anything is touched.
+    #[test]
+    fn removal_holds_the_profile_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = touch_profile(tmp.path(), "chromium", "work");
+        std::fs::create_dir_all(dir.join("Default")).unwrap();
+        std::fs::write(dir.join("Default").join("Cookies"), b"c").unwrap();
+
+        let held = lock::Guard::acquire(&dir).unwrap();
+        let err = remove_profile_dir(&dir).unwrap_err();
+        assert_eq!(err.error_code, ErrorCode::ProfileLocked);
+        assert!(dir.join("Default").join("Cookies").exists());
+        drop(held);
+
+        remove_profile_dir(&dir).unwrap();
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn prune_skips_a_profile_locked_after_listing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = touch_profile(tmp.path(), "chromium", "work");
+        let _held = lock::Guard::acquire(&dir).unwrap();
+        let removed = prune(Duration::from_secs(0), false, Some(tmp.path())).unwrap();
+        assert!(removed.is_empty());
+        assert!(dir.exists());
     }
 }

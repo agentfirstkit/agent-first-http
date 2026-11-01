@@ -200,6 +200,7 @@ async fn run_inner(args: Args) -> Result<(), FetchRunError> {
                 .map(PathBuf::from)
         });
         if let Some(jar) = cookie_jar {
+            explicit_jar_needs_a_host_profile(host.is_some())?;
             builder = builder.cookie_jar(jar);
         }
     }
@@ -210,34 +211,21 @@ async fn run_inner(args: Args) -> Result<(), FetchRunError> {
                 && result.next_action.is_some()
                 && let Some(endpoint) = takeover_endpoint.as_deref()
             {
+                result.prepare_takeover_retry(recommended_endpoint, explicit_profile.as_deref());
                 let tab_id = result.tab_id.as_ref().map(|t| t.as_str().to_string());
                 let handoff =
                     mint_handoff(endpoint, takeover_token.as_ref(), tab_id.as_deref()).await;
-                let handoff = match handoff {
-                    Ok(handoff) => handoff,
-                    Err(err) => {
-                        // The tab was held open for the human this URL was
-                        // meant to reach; with no URL minted, nobody is
-                        // coming. Best-effort close so a failed handoff does
-                        // not leak a tab still working on the wall.
-                        if let Some(tab) = tab_id.as_deref() {
-                            let _ = client
-                                .cdp("Target.closeTarget")
-                                .params(serde_json::json!({ "targetId": tab }))
-                                .send()
-                                .await;
-                        }
-                        return Err(err.into());
-                    }
-                };
-                result.attach_takeover_with_context(
-                    handoff.takeover_url_secret,
-                    Some(handoff.takeover_url_expires_at_rfc3339),
-                    Some(handoff.takeover_url_ttl_s),
-                    Some(handoff.takeover_url_scope),
-                    recommended_endpoint,
-                    explicit_profile.as_deref(),
-                );
+                match handoff {
+                    Ok(handoff) => result.attach_takeover_with_context(
+                        handoff.takeover_url_secret,
+                        Some(handoff.takeover_url_expires_at_rfc3339),
+                        Some(handoff.takeover_url_ttl_s),
+                        Some(handoff.takeover_url_scope),
+                        recommended_endpoint,
+                        explicit_profile.as_deref(),
+                    ),
+                    Err(error) => retain_after_handoff_failure(&mut result, error),
+                }
             }
             if takeover {
                 Ok(output::emit_revealing_takeover("fetch", &result)?)
@@ -427,6 +415,24 @@ fn resolve_want(want: &[String]) -> Option<std::collections::BTreeSet<Artifact>>
 /// Construct the SDK client for this fetch: a remote connection when
 /// `--endpoint-url` is set, the HTTP-only client for `--render none`, or an
 /// inline ephemeral host otherwise (lazy for `auto`, eager for `always`).
+/// A cookie jar lives inside a host profile, so naming one is only meaningful
+/// when there is a host profile to check it against. Without a host — a plain
+/// HTTP fetch, or the inline ephemeral browser — nothing could confirm the path
+/// is a profile's jar, and accepting it would let any file on disk serve as
+/// one. The host-side check that a named jar is the profile's own lives in the
+/// SDK's jar resolution.
+fn explicit_jar_needs_a_host_profile(has_host: bool) -> Result<(), Error> {
+    if has_host {
+        return Ok(());
+    }
+    Err(Error::new(
+        ErrorCode::InvalidArgument,
+        "--cookie-jar/AFHTTP_COOKIE_JAR names a host profile's cookie jar, and this fetch has \
+         no host profile: the jar is profile-internal, never an arbitrary path. Pass \
+         --endpoint-url and --profile to use a profile's jar, or drop --cookie-jar",
+    ))
+}
+
 async fn build_client(
     args: &Args,
     host: Option<&Resolved>,
@@ -515,6 +521,18 @@ fn parse_cookie_arg(raw: &str) -> Result<FetchCookie, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_named_cookie_jar_without_a_host_profile_is_refused() {
+        let error = explicit_jar_needs_a_host_profile(false).unwrap_err();
+        assert_eq!(error.error_code, ErrorCode::InvalidArgument);
+        assert!(
+            error.detail.contains("profile-internal"),
+            "{}",
+            error.detail
+        );
+        assert!(explicit_jar_needs_a_host_profile(true).is_ok());
+    }
 
     /// A resolved token is a `SecretString`, so a test that asserts on one has
     /// to say so — the same friction production code gets.
@@ -782,5 +800,43 @@ mod tests {
     fn cookie_arg_rejects_missing_equals() {
         let err = parse_cookie_arg("sid").err().unwrap();
         assert_eq!(err.error_code, ErrorCode::InvalidArgument);
+    }
+}
+
+/// Handoff failure is independent of capture success. Keep the artifacts and
+/// tab available for inspection even when the display is unavailable.
+fn retain_after_handoff_failure(result: &mut crate::sdk::fetch::FetchResult, error: Error) {
+    result.warnings.push(crate::sdk::fetch::result::Warning {
+        artifact: Artifact::RenderedHtml,
+        code: error.error_code,
+        detail: format!("takeover URL unavailable; tab_id and captured artifacts retained for manual review: {}", error.detail),
+    });
+}
+
+#[cfg(test)]
+mod handoff_failure_tests {
+    use super::*;
+    #[test]
+    fn failed_handoff_retains_tab_artifacts_and_review_action() {
+        use crate::sdk::fetch::result::{FetchResult, NextAction, Trace};
+        let mut result = FetchResult::new(
+            crate::shared::ids::RequestId("request".into()),
+            "https://example.test/".into(),
+            Trace::default(),
+        );
+        result.tab_id = Some(TabId::new("retained"));
+        result.body_file = Some(PathBuf::from("body.html"));
+        result.next_action = Some(NextAction::human_takeover(&result.request_url));
+        result.prepare_takeover_retry(None, Some("work"));
+        retain_after_handoff_failure(
+            &mut result,
+            Error::new(ErrorCode::CdpUnavailable, "browser process exited"),
+        );
+        assert_eq!(result.tab_id.as_ref().unwrap().as_str(), "retained");
+        assert!(result.body_file.is_some());
+        let next = result.next_action.unwrap();
+        assert!(next.takeover_url_secret.is_none());
+        assert!(next.recommended_command.contains("--tab retained"));
+        assert!(result.warnings[0].detail.contains("browser process exited"));
     }
 }

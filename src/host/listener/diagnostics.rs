@@ -1,6 +1,6 @@
 //! `GET /diagnostics` — auth-required endpoint that returns host status and
 //! per-profile browser stderr tails. Gives agents structured follow-up for
-//! `tab_crashed` or `browser_launch_failed` without needing shell access.
+//! a crashed browser or `browser_launch_failed` without needing shell access.
 
 use axum::extract::State;
 use axum::response::{IntoResponse, Json, Response};

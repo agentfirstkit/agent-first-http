@@ -6,6 +6,7 @@ pub mod artifacts;
 pub(crate) mod deadline;
 pub(crate) mod page_classification;
 pub mod pipeline;
+pub mod readiness;
 pub mod result;
 pub mod wait;
 pub mod writer;
@@ -79,8 +80,8 @@ pub(crate) struct NetworkCapture {
     pub(crate) capture_sse: bool,
 }
 
-/// Retry policy. The fetch is retried only when the error carries
-/// `retryable: true`.
+/// Retry policy. The fetch is retried only for GET/HEAD and only when the
+/// error carries `retryable: true`.
 #[derive(Clone)]
 pub(crate) struct RetryOptions {
     /// Number of additional attempts after the first one. `0` (the default)
@@ -391,8 +392,9 @@ impl FetchBuilder {
     }
 
     /// Number of additional attempts after the first. `0` (default)
-    /// keeps the single-attempt behavior. Retries only fire when the
-    /// pipeline error has `retryable: true`.
+    /// keeps the single-attempt behavior. Retries only fire for GET and
+    /// HEAD, and only when the pipeline error has `retryable: true`; any
+    /// other method is sent once.
     #[must_use]
     pub fn retry(mut self, n: u32) -> Self {
         self.retry.attempts = n;
@@ -477,8 +479,8 @@ impl FetchBuilder {
     }
 
     /// Execute the fetch, with retries when configured. Retries only
-    /// fire for errors carrying `retryable: true`; any other error
-    /// short-circuits immediately.
+    /// fire for GET/HEAD errors carrying `retryable: true`; any other
+    /// error short-circuits immediately.
     pub async fn send(self) -> Result<FetchResult, Error> {
         self.send_detailed().await.map_err(FetchError::into_error)
     }
@@ -502,7 +504,7 @@ impl FetchBuilder {
         reason = "FetchResult is the larger variant; see the size assertion in this module"
     )]
     pub async fn send_detailed(self) -> Result<FetchResult, FetchError> {
-        if self.retry.attempts == 0 {
+        if self.retry.attempts == 0 || !self.method_is_idempotent() {
             return execute_once_with_timeout(self).await;
         }
         let max_attempts = self.retry.attempts.saturating_add(1);
@@ -518,6 +520,19 @@ impl FetchBuilder {
                 Err(e) => return Err(e),
             }
         }
+    }
+}
+
+impl FetchBuilder {
+    /// True for GET and HEAD, the methods afhttp may send more than once
+    /// (a retry, or a browser attempt after the HTTP one). A failed POST may
+    /// still have reached the server, so sending it again could repeat its
+    /// effect.
+    pub(crate) fn method_is_idempotent(&self) -> bool {
+        self.request
+            .method
+            .as_deref()
+            .is_none_or(|m| m.eq_ignore_ascii_case("GET") || m.eq_ignore_ascii_case("HEAD"))
     }
 }
 
@@ -538,7 +553,12 @@ async fn execute_once_with_timeout(builder: FetchBuilder) -> Result<FetchResult,
     let timeout = builder.timeout;
     let render_mode = builder.render.as_trace();
     let deadline = deadline::FetchDeadline::new(timeout, render_mode);
-    match tokio::time::timeout(timeout, pipeline::execute(builder, deadline.clone())).await {
+    // Every stage ends at `timeout` on the deadline's own clock; this outer
+    // timer is for a pipeline stuck between stages. It runs longer by the tab
+    // cleanup's bound so that a stage's timeout, which is the common case,
+    // gets to close the tab it opened instead of being cancelled mid-close.
+    let whole = timeout.saturating_add(pipeline::TARGET_CLEANUP_TIMEOUT);
+    match tokio::time::timeout(whole, pipeline::execute(builder, deadline.clone())).await {
         Ok(Ok(result)) => Ok(result),
         Ok(Err(error)) => Err(FetchError::new(error, deadline.snapshot())),
         Err(_) => {

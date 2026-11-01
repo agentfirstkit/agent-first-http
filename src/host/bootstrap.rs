@@ -43,7 +43,8 @@ pub struct HostArgs {
     /// (`design.md` "Browsing environments are isolated"), the host
     /// never honors ambient `HTTP_PROXY`/`HTTPS_PROXY` — this flag is
     /// the ONLY way to route browser traffic through a proxy.
-    /// Format: `http://user:pass@host:port` or `socks5://host:port`.
+    /// Format: `http://host:port` or `socks5://host:port`. Credentials are
+    /// refused: the browser would receive them on its command line.
     pub proxy: Option<String>,
     /// Maximum number of recent requests to keep in the ring. `0` (default)
     /// disables the `/recent-requests` endpoint entirely.

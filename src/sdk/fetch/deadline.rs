@@ -48,6 +48,7 @@ impl FetchDeadline {
             timeout,
             state: Arc::new(Mutex::new(TraceState {
                 trace: Trace {
+                    retained_tab_id: None,
                     render_decision: RenderDecision::HttpOnly,
                     render_mode,
                     render_used: false,
@@ -255,6 +256,7 @@ impl FetchDeadline {
 
 fn fallback_trace(timeout_ms: u64) -> Trace {
     Trace {
+        retained_tab_id: None,
         render_decision: RenderDecision::HttpOnly,
         render_mode: TraceRenderMode::Auto,
         render_used: false,

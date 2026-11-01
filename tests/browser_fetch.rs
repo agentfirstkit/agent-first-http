@@ -25,6 +25,7 @@ use agent_first_http::host::{browser, listener::router_for_tests, listener::test
 use agent_first_http::sdk::Client;
 use agent_first_http::sdk::fetch::{RenderMode, Wait};
 use agent_first_http::shared::artifacts::Artifact;
+use agent_first_http::shared::error::ErrorCode;
 use agent_first_http::shared::ids::TabId;
 use tokio::net::TcpListener;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -641,6 +642,104 @@ async fn wait_until_closed(client: &Client, target_id: &str) -> bool {
 }
 
 #[tokio::test]
+async fn takeover_preserves_explicit_tabs_for_403_unknown_and_incomplete_content() {
+    let Some((endpoint, tmp, _guard)) = spawn_host_with_browser().await else {
+        return;
+    };
+    let fixture = support::fixture_server::spawn().await;
+    let client = Client::connect(&endpoint).unwrap();
+    for (path, wait, expected_status, wall) in [
+        ("browser-check-403.html", Wait::Load, 403, true),
+        ("unknown-403.html", Wait::Load, 403, false),
+        ("unknown-content.html", Wait::Load, 200, false),
+        ("price-changing.html", Wait::Auto, 200, false),
+    ] {
+        let target = client
+            .cdp("Target.createTarget")
+            .params(serde_json::json!({"url":"about:blank"}))
+            .send()
+            .await
+            .unwrap();
+        let id = target["targetId"].as_str().unwrap();
+        let result = client
+            .fetch(format!("{}/{path}", fixture.base_url()))
+            .render(RenderMode::Always)
+            .tab(TabId::new(id))
+            .keep_tab_open(true)
+            .wait(wait)
+            .timeout(Duration::from_secs(4))
+            .want([Artifact::Text])
+            .out_dir(tmp.path().to_path_buf())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            result.status, expected_status,
+            "{path}: {:?}",
+            result.warnings
+        );
+        assert_eq!(result.page_kind.is_some(), wall, "{path}");
+        assert!(
+            result.next_action.is_some(),
+            "{path}: {:?}",
+            result.warnings
+        );
+        assert_eq!(result.tab_id.as_ref().map(TabId::as_str), Some(id));
+        client
+            .cdp("Page.bringToFront")
+            .tab(TabId::new(id))
+            .send()
+            .await
+            .unwrap();
+        assert!(target_is_open(&client, id).await, "{path}");
+    }
+}
+
+#[tokio::test]
+async fn completed_takeover_recycles_the_final_page_without_killing_browser() {
+    let Some((endpoint, tmp, _guard)) = spawn_host_with_browser().await else {
+        return;
+    };
+    let fixture = support::fixture_server::spawn().await;
+    let client = Client::connect(&endpoint).unwrap();
+    let targets = client.cdp("Target.getTargets").send().await.unwrap();
+    let pages: Vec<_> = targets["targetInfos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|target| target["type"] == "page")
+        .collect();
+    let id = pages[0]["targetId"].as_str().unwrap();
+    // This host is isolated; leave exactly one page to exercise the guard.
+    for page in pages.iter().skip(1) {
+        client
+            .cdp("Target.closeTarget")
+            .params(serde_json::json!({"targetId":page["targetId"]}))
+            .send()
+            .await
+            .unwrap();
+    }
+    let result = client
+        .fetch(format!("{}/plain.html", fixture.base_url()))
+        .render(RenderMode::Always)
+        .tab(TabId::new(id))
+        .keep_tab_open(true)
+        .wait(Wait::Load)
+        .timeout(Duration::from_secs(10))
+        .want([Artifact::Text])
+        .out_dir(tmp.path().to_path_buf())
+        .send()
+        .await
+        .unwrap();
+    assert!(result.next_action.is_none(), "{:?}", result.warnings);
+    assert!(result.tab_id.is_none(), "{:?}", result.warnings);
+    assert!(wait_until_closed(&client, id).await);
+    let health = client.health().await.unwrap();
+    assert!(health.backend.unwrap().connected);
+    assert!(health.tabs_active >= 1);
+}
+
+#[tokio::test]
 async fn takeover_intent_without_a_wall_closes_the_created_tab() {
     let Some((endpoint, tmp, _browser_guard)) = spawn_host_with_browser().await else {
         println!("(skipping: no chromium)");
@@ -754,6 +853,62 @@ async fn takeover_intent_with_a_wall_keeps_the_tab_open() {
     assert!(
         wait_until_closed(&client, tab_id.as_str()).await,
         "completed takeover must close the tab"
+    );
+}
+
+#[tokio::test]
+async fn embedded_turnstile_with_animation_is_ready_and_preserves_svg_nodes() {
+    let Some((endpoint, tmp, _browser_guard)) = spawn_host_with_browser().await else {
+        println!("(skipping: no chromium)");
+        return;
+    };
+    let fixture = support::fixture_server::spawn().await;
+    let client = Client::connect(&endpoint).expect("client");
+    let result = client
+        .fetch(format!("{}/embedded-turnstile.html", fixture.base_url()))
+        .render(RenderMode::Always)
+        .keep_tab_open(true)
+        .wait(Wait::Auto)
+        .timeout(Duration::from_secs(8))
+        .want([Artifact::Text, Artifact::Observation])
+        .out_dir(tmp.path().to_path_buf())
+        .send()
+        .await
+        .expect("fetch");
+    assert!(result.next_action.is_none(), "{:?}", result.warnings);
+    assert!(result.tab_id.is_none(), "clean takeover tab must close");
+    assert_eq!(
+        result.trace.capture_reason.as_deref(),
+        Some("wait_satisfied")
+    );
+    assert_eq!(result.trace.dom_stable, Some(true));
+    assert_eq!(result.trace.text_stable, Some(true));
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    let obs: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(result.observation_file.as_ref().expect("observation"))
+            .expect("read observation"),
+    )
+    .expect("observation JSON");
+    let nodes = obs["nodes"].as_array().expect("nodes");
+    assert_eq!(
+        obs["forms"][0]["action"],
+        format!("{}/submit", fixture.base_url())
+    );
+    let svg_link = nodes
+        .iter()
+        .find(|node| node["name"] == "Vector Docs")
+        .expect("SVG link");
+    assert_eq!(
+        svg_link["href"],
+        format!("{}/plain.html", fixture.base_url())
+    );
+    let svg_use = nodes
+        .iter()
+        .find(|node| node["role"] == "use")
+        .expect("SVG use");
+    assert_eq!(
+        svg_use["href"],
+        format!("{}/embedded-turnstile.html#symbol", fixture.base_url())
     );
 }
 
@@ -1163,6 +1318,36 @@ async fn wait_load_can_capture_before_delayed_xhr_settles() {
 }
 
 #[tokio::test]
+async fn wait_auto_samples_content_while_a_subframe_holds_load() {
+    let Some((endpoint, tmp, _browser_guard)) = spawn_host_with_browser().await else {
+        println!("(skipping: no chromium)");
+        return;
+    };
+    let fixture = support::fixture_server::spawn().await;
+    let client = Client::connect(&endpoint).expect("client");
+    let result = client
+        .fetch(format!("{}/never-frame.html", fixture.base_url()))
+        .render(RenderMode::Always)
+        .wait(Wait::Auto)
+        .timeout(Duration::from_secs(4))
+        .want([Artifact::Text, Artifact::Network])
+        .out_dir(tmp.path().to_path_buf())
+        .send()
+        .await
+        .expect("fetch");
+    assert_eq!(
+        result.trace.capture_reason.as_deref(),
+        Some("readiness_timeout")
+    );
+    assert_eq!(result.trace.network_quiet, Some(false));
+    assert_eq!(result.trace.dom_stable, Some(true));
+    assert_eq!(result.trace.text_stable, Some(true));
+    let text =
+        std::fs::read_to_string(result.text_file.as_ref().expect("text")).expect("read text");
+    assert!(text.contains("Ready content with a pending subframe"));
+}
+
+#[tokio::test]
 async fn wait_auto_reports_pending_xhr_without_hanging() {
     let Some((endpoint, tmp, _browser_guard)) = spawn_host_with_browser().await else {
         println!("(skipping: no chromium)");
@@ -1371,7 +1556,8 @@ async fn browser_navigation_download_timeout_uses_whole_fetch_budget() {
         .unwrap_err();
     assert_eq!(
         error.error_code,
-        agent_first_http::shared::error::ErrorCode::NavigationTimeout
+        agent_first_http::shared::error::ErrorCode::NavigationTimeout,
+        "{error:?}"
     );
     assert!(
         started.elapsed() < Duration::from_millis(2800),
@@ -1434,4 +1620,187 @@ async fn browser_navigation_download_is_captured_in_profile() {
         result.observation_file.is_none(),
         "downloads are not page observations"
     );
+}
+
+#[tokio::test]
+async fn selector_stable_reports_partial_readiness_without_hiding_requests() {
+    use agent_first_http::sdk::fetch::readiness::{ReadinessState, RequestScope};
+    let Some((endpoint, tmp, _browser_guard)) = spawn_host_with_browser().await else {
+        return;
+    };
+    let fixture = support::fixture_server::spawn().await;
+    let client = Client::connect(&endpoint).expect("client");
+    let result = client
+        .fetch(format!("{}/rating-pending.html", fixture.base_url()))
+        .render(RenderMode::Always)
+        .wait(Wait::SelectorStable("#prices".into()))
+        .network_redact(false)
+        .timeout(Duration::from_secs(6))
+        .want([Artifact::Text])
+        .out_dir(tmp.path().to_path_buf())
+        .send()
+        .await
+        .expect("fetch");
+    let readiness = result.readiness.as_ref().expect("readiness");
+    assert!(
+        readiness.wait_satisfied && !readiness.timed_out,
+        "{readiness:?}"
+    );
+    assert_eq!(readiness.main_document, ReadinessState::Ready);
+    assert_eq!(readiness.target_content, ReadinessState::Ready);
+    assert_eq!(readiness.ancillary, ReadinessState::Incomplete);
+    assert_eq!(result.trace.network_quiet, Some(false));
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|w| w.code == ErrorCode::NetworkNotIdle)
+    );
+    assert!(
+        !result
+            .warnings
+            .iter()
+            .any(|w| w.code == ErrorCode::ReadinessTimeout)
+    );
+    let pending = readiness.pending_requests.first().expect("rating request");
+    assert_eq!(pending.scope, RequestScope::Ancillary);
+    assert!(!pending.blocks_wait);
+    assert_eq!(pending.resource_type, "Document");
+    assert!(pending.frame_id.is_some());
+    assert!(pending.waited_ms >= 500);
+    // The SDK reports the request as the page made it; only CLI output redacts.
+    assert!(
+        pending
+            .request_url
+            .ends_with("token_secret=diagnostic-canary&safe=ok")
+    );
+    agent_first_data::assert_no_lint_findings(&serde_json::to_value(readiness).unwrap()).unwrap();
+}
+
+#[tokio::test]
+async fn selector_stable_keeps_loading_prices_and_required_frames_incomplete() {
+    use agent_first_http::sdk::fetch::readiness::{ReadinessState, RequestScope};
+    let Some((endpoint, tmp, _browser_guard)) = spawn_host_with_browser().await else {
+        return;
+    };
+    let fixture = support::fixture_server::spawn().await;
+    let client = Client::connect(&endpoint).expect("client");
+    let cross_fixture = support::fixture_server::spawn().await;
+    let cross_url = cross_fixture.base_url().replace("127.0.0.1", "localhost");
+    let paths = vec![
+        "price-pending.html".to_string(),
+        "price-frame-pending.html".to_string(),
+        "price-shadow-frame-pending.html".to_string(),
+        "price-changing.html".to_string(),
+        format!("price-frame.html?cross={cross_url}/never.json"),
+        format!("price-frame.html?cross={cross_url}/price-stream.html"),
+    ];
+    for (index, path) in paths.into_iter().enumerate() {
+        let result = client
+            .fetch(format!("{}/{path}", fixture.base_url()))
+            .render(RenderMode::Always)
+            .wait(Wait::SelectorStable("#prices".into()))
+            .timeout(Duration::from_secs(3))
+            .want([Artifact::Text])
+            // A URL with `?` and `:` is not a valid Windows path segment.
+            .out_dir(tmp.path().join(format!("case-{index}")))
+            .send()
+            .await
+            .expect("fetch");
+        let readiness = result.readiness.as_ref().expect("readiness");
+        assert!(
+            !readiness.wait_satisfied && readiness.timed_out,
+            "{path}: {readiness:?}"
+        );
+        assert_eq!(
+            readiness.target_content,
+            ReadinessState::Incomplete,
+            "{path}: {readiness:?}"
+        );
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.code == ErrorCode::ReadinessTimeout)
+        );
+        if path != "price-changing.html" {
+            assert!(
+                readiness
+                    .pending_requests
+                    .iter()
+                    .any(|r| r.blocks_wait && r.scope == RequestScope::Target)
+            );
+        } else {
+            assert!(!readiness.target_text_stable);
+            assert_eq!(result.trace.network_quiet, Some(true));
+        }
+    }
+}
+
+#[tokio::test]
+async fn selector_stable_waits_for_price_hydration_and_reads_frame_content() {
+    use agent_first_http::sdk::fetch::readiness::ReadinessState;
+    let Some((endpoint, tmp, _browser_guard)) = spawn_host_with_browser().await else {
+        return;
+    };
+    let fixture = support::fixture_server::spawn().await;
+    let client = Client::connect(&endpoint).expect("client");
+    for path in ["price-delayed.html", "price-frame.html"] {
+        let result = client
+            .fetch(format!("{}/{path}", fixture.base_url()))
+            .render(RenderMode::Always)
+            .wait(Wait::SelectorStable("#prices".into()))
+            .timeout(Duration::from_secs(6))
+            .want([Artifact::Content])
+            .out_dir(tmp.path().join(path))
+            .send()
+            .await
+            .expect("fetch");
+        let readiness = result.readiness.as_ref().expect("readiness");
+        assert!(
+            readiness.wait_satisfied && !readiness.timed_out,
+            "{path}: {readiness:?}"
+        );
+        assert_eq!(readiness.target_content, ReadinessState::Ready);
+        let content =
+            std::fs::read_to_string(result.content_file.as_ref().expect("content")).unwrap();
+        assert!(content.contains('€'), "{content}");
+        if path == "price-delayed.html" {
+            assert!(content.contains("ready"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn selector_stable_missing_regions_and_real_walls_are_not_verified() {
+    use agent_first_http::sdk::fetch::readiness::ReadinessState;
+    let Some((endpoint, tmp, _browser_guard)) = spawn_host_with_browser().await else {
+        return;
+    };
+    let fixture = support::fixture_server::spawn().await;
+    let client = Client::connect(&endpoint).expect("client");
+    for (path, selector) in [
+        ("plain.html", "#missing"),
+        ("cloudflare-turnstile.html", "h1"),
+    ] {
+        let result = client
+            .fetch(format!("{}/{path}", fixture.base_url()))
+            .render(RenderMode::Always)
+            .wait(Wait::SelectorStable(selector.into()))
+            .timeout(Duration::from_secs(3))
+            .want([Artifact::Text])
+            .out_dir(tmp.path().join(path))
+            .send()
+            .await
+            .expect("fetch");
+        let readiness = result.readiness.as_ref().expect("readiness");
+        assert!(!readiness.wait_satisfied);
+        if path == "plain.html" {
+            assert_eq!(readiness.target_content, ReadinessState::Incomplete);
+            assert!(readiness.timed_out);
+        } else {
+            assert_eq!(readiness.target_content, ReadinessState::Blocked);
+            assert!(result.next_action.is_some());
+        }
+    }
 }

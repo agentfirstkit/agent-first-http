@@ -126,18 +126,17 @@ async fn ensure_file_input(
     let is_input = node["nodeName"]
         .as_str()
         .is_some_and(|name| name.eq_ignore_ascii_case("input"));
-    let attrs = node["attributes"].as_array().cloned().unwrap_or_default();
-    let mut is_file = false;
-    for pair in attrs.chunks(2) {
-        if pair.first().and_then(|v| v.as_str()) == Some("type")
-            && pair
-                .get(1)
-                .and_then(|v| v.as_str())
+    let attrs = node["attributes"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let (pairs, _) = attrs.as_chunks::<2>();
+    let is_file = pairs.iter().any(|[name, value]| {
+        name.as_str() == Some("type")
+            && value
+                .as_str()
                 .is_some_and(|value| value.eq_ignore_ascii_case("file"))
-        {
-            is_file = true;
-        }
-    }
+    });
     if is_input && is_file {
         Ok(())
     } else {

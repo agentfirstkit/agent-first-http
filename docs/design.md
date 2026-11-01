@@ -42,7 +42,7 @@ Identity is therefore opt-in, not the baseline. Most acquisition needs no identi
 
 An `afhttp host` binds exactly one profile: one browser process tree, one identity. There is no multi-profile host, no in-process "session" or browser-context primitive, and no per-fetch fresh context. A host never multiplexes identities internally. To run many identities in parallel, run many hosts.
 
-This is a deliberate rejection of the obvious resource optimization — packing many in-memory browser contexts into one process. That optimization does buy cheap cookie/storage isolation, but it cannot deliver **human takeover**, which is the capability that justifies a persistent identity in the first place. Two facts force the issue:
+This is a deliberate rejection of the obvious resource optimization — packing many in-memory browser contexts into one process. That optimization does buy cheap cookie/storage isolation, but it cannot deliver **human takeover**, which is the capability that justifies a persistent identity in the first place. These facts force the issue:
 
 1. **Takeover must be OS-level.** A human steps in to complete a login or solve a challenge by driving a real headful browser through real-display takeover (currently backed by KasmVNC). Synthetic CDP input (`Input.dispatch*`) is insufficient for real login flows in practice, so observation-over-CDP is read-only and the interactive path is OS-level only.
 2. **Headful is a process-level property.** Every browser context inside one process shares one display and one input focus. You cannot make one context headful and another headless, and you cannot scope an OS-level screen to a single context.
@@ -55,7 +55,7 @@ The resource cost of this choice is small and bounded. Multiple hosts coexist in
 
 `afhttp` is not a remote control for the user's existing browser. It runs its own browser process tree against its own state directory, and never reads or writes data that belongs to anything else on the machine.
 
-The invariant has three layers:
+The invariant is layered:
 
 1. **No interaction with system-owned browser data.** The host never reads, writes, copies, references, or imports from the user's real browser profiles (`~/.config/google-chrome/`, `~/Library/Application Support/Firefox/`, `%LOCALAPPDATA%\Google\Chrome\`, etc.). The same applies to system keychains, OS cookie stores, and shared browser binaries' default state. Agents that need an identity migrate it explicitly through a fresh login inside an `afhttp` profile.
 
@@ -68,8 +68,8 @@ What the invariant *does not* claim: the engine itself (Chromium, Firefox) still
 Concrete rules the implementation enforces:
 
 - The `--profile <name>` argument is validated to be a flat name; path separators and `..` are rejected so a malicious name cannot escape the profile root.
-- The cookie jar lives inside the profile directory. `--cookie-jar <path>` exists as a testing override only; the default path is always profile-internal and cannot be redirected to point at a different profile's jar in normal use.
-- Browser traffic never inherits ambient `HTTP_PROXY` / `HTTPS_PROXY`; use `--proxy-url` explicitly. Browser state never inherits a default engine profile because afhttp always supplies `--user-data-dir`. Browser processes never inherit the parent environment wholesale; every backend uses `env_clear` plus the documented allowlist and explicit `--engine-env` entries.
+- The cookie jar lives inside the profile directory. `--cookie-jar` can only name the active profile's own jar; any other path is refused, so a fetch can never be pointed at another profile's jar. The jar refuses a cookie whose `Domain` attribute is a public suffix (`github.io`, `co.uk`, …), so one site cannot plant a cookie every other site under that suffix would receive, and a plaintext `http://` response can neither set a `Secure` cookie nor replace one.
+- Browser traffic never inherits ambient `HTTP_PROXY` / `HTTPS_PROXY`; use `--proxy-url` explicitly. A browser backend refuses a proxy URL carrying credentials (`http://user:pass@host`) rather than putting them on the browser's command line, where Chromium ignores them anyway; proxy authentication is not supported for browser traffic. Browser state never inherits a default engine profile because afhttp always supplies `--user-data-dir`. Browser processes never inherit the parent environment wholesale; every backend uses `env_clear` plus the documented allowlist and explicit `--engine-env` entries.
 - Profile deletion is local-only (`afhttp profile delete <name>`); the host's HTTP/CDP surface does not expose a "destroy any profile" endpoint, so a stolen bearer token cannot wipe another profile's state.
 
 ### Server errors are errors
@@ -93,8 +93,8 @@ redaction does not rewrite the `body` artifact.
 Network logs are different: they are a tool-originated capture of both browser
 requests and server responses, and can contain cookies, bearer tokens,
 credential-bearing URL query parameters, and `Set-Cookie`. `network.json`
-redacts credential-bearing headers, URL userinfo, and known secret query
-parameters by default. Agents that need byte-for-byte traffic capture must opt
+redacts credential-bearing headers by default; URLs are recorded as the page had
+them, and URL credentials are redacted only where afhttp emits an AFDATA event. Agents that need byte-for-byte traffic capture must opt
 out explicitly with `--no-network-redact`, which can expose tokens and PII.
 `--capture-ws` and `--capture-sse` have the same risk for frame/event payloads.
 

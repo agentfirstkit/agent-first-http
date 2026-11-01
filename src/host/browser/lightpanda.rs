@@ -97,7 +97,9 @@ pub(super) async fn launch(args: &HostArgs) -> Result<BrowserHandle, Error> {
         download_dir,
         _ephemeral_dir: ephemeral,
         _profile_lock: profile_lock,
-        _keepalive: BackendKeepalive::Subprocess { child },
+        _keepalive: BackendKeepalive::Subprocess {
+            child: tokio::sync::Mutex::new(child),
+        },
         stderr_ring,
     })
 }

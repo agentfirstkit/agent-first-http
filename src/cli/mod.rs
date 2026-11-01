@@ -11,8 +11,8 @@ pub mod token_source;
 use std::process::ExitCode;
 
 use agent_first_data::{
-    BoundOutcome, OutputPlan, OutputTo, cli_error_event, cli_help_event, cli_parse_output,
-    cli_version_event, render_cli_reference,
+    BoundOutcome, OutputPlan, OutputTo, cli_error_event, cli_help_event, cli_version_event,
+    render_cli_reference,
 };
 
 use crate::shared::error::{Error, ErrorCode};
@@ -212,19 +212,16 @@ fn install_route(plan: &OutputPlan) -> Result<(), ExitCode> {
 }
 
 fn route_of(plan: &OutputPlan) -> OutputTo {
-    plan.destination()
-        .and_then(|destination| OutputTo::parse(destination).ok())
-        .unwrap_or(OutputTo::Split)
+    plan.output_to().unwrap_or(OutputTo::Split)
 }
 
 fn plan_format(plan: &OutputPlan) -> agent_first_data::OutputFormat {
-    plan.format()
-        .and_then(|format| cli_parse_output(format).ok())
+    plan.output_format()
         .unwrap_or(agent_first_data::OutputFormat::Json)
 }
 
 fn stream_of(plan: &OutputPlan) -> OutputTo {
-    if plan.destination() == Some("stderr") {
+    if plan.output_to() == Some(OutputTo::Stderr) {
         OutputTo::Stderr
     } else {
         OutputTo::Stdout

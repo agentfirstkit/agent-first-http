@@ -66,10 +66,11 @@ impl Guard {
 
 impl Drop for Guard {
     fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.file);
-        // Best-effort cleanup of the PID file; the lockfile itself stays
-        // so probes continue to find it.
+        // Best-effort cleanup of the PID file, before the unlock: afterwards
+        // the next owner may already have written its own. The lockfile
+        // itself stays so probes continue to find it.
         let _ = std::fs::remove_file(pidfile(&self.profile_dir));
+        let _ = FileExt::unlock(&self.file);
     }
 }
 
@@ -88,15 +89,22 @@ fn atomic_overwrite(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 /// Returns true if `profile_dir`'s lockfile is currently held by another
-/// process.
+/// process — or exists and cannot be opened, because a lock nobody can check
+/// is not one anybody may assume is free. Read access is enough to take the
+/// lock, so a read-only profile is still probed rather than guessed at.
+///
+/// Advisory: a probe answers "now", so anything that acts on the answer takes
+/// a [`Guard`] instead.
 pub fn probe(profile_dir: &Path) -> bool {
     let path = lockfile(profile_dir);
-    if !path.exists() {
+    // `symlink_metadata`, not `exists`: a lock file that is a dangling link is
+    // present and unopenable, not absent.
+    if std::fs::symlink_metadata(&path).is_err() {
         return false;
     }
-    let file = match OpenOptions::new().read(true).write(true).open(&path) {
+    let file = match OpenOptions::new().read(true).open(&path) {
         Ok(f) => f,
-        Err(_) => return false,
+        Err(_) => return true,
     };
     match file.try_lock_exclusive() {
         Ok(()) => {
@@ -125,7 +133,7 @@ pub fn status(profile_dir: &Path) -> LockStatus {
     }
 }
 
-fn lockfile(profile_dir: &Path) -> PathBuf {
+pub(crate) fn lockfile(profile_dir: &Path) -> PathBuf {
     profile_dir.join("afhttp-profile.lock")
 }
 
@@ -145,6 +153,17 @@ mod tests {
         assert!(probe(dir));
         drop(guard);
         assert!(!probe(dir));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unopenable_lockfile_reads_as_locked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        // A lock file that points nowhere cannot be opened, even by root.
+        std::os::unix::fs::symlink(dir.join("missing").join("lock"), lockfile(dir)).unwrap();
+        assert!(probe(dir));
+        assert!(Guard::acquire(dir).is_err());
     }
 
     #[test]

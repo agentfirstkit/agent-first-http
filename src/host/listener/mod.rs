@@ -9,10 +9,11 @@ pub mod health;
 pub mod profile;
 pub mod recent_requests;
 pub mod takeover_routes;
+pub(crate) mod target_ledger;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::SocketAddr;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use agent_first_ui::{UiAccessToken, UiExpiry};
@@ -105,9 +106,81 @@ pub struct AppState {
     /// per-target `attached` flag cannot say (a chromium-family host's own
     /// launcher keeps every page attached).
     cdp_clients: Arc<std::sync::atomic::AtomicUsize>,
+    /// Page targets whose creating `/cdp` connection ended without closing
+    /// them (see [`target_ledger`]). The reaper runs these on their own idle
+    /// clocks even while other drivers keep the browser busy: a tab nobody
+    /// will ever close again must not wait for everybody else to go quiet.
+    orphaned_targets: Arc<Mutex<HashSet<String>>>,
+    /// How many live `/cdp` connections hold each target.
+    target_holders: Arc<Mutex<HashMap<String, usize>>>,
 }
 
 impl AppState {
+    /// Record the targets a `/cdp` connection left behind when it ended.
+    /// One connection's change in the targets it holds.
+    ///
+    /// A target is held by every live connection that created or attached to
+    /// it, not by the last one: a short `afhttp cdp --tab` against a tab a
+    /// fetch is still driving must not, on its way out, leave that tab looking
+    /// abandoned.
+    pub(crate) fn note_holding(&self, holding: Option<target_ledger::Holding>) {
+        let mut holders = self
+            .target_holders
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match holding {
+            Some(target_ledger::Holding::Took(target)) => {
+                *holders.entry(target.clone()).or_default() += 1;
+                // It has a driver again, whatever its past. Still under the
+                // holders lock: `release_targets` decides orphanhood under it
+                // too, so an attach can never land between that decision and
+                // the orphan set recording it.
+                self.orphaned_targets
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&target);
+            }
+            Some(target_ledger::Holding::Closed(target)) => {
+                release(&mut holders, &target);
+            }
+            None => {}
+        }
+    }
+
+    /// A connection ended holding `targets`. Any of them no other live
+    /// connection holds is an orphan now.
+    pub(crate) fn release_targets(&self, targets: impl IntoIterator<Item = String>) {
+        let mut holders = self
+            .target_holders
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let orphaned: Vec<String> = targets
+            .into_iter()
+            .filter(|target| release(&mut holders, target))
+            .collect();
+        // Recorded before the holders lock is released; see `note_holding`.
+        self.orphaned_targets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend(orphaned);
+    }
+
+    /// The targets no live connection owns.
+    pub fn orphaned_targets(&self) -> HashSet<String> {
+        self.orphaned_targets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Forget orphans the browser no longer has.
+    pub fn retain_orphaned_targets(&self, live: &HashSet<String>) {
+        self.orphaned_targets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|id| live.contains(id));
+    }
+
     /// Snapshot the currently-active browser/profile identity. Returns an owned
     /// clone (cheap — the heavy browser handle is an `Arc`) so callers don't
     /// hold the profile lock; an in-flight request that holds this snapshot
@@ -127,7 +200,10 @@ impl AppState {
     /// ended by the switch, and every takeover credential minted against it is
     /// revoked with it.
     pub async fn ensure_profile(&self, name: &str) -> Result<(), Error> {
-        if self.get_profile().is_some_and(|p| p.name == name) {
+        // Kind as well as name: an ephemeral host's entry is called "default",
+        // and asking for the persistent `default` profile is not asking for it.
+        let is_current = |p: &ProfileEntry| p.name == name && p.kind == "persistent";
+        if self.get_profile().is_some_and(|p| is_current(&p)) {
             return Ok(());
         }
         crate::sdk::profile::paths::validate_name(name)?;
@@ -139,8 +215,20 @@ impl AppState {
         };
         let _switch = self.switch_lock.lock().await;
         // Re-check under the switch lock: another switch may have landed first.
-        if self.get_profile().is_some_and(|p| p.name == name) {
+        if self.get_profile().is_some_and(|p| is_current(&p)) {
             return Ok(());
+        }
+        // A `/cdp` client holds only the old browser's address, not the
+        // browser: switching under it would kill its session mid-fetch.
+        let connected = self.cdp_client_count();
+        if connected > 0 {
+            return Err(Error::new(
+                ErrorCode::ProfileLocked,
+                format!(
+                    "{connected} CDP client(s) are using the current profile; switch profiles once they disconnect"
+                ),
+            )
+            .with_retryable(true));
         }
         let choice = ProfileChoice::Persistent(name.to_string());
         let handle = launch_browser(&ctx.args, ctx.display.as_deref(), &choice).await?;
@@ -162,6 +250,16 @@ impl AppState {
         // relaunch (which returns above, leaving the old profile in place)
         // never kills a panel that still works.
         self.revoke_takeover_handoffs();
+        if let (Some(ring), Some(subscriber)) =
+            (&self.recent_requests, &self._recent_requests_subscriber)
+        {
+            ring.clear().await;
+            let ws_url = self
+                .get_profile()
+                .map(|entry| entry.ws_url().to_string())
+                .unwrap_or_default();
+            subscriber.follow(ws_url, ring.clone());
+        }
         drop(old);
         Ok(())
     }
@@ -204,6 +302,39 @@ impl AppState {
     }
 }
 
+/// Refuse a `--proxy` the chosen backend would not honour as given.
+///
+/// Every backend receives the proxy as a process argument, which every user on
+/// the machine can read (`ps`, `/proc/<pid>/cmdline`), so a proxy password
+/// would be published there — and Chromium ignores userinfo in
+/// `--proxy-server` anyway, so it would buy nothing but a 407. Camoufox is
+/// given no proxy at all by its launcher, and its traffic would go direct
+/// while the host said otherwise.
+fn check_proxy(args: &HostArgs) -> Result<(), Error> {
+    let Some(proxy) = args.proxy.as_deref() else {
+        return Ok(());
+    };
+    if matches!(args.browser, BrowserChoice::Camoufox) {
+        return Err(Error::new(
+            ErrorCode::BackendUnsupported,
+            "--proxy is not supported with --browser camoufox; its traffic would not go through the proxy",
+        ));
+    }
+    // Any `@` is userinfo, whatever else the value looks like: a scheme-less
+    // `user:pw@proxy:3128` parses as scheme `user` with no username, and
+    // Chromium's per-scheme list form (`http=user:pw@a:1;…`) is not a URL at
+    // all, yet both would put the password on the command line.
+    if proxy.contains('@') {
+        return Err(Error::new(
+            ErrorCode::InvalidArgument,
+            "--proxy must not carry credentials: the browser would receive them on its command line, \
+             readable by every local user, and Chromium ignores them there; use an unauthenticated \
+             or IP-allowlisted proxy",
+        ));
+    }
+    Ok(())
+}
+
 /// Build browser args for `profile` — injecting the takeover display when one
 /// is active — and launch the browser subprocess. Shared by the initial launch
 /// and runtime profile switches.
@@ -212,6 +343,7 @@ async fn launch_browser(
     display: Option<&str>,
     profile: &ProfileChoice,
 ) -> Result<Arc<BrowserHandle>, Error> {
+    check_proxy(args)?;
     let mut browser_args = args.clone();
     browser_args.profile = profile.clone();
     if let Some(display) = display {
@@ -345,6 +477,8 @@ impl AppState {
             takeover,
             handoffs: Arc::new(RwLock::new(Vec::new())),
             cdp_clients: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            orphaned_targets: Arc::new(Mutex::new(HashSet::new())),
+            target_holders: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -352,8 +486,23 @@ impl AppState {
     /// fires. Supports `tcp:host:port` everywhere; `unix:/path/to.sock`
     /// only on `cfg(unix)`.
     pub async fn serve(self, listen_addr: &str) -> Result<(), Error> {
+        let listen = parse_listen(listen_addr)?;
+        // The token-less origin check assumes loopback; an embedder that skips
+        // the CLI's own refusal must not get a host anyone on the network can
+        // drive by claiming `Host: localhost`.
+        if self.token.is_none()
+            && let ListenAddr::Tcp(addr) = &listen
+            && !addr.ip().is_loopback()
+        {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                format!(
+                    "refusing to serve {addr} without a token: a token-less host is loopback-only"
+                ),
+            ));
+        }
         let app = build_router(self.clone());
-        let served = match parse_listen(listen_addr)? {
+        let served = match listen {
             ListenAddr::Tcp(addr) => serve_tcp(app, addr).await,
             #[cfg(unix)]
             ListenAddr::Unix(path) => serve_unix(app, path).await,
@@ -397,9 +546,15 @@ async fn serve_unix(app: Router, path: std::path::PathBuf) -> Result<(), Error> 
     use tokio::net::UnixListener;
     use tower::Service;
 
-    // Best-effort: remove a stale socket file so binding doesn't fail with
-    // EADDRINUSE after a crashed host left one behind.
-    let _ = std::fs::remove_file(&path);
+    // Remove a stale socket a crashed host left behind, so binding doesn't fail
+    // with EADDRINUSE — but only a socket: a mistyped `unix:` path naming an
+    // ordinary file must not delete it.
+    {
+        use std::os::unix::fs::FileTypeExt;
+        if std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_socket()) {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
 
     let listener = UnixListener::bind(&path).map_err(|e| {
         Error::new(
@@ -427,7 +582,12 @@ async fn serve_unix(app: Router, path: std::path::PathBuf) -> Result<(), Error> 
         };
         let (stream, _peer) = match accepted {
             Ok(pair) => pair,
-            Err(_) => continue,
+            // Out of file descriptors, say: back off rather than spin a core
+            // retrying the same failure.
+            Err(_) => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
+            }
         };
         let tower_service = match futures::future::poll_fn(|cx| {
             <_ as Service<axum::http::Request<axum::body::Body>>>::poll_ready(&mut make_service, cx)
@@ -446,7 +606,10 @@ async fn serve_unix(app: Router, path: std::path::PathBuf) -> Result<(), Error> 
                 move |req: axum::http::Request<hyper::body::Incoming>| {
                     let mut tower_service = tower_service.clone();
                     async move {
-                        let (parts, body) = req.into_parts();
+                        let (mut parts, body) = req.into_parts();
+                        // A web page cannot reach a unix socket, so the
+                        // token-less origin check does not apply here.
+                        parts.extensions.insert(ArrivedOverUnixSocket);
                         let req =
                             axum::http::Request::from_parts(parts, axum::body::Body::new(body));
                         <_ as Service<axum::http::Request<axum::body::Body>>>::call(
@@ -609,8 +772,21 @@ async fn takeover_handoff_handler(
         .into_response();
     }
 
-    let token = match state.issue_takeover_handoff(ttl_s) {
-        Ok(token) => token,
+    if let Err(error) = health::require_takeover_ready(&state).await {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(crate::shared::afdata::error_value(
+                error.error_code.as_str(),
+                &error.detail,
+                error.retryable,
+            )),
+        )
+            .into_response();
+    }
+    // The address first: a credential minted for a URL that then cannot be
+    // built would stay live, and keep the reaper paused, with nobody holding it.
+    let mut takeover_url = match takeover_panel_url_from_request(&headers, &uri) {
+        Ok(url) => url,
         Err(err) => {
             let body = crate::shared::afdata::error_value(
                 err.error_code.as_str(),
@@ -620,8 +796,8 @@ async fn takeover_handoff_handler(
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response();
         }
     };
-    let mut takeover_url = match takeover_panel_url_from_request(&headers, &uri) {
-        Ok(url) => url,
+    let token = match state.issue_takeover_handoff(ttl_s) {
+        Ok(token) => token,
         Err(err) => {
             let body = crate::shared::afdata::error_value(
                 err.error_code.as_str(),
@@ -662,6 +838,17 @@ async fn takeover_ui_session_create(
                 "backend_unsupported",
                 "display takeover is not enabled",
                 false,
+            )),
+        )
+            .into_response();
+    }
+    if let Err(error) = health::require_takeover_ready(&state).await {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(crate::shared::afdata::error_value(
+                error.error_code.as_str(),
+                &error.detail,
+                error.retryable,
             )),
         )
             .into_response();
@@ -718,9 +905,20 @@ async fn takeover_ui_session_create(
     .into_response()
 }
 
-/// Authorization already renewed the idle lease; no domain work is needed.
-async fn takeover_ui_session_keep_alive() -> StatusCode {
-    StatusCode::NO_CONTENT
+/// Renewing a live display lease must also detect a dead browser.
+async fn takeover_ui_session_keep_alive(State(state): State<AppState>) -> Response {
+    match health::require_takeover_ready(&state).await {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(crate::shared::afdata::error_value(
+                error.error_code.as_str(),
+                &error.detail,
+                error.retryable,
+            )),
+        )
+            .into_response(),
+    }
 }
 
 async fn takeover_ui_session_revoke(
@@ -883,6 +1081,15 @@ async fn token_middleware(
     next: Next,
 ) -> Response {
     let path = request.uri().path().to_string();
+    if state.token.is_none()
+        && request
+            .extensions()
+            .get::<ArrivedOverUnixSocket>()
+            .is_none()
+        && !reachable_without_token(request.headers())
+    {
+        return forbidden_origin();
+    }
     if is_takeover_display_path(&path) {
         if let Some(expected) = state.token.as_deref()
             && let Some(token) = bearer_token(&request)
@@ -1037,6 +1244,102 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+/// Drop one hold on `target`; `true` when none is left.
+fn release(holders: &mut HashMap<String, usize>, target: &str) -> bool {
+    match holders.get_mut(target) {
+        Some(count) if *count > 1 => {
+            *count -= 1;
+            false
+        }
+        Some(_) => {
+            holders.remove(target);
+            true
+        }
+        // Held by nobody this host counted: as abandoned as it gets.
+        None => true,
+    }
+}
+
+/// Marks a request that arrived on the unix-socket listener.
+#[derive(Clone, Copy)]
+struct ArrivedOverUnixSocket;
+
+/// Whether a request to a host with no token came from this machine's own
+/// clients rather than from a web page.
+///
+/// A token-less host is only ever bound to loopback, but every web page open in
+/// any browser on this machine can reach loopback too — and a page can open a
+/// WebSocket to `/cdp` with nothing stopping it, since browsers apply no
+/// same-origin rule to WebSockets. Two headers tell the cases apart. A page
+/// always sends an `Origin`, and afhttp's own CLI and SDK never do; the one
+/// legitimate browser here is a takeover panel talking to its own origin. And
+/// `Host` must name loopback, because a rebound name (`evil.example` resolving
+/// to 127.0.0.1) arrives with its own name in both headers.
+///
+/// A page can still make a request without an `Origin` — an iframe, a
+/// no-cors subresource — and a framed takeover panel would hand it the
+/// display. Browsers mark every request with `Sec-Fetch-Site` and
+/// `Sec-Fetch-Dest`, which the CLI and SDK never send, so a request from
+/// another site is refused unless it is a top-level navigation. That one
+/// stays: AFUI opens a window from a private `file://` page, and a person may
+/// follow a link from anywhere; the page that sent them cannot read or drive
+/// what opens.
+fn reachable_without_token(headers: &HeaderMap) -> bool {
+    let from_another_site = headers
+        .get("sec-fetch-site")
+        .is_some_and(|site| !matches!(site.to_str(), Ok("same-origin" | "none")));
+    let top_level = headers
+        .get("sec-fetch-dest")
+        .is_some_and(|dest| dest.as_bytes() == b"document");
+    if from_another_site && !top_level {
+        return false;
+    }
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok());
+    if let Some(host) = host
+        && !is_loopback_authority(host)
+    {
+        return false;
+    }
+    match headers.get(header::ORIGIN).map(|value| value.to_str()) {
+        None => true,
+        Some(Ok(origin)) => host.is_some_and(|host| {
+            origin.eq_ignore_ascii_case(&format!("http://{host}"))
+                || origin.eq_ignore_ascii_case(&format!("https://{host}"))
+        }),
+        Some(Err(_)) => false,
+    }
+}
+
+/// `localhost`, or a loopback IP literal, with or without a port.
+fn is_loopback_authority(authority: &str) -> bool {
+    let host = match authority.strip_prefix('[') {
+        Some(bracketed) => bracketed.split(']').next().unwrap_or_default(),
+        None => authority
+            .rsplit_once(':')
+            .map_or(authority, |(host, port)| {
+                if port.bytes().all(|b| b.is_ascii_digit()) {
+                    host
+                } else {
+                    authority
+                }
+            }),
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+fn forbidden_origin() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        "a host without a token answers only this machine's own clients",
+    )
+        .into_response()
+}
+
 fn unauthorized() -> Response {
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -1049,7 +1352,7 @@ fn unauthorized() -> Response {
     );
     let body = crate::shared::afdata::error_value(
         "invalid_argument",
-        "missing or invalid bearer token",
+        crate::shared::afdata::BEARER_REJECTED,
         false,
     );
     (StatusCode::UNAUTHORIZED, headers, Json(body)).into_response()
@@ -1099,6 +1402,8 @@ pub fn test_state(token: Option<&str>, health_public: HealthPublic) -> AppState 
         takeover: None,
         handoffs: Arc::new(RwLock::new(Vec::new())),
         cdp_clients: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        orphaned_targets: Arc::new(Mutex::new(HashSet::new())),
+        target_holders: Arc::new(Mutex::new(HashMap::new())),
     }
 }
 
@@ -1161,6 +1466,148 @@ pub(crate) fn default_limits() -> BTreeMap<String, serde_json::Value> {
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn test_host_args() -> HostArgs {
+        HostArgs {
+            listen: "tcp:127.0.0.1:0".into(),
+            profile: ProfileChoice::Ephemeral,
+            display: crate::host::bootstrap::DisplayMode::Headless,
+            takeover: Takeover::Off,
+            display_quality: 100,
+            browser: BrowserChoice::Auto,
+            browser_bin: Some("/nonexistent-browser-must-not-be-started".into()),
+            token: None,
+            takeover_enabled: false,
+            health_enabled: true,
+            health_public: HealthPublic::Off,
+            engine_envs: Vec::new(),
+            browser_args: Vec::new(),
+            proxy: None,
+            recent_requests_cap: 0,
+            tab_idle_timeout_s: 0,
+        }
+    }
+
+    /// A tab is abandoned when the last connection holding it ends, not the
+    /// last one that attached: a quick `afhttp cdp --tab` must not leave a tab
+    /// a fetch is still driving open to the reaper.
+    #[test]
+    fn a_tab_is_an_orphan_only_once_no_connection_holds_it() {
+        use target_ledger::Holding;
+        let state = test_state(None, HealthPublic::Off);
+        // The fetch creates T; a one-off cdp call attaches to it.
+        state.note_holding(Some(Holding::Took("T".into())));
+        state.note_holding(Some(Holding::Took("T".into())));
+        // The one-off call ends.
+        state.release_targets(["T".to_string()]);
+        assert!(
+            state.orphaned_targets().is_empty(),
+            "the fetch still holds T"
+        );
+        // The fetch ends without closing it.
+        state.release_targets(["T".to_string()]);
+        assert_eq!(state.orphaned_targets(), HashSet::from(["T".to_string()]));
+        // A driver attaching again adopts it.
+        state.note_holding(Some(Holding::Took("T".into())));
+        assert!(state.orphaned_targets().is_empty());
+        // A tab closed by its holder is not an orphan.
+        state.note_holding(Some(Holding::Closed("T".into())));
+        assert!(state.orphaned_targets().is_empty());
+    }
+
+    #[test]
+    fn a_proxy_the_backend_would_not_honour_as_given_is_refused() {
+        let mut args = test_host_args();
+        args.proxy = Some("http://proxy.example:3128".into());
+        assert!(check_proxy(&args).is_ok());
+        args.proxy = Some("http://user:pass@proxy.example:3128".into());
+        let error = check_proxy(&args).unwrap_err();
+        assert_eq!(error.error_code, ErrorCode::InvalidArgument);
+        assert!(!error.detail.contains("pass@"), "{}", error.detail);
+        args.proxy = Some("socks5://user@proxy.example:1080".into());
+        assert!(check_proxy(&args).is_err());
+        // Neither spelling parses as a URL with userinfo.
+        for proxy in ["user:pass@proxy.example:3128", "http=user:pw@a:1;https=b:2"] {
+            args.proxy = Some(proxy.into());
+            let error = check_proxy(&args).unwrap_err();
+            assert_eq!(error.error_code, ErrorCode::InvalidArgument, "{proxy}");
+        }
+        args.proxy = Some("http://proxy.example:3128".into());
+        args.browser = BrowserChoice::Camoufox;
+        assert_eq!(
+            check_proxy(&args).unwrap_err().error_code,
+            ErrorCode::BackendUnsupported
+        );
+    }
+
+    /// A token-less host is loopback-only, and so is every web page open on the
+    /// same machine. What a page cannot avoid sending is what tells it apart.
+    #[test]
+    fn a_token_less_host_answers_its_own_clients_but_not_a_web_page() {
+        let headers = |pairs: &[(header::HeaderName, &str)]| {
+            let mut map = HeaderMap::new();
+            for (name, value) in pairs {
+                map.insert(name.clone(), value.parse().unwrap());
+            }
+            map
+        };
+        // The CLI and SDK send no Origin.
+        assert!(reachable_without_token(&headers(&[(
+            header::HOST,
+            "127.0.0.1:9222"
+        )])));
+        assert!(reachable_without_token(&headers(&[(
+            header::HOST,
+            "localhost:9222"
+        )])));
+        assert!(reachable_without_token(&headers(&[(
+            header::HOST,
+            "[::1]:9222"
+        )])));
+        assert!(reachable_without_token(&headers(&[])));
+        // A takeover panel talks to its own origin.
+        assert!(reachable_without_token(&headers(&[
+            (header::HOST, "127.0.0.1:9222"),
+            (header::ORIGIN, "http://127.0.0.1:9222"),
+        ])));
+        // Any other page — including the page being fetched — does not reach /cdp.
+        assert!(!reachable_without_token(&headers(&[
+            (header::HOST, "127.0.0.1:9222"),
+            (header::ORIGIN, "https://attacker.example"),
+        ])));
+        assert!(!reachable_without_token(&headers(&[
+            (header::HOST, "127.0.0.1:9222"),
+            (header::ORIGIN, "null"),
+        ])));
+        // A rebound name carries itself in both headers, and is still refused.
+        assert!(!reachable_without_token(&headers(&[
+            (header::HOST, "rebind.example:9222"),
+            (header::ORIGIN, "http://rebind.example:9222"),
+        ])));
+        // A page framing the panel sends no Origin, but says where it is from
+        // and what it is loading. A top-level navigation from elsewhere — an
+        // AFUI window's `file://` launch page, a followed link — still opens.
+        let sec_fetch_site = header::HeaderName::from_static("sec-fetch-site");
+        let sec_fetch_dest = header::HeaderName::from_static("sec-fetch-dest");
+        for (site, dest, reachable) in [
+            ("same-origin", "iframe", true),
+            ("none", "document", true),
+            ("cross-site", "document", true),
+            ("same-site", "iframe", false),
+            ("cross-site", "iframe", false),
+            ("cross-site", "empty", false),
+        ] {
+            assert_eq!(
+                reachable_without_token(&headers(&[
+                    (header::HOST, "127.0.0.1:9222"),
+                    (sec_fetch_site.clone(), site),
+                    (sec_fetch_dest.clone(), dest),
+                ])),
+                reachable,
+                "{site} {dest}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn a_blank_host_token_is_a_configuration_error_before_any_browser_starts() {

@@ -54,7 +54,7 @@ pub(super) fn resolve_profile_dir(
                     format!("serialize profile metadata {}: {e}", meta_path.display()),
                 )
             })?;
-            std::fs::write(&meta_path, meta_json).map_err(|e| {
+            crate::sdk::profile::meta::write_atomic(&meta_path, &meta_json).map_err(|e| {
                 Error::new(
                     ErrorCode::IoError,
                     format!("write profile metadata {}: {e}", meta_path.display()),

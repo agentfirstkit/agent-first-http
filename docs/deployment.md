@@ -1,6 +1,6 @@
 # Deployment
 
-`afhttp` has two roles, and they deploy differently:
+The driver and the host deploy differently:
 
 - The **driver** (`afhttp fetch` / `cdp` / `upload` / `panel` / `health` /
   `capabilities` / `tabs`) is a thin client. Install it wherever the agent runs —
@@ -34,12 +34,10 @@ posture away chasing one: it is invisible to page JavaScript. Enabling Chromium'
 own sandbox inside the container would mean handing it `--cap-add=SYS_ADMIN`,
 which gives away more isolation than it buys back.
 
-It *is* visible to the human on the takeover display. An earlier revision of this
-paragraph claimed Chromium 151 shows no "unsupported command-line flag" warning
-for `--no-sandbox`; that was wrong. Chromium 151 and Brave both raise the bar,
-and it names `--disable-setuid-sandbox` first only because Chromium reports a
-single offending flag — remove that one and the bar returns naming
-`--no-sandbox`. The image suppresses it with a managed policy
+It *is* visible to the human on the takeover display: Chromium 151 and Brave
+both raise an "unsupported command-line flag" bar for it. The bar names
+`--disable-setuid-sandbox` first only because Chromium reports a single
+offending flag — remove that one and the bar returns naming `--no-sandbox`. The image suppresses it with a managed policy
 (`container/docker/install-browser-policy.sh`), which changes no launch flag and
 no sandbox posture. Do not try `--test-type` for this: it makes Brave abort on
 startup.
@@ -69,8 +67,8 @@ anti-bot scorer treats as automation. The host passes
 and containers without a GPU fall back to SwiftShader with full WebGL 1 + 2. The
 software renderer does report a SwiftShader `UNMASKED_RENDERER_WEBGL` string,
 which is its own weak signal, but a present-and-software WebGL grades far better
-than an absent one. `--browser-arg=--disable-gpu` remains available for callers
-who want the old behaviour.
+than an absent one. `--browser-arg=--disable-gpu` turns WebGL off for callers
+who need that.
 
 ## Quick start
 
@@ -78,7 +76,7 @@ The driver embeds the host image recipe, so a brew-only install (no source tree)
 can stand up a host in one command:
 
 ```bash
-# Build the image if needed and run the host. Auto-detects Docker or Apple
+# Build the image if needed and run the host. Auto-detects Apple, Podman, or Docker
 # `container`; add optional backends with repeated --with (see below). The host
 # is takeover-ready by default (Brave + KasmVNC + ephemeral initial profile + 2g shm).
 afhttp container install
@@ -108,9 +106,11 @@ version is hard-pinned: if no release asset exists for this version/arch (e.g. a
 dev build of an unreleased version), the build fails with a pointer to the
 from-source path below — it never installs a different version.
 
-**Runtime selection** is `--runtime docker|podman|apple` (auto-detected in that
-order: `docker`, then `podman`, then Apple `container`), or the
-`AFHTTP_CONTAINER_RUNTIME` env var. Podman behaves like Docker (rootless, no
+**Runtime selection** is `--runtime apple|podman|docker`. Automatic detection
+tries Apple `container` on macOS, then Podman, then Docker. An explicit flag or
+`AFHTTP_CONTAINER_RUNTIME` takes precedence; `AF_CONTAINER_RUNTIME` supplies a
+shared override. Once selected, a runtime failure is reported without trying
+another runtime or switching its storage. Podman behaves like Docker (rootless, no
 daemon); Apple `container` builds `linux/arm64` and is started for you
 (`container system start`) and has no compose, so on macOS the `afhttp container`
 path — not compose — is how you run a host.
@@ -133,6 +133,47 @@ afhttp container install --runtime apple --from-source  # source build under App
 
 ### Version upgrades and profile preservation
 
+For a local source deployment onto the standard host while preserving its
+active profile, install the driver with the repository's local install
+entrypoint, then run from this checkout:
+
+```bash
+scripts/deploy-local.sh --profile vps
+```
+
+The script requires the existing `afhttp-host-data` mount and the requested
+active persistent profile. It builds the canonical source image before
+stopping the old host, copies all of `/data` into a private backup under
+`~/.local/state/afhttp/local-deploy/`, preserves a rollback image tag, and uses
+`afhttp container install` to replace the container with Brave and KasmVNC on
+the same volume. It verifies live browser/CDP/display readiness afterwards.
+`--driver PATH` selects the locally installed binary. `--runtime` selects the
+existing service's runtime; otherwise the shared Apple → Podman → Docker policy
+applies. The script never migrates volumes between runtimes and never prunes
+shared build caches. Build and backup failures leave the old container
+available. A failed new-host install attempts to restore the old
+image using the unchanged data volume. Backups contain cookies and the host
+token, so keep the backup directory private.
+
+If startup failed after a completed backup, `--resume-backup DIR` reuses that
+backup and its already-built image. `--verify-backup DIR` checks that every
+saved profile directory and key metadata/cookie file still exists on the
+original volume, and verifies the stable host token without displaying it;
+the private `preservation-check.json` records counts. This checks retained
+files, not whether a remote service still accepts an individual login.
+`--diagnose-image IMAGE` captures bounded display startup diagnostics without
+mounting any profiles. Inspect stderr as well as the process outcome: a display
+process can stay alive even if its X socket could not be created.
+
+The script checks remaining writable space both before and after building,
+before it stops the old host.
+
+The source image carries `org.opencontainers.image.revision` with the checkout
+revision. A source build without Git metadata inside its builder can report
+binary build `unknown`; the image label and private deployment records retain
+its source identity. This local path does not publish artifacts or change
+package versions.
+
 Managed images are tagged with the driver version (`afhttp-host:<version>`), and
 the prebuilt path downloads that exact `AFHTTP_VERSION` into the image. After
 upgrading the local driver, run `afhttp container install` again: the new driver
@@ -140,7 +181,10 @@ builds/uses the matching image, stops and removes the old `afhttp-host`
 container, and starts a replacement with the same named data volume
 (`afhttp-host-data` by default). The host token and persistent profiles live in
 that volume under `/data/afhttp`, so they survive the recreate; only ephemeral
-profile state (`--profile -`) is intentionally disposable.
+profile state (`--profile -`) is intentionally disposable. `install` and
+`uninstall` only ever replace a container run from an `afhttp-host` image: when
+`--name` already belongs to some other container, they refuse rather than stop
+it or touch its volume.
 
 `afhttp container status` reports both the driver version and the running host
 version. `fetch --takeover` auto-discovery refuses a standard local host whose
@@ -208,6 +252,13 @@ afhttp does **not** terminate TLS. For cross-host use, keep the endpoint on a
 private network and reach it as `wss://` through a mesh/proxy that provides TLS.
 Never expose a tokenless endpoint on a public interface.
 
+A host without a token is loopback-only, and even there it refuses any request
+carrying a foreign `Origin` header, a non-loopback `Host` header, or a
+`Sec-Fetch-Site` from another site on anything but a top-level navigation, so a web page open on the same machine cannot reach
+`/cdp` or any other route, or frame a takeover panel, and a DNS-rebound name is
+refused. afhttp's own CLI and SDK send neither header; a takeover
+panel talking to its own origin is allowed; `unix:` socket requests are exempt.
+
 ## Optional backends (build args)
 
 Chromium is always present (backends `auto` / `chromium`). The rest are opt-in at
@@ -232,8 +283,8 @@ The pinned/download recipes live in one place —
 `container/docker/install-backends.sh` — shared with the test image
 (`tests/Dockerfile.test`) so they cannot drift. Chrome and Brave are installed
 from their vendors' stable apt repositories because both publish
-architecture-native Debian packages; Google shipped native arm64 Linux builds in
-July 2026, so `WITH_CHROME=1` now resolves on both architectures.
+architecture-native Debian packages, so `WITH_CHROME=1` resolves on both x86_64
+and arm64.
 
 ### Proprietary browsers (Chrome / Edge)
 
@@ -273,9 +324,9 @@ Brave for a default install that pulls no proprietary vendor binary and for
 captures kept clear of ads and trackers.
 
 If a wall serves a challenge that never becomes clickable, suspect the host
-before the browser. That symptom was afhttp's own doing until the WebGL and
-forced-`--browser-arg` defects below were fixed, and it looked exactly like a
-browser-quality problem.
+before the browser: check that it has WebGL (see [Graphics](#graphics)) and
+what extra launch flags it was given through `--browser-arg`. A host-side cause
+looks exactly like a browser-quality problem.
 
 The driver-side entry point is:
 
@@ -287,11 +338,17 @@ afhttp fetch "$URL" --takeover
 endpoint is supplied, switches the host to the URL-derived persistent site
 profile (e.g. `contabo.com`), opens or reuses a persistent tab, and navigates it.
 If the warmed profile already reaches the target, it returns the content.
-Otherwise it returns a `next_action` with `kind: "human_takeover"`, a complete
-short-lived `takeover_url_secret` a human opens to drive the real display, expiry
-metadata, and a `recommended_command` that re-fetches the same `--tab` once the
-wall is cleared. For remote/custom hosts, pass
-`--endpoint-url ws://<host>:9222 --token-secret "<token-secret>"`; the token is
+Tab recycling requires affirmative capture evidence; HTTP errors and unknown
+or incomplete content retain the tab for review. Handoff failures preserve
+the result with a warning and may omit the panel URL. Configuration support
+is separate from live browser/CDP/display availability. See
+[takeover reliability](takeover-reliability.md) for health/status fields,
+metadata recovery and compatibility with older hosts.
+A retained takeover tab returns `next_action.kind: "human_takeover"` and a
+`recommended_command` for the same `--tab`. When the handoff succeeds it also
+includes a complete short-lived `takeover_url_secret` and expiry metadata. For remote/custom hosts, pass
+`--endpoint-url ws://<host>:9222 --token-secret file:$HOME/.afhttp/hosts.json#box.token_secret`
+(or any other token source); the token is
 used to mint the handoff URL and is not embedded in it. `afhttp panel
 --endpoint-url … --token-secret …` prints a short-lived display URL directly.
 

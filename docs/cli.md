@@ -61,7 +61,7 @@ afhttp capabilities [--endpoint-url <URL>] [--token-secret <SOURCE>]
 | Argument | Meaning |
 |---|---|
 | `--endpoint-url` | CDP endpoint of a running host; falls back to AFHTTP_ENDPOINT_URL, then to the local afhttp-host container |
-| `--token-secret` | Token for a protected host; falls back to AFHTTP_TOKEN_SECRET, then to the discovered host's own token (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, container:NAME, literal:VALUE) |
+| `--token-secret` | Token for a protected host; falls back to AFHTTP_TOKEN_SECRET, then to the discovered host's own token (the value, or where to read it: env:NAME, file[+FORMAT]:PATH[#DOT_PATH], container:NAME, literal:VALUE) |
 
 ### `afhttp cdp`
 
@@ -75,7 +75,7 @@ afhttp cdp <METHOD> [--endpoint-url <URL>] [--token-secret <SOURCE>] --tab <TARG
 |---|---|
 | `METHOD` | CDP method name |
 | `--endpoint-url` | CDP endpoint of a running host; falls back to AFHTTP_ENDPOINT_URL, then to the local afhttp-host container |
-| `--token-secret` | Token for a protected host; falls back to AFHTTP_TOKEN_SECRET, then to the discovered host's own token (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, container:NAME, literal:VALUE) |
+| `--token-secret` | Token for a protected host; falls back to AFHTTP_TOKEN_SECRET, then to the discovered host's own token (the value, or where to read it: env:NAME, file[+FORMAT]:PATH[#DOT_PATH], container:NAME, literal:VALUE) |
 | `--tab` | CDP target id to drive |
 | `--params` | Method parameters as a JSON literal, or @- to read them from stdin |
 | `--wait-event` | Wait for a CDP event before exiting, for example Page.loadEventFired:5s |
@@ -87,22 +87,22 @@ Build the host image if missing, run the container, and print the client command
 #### `container-install` — Build from the release pinned to this binary's version
 
 ```
-afhttp container install [--runtime <docker|podman|apple>] [--name <NAME>] [--port <PORT>] [--profile <NAME>] [--shm-size <SIZE>] [--takeover-provider <off|kasmvnc>] [--with <lightpanda|fingerprint-chromium|camoufox|chrome|brave|kasmvnc>...] [--rebuild] [--reveal-token-secret] [<HOST_ARG>...]
+afhttp container install [--runtime <apple|podman|docker>] [--name <NAME>] [--port <PORT>] [--profile <NAME>] [--shm-size <SIZE>] [--takeover-provider <off|kasmvnc>] [--with <lightpanda|fingerprint-chromium|camoufox|chrome|brave|kasmvnc>...] [--rebuild] [--reveal-token-secret] [<HOST_ARG>...]
 ```
 
 #### `container-install-from-source` — Compile from a source checkout, which always rebuilds
 
 ```
-afhttp container install [--runtime <docker|podman|apple>] [--name <NAME>] [--port <PORT>] [--profile <NAME>] [--shm-size <SIZE>] [--takeover-provider <off|kasmvnc>] [--with <lightpanda|fingerprint-chromium|camoufox|chrome|brave|kasmvnc>...] --from-source [--context <DIR>] [--reveal-token-secret] [<HOST_ARG>...]
+afhttp container install [--runtime <apple|podman|docker>] [--name <NAME>] [--port <PORT>] [--profile <NAME>] [--shm-size <SIZE>] [--takeover-provider <off|kasmvnc>] [--with <lightpanda|fingerprint-chromium|camoufox|chrome|brave|kasmvnc>...] --from-source [--context <DIR>] [--reveal-token-secret] [<HOST_ARG>...]
 ```
 
 Arguments across every shape above:
 
 | Argument | Meaning |
 |---|---|
-| `--runtime` | Container runtime; auto-detected when omitted, then AFHTTP_CONTAINER_RUNTIME |
-| `--name` | Container name |
-| `--port` | Host CDP port, published on 127.0.0.1 |
+| `--runtime` | Container runtime; when omitted, AFHTTP_CONTAINER_RUNTIME, then AF_CONTAINER_RUNTIME, then auto-detection (apple, podman, docker) |
+| `--name` | Container name: a letter or digit, then letters, digits, `_`, `.` or `-` |
+| `--port` | Host CDP port from 1 to 65535, published on 127.0.0.1 |
 | `--profile` | Initial profile inside the container; defaults to - for ephemeral |
 | `--shm-size` | Chromium /dev/shm size; defaults to 1g, or 2g when takeover is on |
 | `--takeover-provider` | Takeover provider for the built host; off builds a lean headless host |
@@ -120,13 +120,13 @@ Capture the container logs, or stream them raw.
 #### `container-logs` — Capture the logs to a file and return a JSON summary of the tail
 
 ```
-afhttp container logs [--runtime <docker|podman|apple>] [--name <NAME>]
+afhttp container logs [--runtime <apple|podman|docker>] [--name <NAME>]
 ```
 
 #### `container-logs-raw` — Forward the runtime's own log bytes; the only shape that can follow
 
 ```
-afhttp container logs [--runtime <docker|podman|apple>] [--name <NAME>] [--follow] --raw
+afhttp container logs [--runtime <apple|podman|docker>] [--name <NAME>] [--follow] --raw
 ```
 
 Output differs by combination:
@@ -138,8 +138,8 @@ Arguments across every shape above:
 
 | Argument | Meaning |
 |---|---|
-| `--runtime` | Container runtime; auto-detected when omitted, then AFHTTP_CONTAINER_RUNTIME |
-| `--name` | Container name |
+| `--runtime` | Container runtime; when omitted, AFHTTP_CONTAINER_RUNTIME, then AF_CONTAINER_RUNTIME, then auto-detection (apple, podman, docker) |
+| `--name` | Container name: a letter or digit, then letters, digits, `_`, `.` or `-` |
 | `--follow` | Keep following the log output |
 | `--raw` | Stream raw runtime logs instead of returning a JSON summary |
 
@@ -148,14 +148,13 @@ Arguments across every shape above:
 Report whether the host is running, with its endpoint and client command.
 
 ```
-afhttp container status [--runtime <docker|podman|apple>] [--name <NAME>] [--port <PORT>] [--reveal-token-secret]
+afhttp container status [--runtime <apple|podman|docker>] [--name <NAME>] [--reveal-token-secret]
 ```
 
 | Argument | Meaning |
 |---|---|
-| `--runtime` | Container runtime; auto-detected when omitted, then AFHTTP_CONTAINER_RUNTIME |
-| `--name` | Container name |
-| `--port` | Published host port, used to format the endpoint and client command |
+| `--runtime` | Container runtime; when omitted, AFHTTP_CONTAINER_RUNTIME, then AF_CONTAINER_RUNTIME, then auto-detection (apple, podman, docker) |
+| `--name` | Container name: a letter or digit, then letters, digits, `_`, `.` or `-` |
 | `--reveal-token-secret` | Include the long-lived host token in the result instead of redacting it |
 
 ### `afhttp container uninstall`
@@ -163,13 +162,13 @@ afhttp container status [--runtime <docker|podman|apple>] [--name <NAME>] [--por
 Stop and remove the container.
 
 ```
-afhttp container uninstall [--runtime <docker|podman|apple>] [--name <NAME>] [--purge]
+afhttp container uninstall [--runtime <apple|podman|docker>] [--name <NAME>] [--purge]
 ```
 
 | Argument | Meaning |
 |---|---|
-| `--runtime` | Container runtime; auto-detected when omitted, then AFHTTP_CONTAINER_RUNTIME |
-| `--name` | Container name |
+| `--runtime` | Container runtime; when omitted, AFHTTP_CONTAINER_RUNTIME, then AF_CONTAINER_RUNTIME, then auto-detection (apple, podman, docker) |
+| `--name` | Container name: a letter or digit, then letters, digits, `_`, `.` or `-` |
 | `--purge` | Also remove the built image and the cached context |
 
 ### `afhttp fetch`
@@ -218,14 +217,14 @@ Arguments across every shape above:
 |---|---|
 | `URL` | URL to fetch |
 | `--endpoint-url` | CDP endpoint of a running host; falls back to AFHTTP_ENDPOINT_URL, then to the local afhttp-host container |
-| `--token-secret` | Token for a protected host; falls back to AFHTTP_TOKEN_SECRET, then to the discovered host's own token (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, container:NAME, literal:VALUE) |
+| `--token-secret` | Token for a protected host; falls back to AFHTTP_TOKEN_SECRET, then to the discovered host's own token (the value, or where to read it: env:NAME, file[+FORMAT]:PATH[#DOT_PATH], container:NAME, literal:VALUE) |
 | `--browser` | Browser backend for the inline host; ignored when --endpoint-url is set |
 | `--browser-bin` | Browser binary for the inline host when auto-discovery cannot find one |
 | `--render` | Render strategy: none is the HTTP fast path, auto escalates on failure, always uses the browser |
-| `--tab` | new allocates a temporary target; a CDP target id reuses and keeps it |
-| `--takeover` | Escalate captcha, login, or 2FA walls to human takeover |
+| `--tab` | new allocates a temporary target; an ID reuses it; takeover retains unverified content and recycles only after verified capture |
+| `--takeover` | Retain challenges, HTTP errors, or unverified content for human review; check live browser/display health before opening takeover |
 | `--profile` | Host profile to switch to for this fetch; defaults to the URL's registrable domain under --takeover |
-| `--wait` | Readiness signal: auto | load | idle | selector:<css> | selector-visible:<css> | ms:<n> |
+| `--wait` | Readiness signal (auto is strict full-page): auto | load | idle | selector:<css> | selector-visible:<css> | selector-stable:<css> | ms:<n> |
 | `--header` | Request header, as Name:value |
 | `--cookie` | Request cookie, in Set-Cookie syntax |
 | `--user-agent` | Override the User-Agent header for this fetch |
@@ -236,12 +235,12 @@ Arguments across every shape above:
 | `--form` | URL-encoded form field; sends application/x-www-form-urlencoded |
 | `--network-bodies` | Capture network response bodies; xhr captures XHR/fetch only |
 | `--network-body-max-bytes` | Per-body byte cap for captured network sub-requests |
-| `--readiness-idle-ms` | Network quiet window used by --wait auto |
-| `--readiness-stable-ms` | DOM/text unchanged window used by --wait auto |
+| `--readiness-idle-ms` | Network quiet window for auto and selector-stable |
+| `--readiness-stable-ms` | DOM/text stable window for auto and selector-stable |
 | `--readiness-min-text-bytes` | Low visible-text threshold that only warns about --wait auto quality |
-| `--no-network-redact` | Write raw Authorization/Cookie headers and token query parameters to network.json |
+| `--no-network-redact` | Write raw Authorization/Cookie and token/secret headers to network.json |
 | `--out` | Directory for artifacts; defaults to afhttp-out under the temp directory |
-| `--cookie-jar` | Override the profile cookie-jar path; must match the host profile. Honors AFHTTP_COOKIE_JAR |
+| `--cookie-jar` | The host profile's own cookie jar, named explicitly; any other path is refused, and so is one when the host cannot confirm its profile's jar. Honors AFHTTP_COOKIE_JAR |
 | `--no-cookie-jar` | Replay no cookies and merge no Set-Cookie back; wins over --cookie-jar |
 | `--observe-main-wait-ms` | Maximum wait for the browser's main-document event |
 | `--max-response-bytes` | Maximum main HTTP-path response body size; 0 disables the cap |
@@ -265,7 +264,7 @@ afhttp health [--endpoint-url <URL>] [--token-secret <SOURCE>]
 | Argument | Meaning |
 |---|---|
 | `--endpoint-url` | CDP endpoint of a running host; falls back to AFHTTP_ENDPOINT_URL, then to the local afhttp-host container |
-| `--token-secret` | Token for a protected host; falls back to AFHTTP_TOKEN_SECRET, then to the discovered host's own token (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, container:NAME, literal:VALUE) |
+| `--token-secret` | Token for a protected host; falls back to AFHTTP_TOKEN_SECRET, then to the discovered host's own token (the value, or where to read it: env:NAME, file[+FORMAT]:PATH[#DOT_PATH], container:NAME, literal:VALUE) |
 
 ### `afhttp host`
 
@@ -296,14 +295,14 @@ Arguments across every shape above:
 | `--takeover-quality-percent` | Takeover image quality from 0 to 100; lower trades clarity for bandwidth |
 | `--browser` | Browser backend |
 | `--browser-bin` | Override the browser binary path |
-| `--token-secret` | Token this host requires from callers (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, container:NAME, literal:VALUE) |
+| `--token-secret` | Token this host requires from callers (the value, or where to read it: env:NAME, file[+FORMAT]:PATH[#DOT_PATH], container:NAME, literal:VALUE) |
 | `--no-health` | Stop serving /health and /capabilities, which are on by default |
 | `--health-public` | Serve /health unauthenticated with a minimal payload |
 | `--engine-env` | Environment variable for the browser subprocess; all others are scrubbed |
 | `--browser-arg` | Raw backend flag appended after the host's defaults |
 | `--proxy-url` | Upstream browser proxy; ambient HTTP_PROXY is never inherited |
 | `--recent-requests-cap` | Enable /recent-requests with a bounded ring of N entries; 0 is off |
-| `--tab-idle-timeout-s` | Close page tabs after this long with no client connected and no takeover pending; 0 is off |
+| `--tab-idle-timeout-s` | Close page tabs idle this long: any left behind by a closed connection, or all of them once no client is connected and no takeover is pending; 0 is off |
 
 ### `afhttp panel`
 
@@ -316,7 +315,7 @@ afhttp panel [--endpoint-url <URL>] [--token-secret <SOURCE>]
 | Argument | Meaning |
 |---|---|
 | `--endpoint-url` | CDP endpoint of a running host; falls back to AFHTTP_ENDPOINT_URL, then to the local afhttp-host container |
-| `--token-secret` | Token for a protected host; falls back to AFHTTP_TOKEN_SECRET, then to the discovered host's own token (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, container:NAME, literal:VALUE) |
+| `--token-secret` | Token for a protected host; falls back to AFHTTP_TOKEN_SECRET, then to the discovered host's own token (the value, or where to read it: env:NAME, file[+FORMAT]:PATH[#DOT_PATH], container:NAME, literal:VALUE) |
 
 ### `afhttp profile cookies`
 
@@ -501,7 +500,7 @@ afhttp tabs close --tab <TARGET_ID> [--endpoint-url <URL>] [--token-secret <SOUR
 |---|---|
 | `--tab` | CDP target id to close |
 | `--endpoint-url` | CDP endpoint of a running host; falls back to AFHTTP_ENDPOINT_URL, then to the local afhttp-host container |
-| `--token-secret` | Token for a protected host; falls back to AFHTTP_TOKEN_SECRET, then to the discovered host's own token (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, container:NAME, literal:VALUE) |
+| `--token-secret` | Token for a protected host; falls back to AFHTTP_TOKEN_SECRET, then to the discovered host's own token (the value, or where to read it: env:NAME, file[+FORMAT]:PATH[#DOT_PATH], container:NAME, literal:VALUE) |
 
 ### `afhttp tabs list`
 
@@ -514,7 +513,7 @@ afhttp tabs list [--endpoint-url <URL>] [--token-secret <SOURCE>]
 | Argument | Meaning |
 |---|---|
 | `--endpoint-url` | CDP endpoint of a running host; falls back to AFHTTP_ENDPOINT_URL, then to the local afhttp-host container |
-| `--token-secret` | Token for a protected host; falls back to AFHTTP_TOKEN_SECRET, then to the discovered host's own token (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, container:NAME, literal:VALUE) |
+| `--token-secret` | Token for a protected host; falls back to AFHTTP_TOKEN_SECRET, then to the discovered host's own token (the value, or where to read it: env:NAME, file[+FORMAT]:PATH[#DOT_PATH], container:NAME, literal:VALUE) |
 
 ### `afhttp ui takeover`
 
@@ -539,9 +538,9 @@ Arguments across every shape above:
 | Argument | Meaning |
 |---|---|
 | `--endpoint-url` | CDP endpoint of a running host; falls back to AFHTTP_ENDPOINT_URL, then to the local afhttp-host container |
-| `--token-secret` | Token for a protected host; falls back to AFHTTP_TOKEN_SECRET, then to the discovered host's own token (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, container:NAME, literal:VALUE) |
+| `--token-secret` | Token for a protected host; falls back to AFHTTP_TOKEN_SECRET, then to the discovered host's own token (the value, or where to read it: env:NAME, file[+FORMAT]:PATH[#DOT_PATH], container:NAME, literal:VALUE) |
 | `--takeover-url-secret` | Panel URL a previous `panel` or `fetch --takeover` already minted |
-| `--mode` | How this reaches the person: window a browser window is open on this machine; link the page is reachable from this machine's network at the link URL; session the session is registered only; open it with `afui session open` or reach it through `afui session serve`. Falls back to AFUI_DELIVERY, then window |
+| `--mode` | How the panel reaches the person: window opens a browser window on this machine; session registers the session only, for `afui session open` or for `afui session serve --session-origin-host` to reach from elsewhere; link frames the panel on an opaque origin with no browser storage, where the KasmVNC client cannot run, so use session for remote access. Falls back to AFUI_DELIVERY, then window |
 
 ### `afhttp upload`
 
@@ -554,7 +553,7 @@ afhttp upload [--endpoint-url <URL>] [--token-secret <SOURCE>] --tab <TARGET_ID>
 | Argument | Meaning |
 |---|---|
 | `--endpoint-url` | CDP endpoint of a running host; falls back to AFHTTP_ENDPOINT_URL, then to the local afhttp-host container |
-| `--token-secret` | Token for a protected host; falls back to AFHTTP_TOKEN_SECRET, then to the discovered host's own token (the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, container:NAME, literal:VALUE) |
+| `--token-secret` | Token for a protected host; falls back to AFHTTP_TOKEN_SECRET, then to the discovered host's own token (the value, or where to read it: env:NAME, file[+FORMAT]:PATH[#DOT_PATH], container:NAME, literal:VALUE) |
 | `--tab` | CDP target id to operate in |
 | `--selector` | CSS selector for the <input type=file> element |
 | `--file` | File accessible at the same absolute path in driver and browser filesystems; the default container has no shared host paths |
@@ -566,6 +565,7 @@ afhttp upload [--endpoint-url <URL>] [--token-secret <SOURCE>] --tab <TARGET_ID>
 | 0 | The command ran and succeeded. |
 | 1 | The command ran and failed. The event carries a domain `error.code`. |
 | 2 | The invocation was rejected before anything ran. `error.code` is one of the `cli_*` codes below. |
+| 4 | Output could not be written (`output_write_failed`); a closed reader is success. |
 
 The split is the useful one for a caller: exit 2 means the call was never made, so retrying it unchanged cannot help, while exit 1 means it was.
 
@@ -573,6 +573,8 @@ The split is the useful one for a caller: exit 2 means the call was never made, 
 
 Every structural failure emits one strict JSON `kind:"error"` event on stderr, leaves stdout empty, and exits 2. The `code` names the failure — `cli_unknown_argument` for an unknown spelling, `cli_unregistered_combination` for registered arguments in a mixture that is not, and one each for `cli_unknown_command`, `cli_missing_argument_value`, `cli_invalid_argument_value`, `cli_duplicate_argument`, `cli_unexpected_positional`, and `cli_invalid_utf8`. `message` identifies a safe argument spelling or the failure category and `hint` gives the command to run next; neither ever quotes a raw value, including secrets. These are decided before any config, secret source, filesystem, network, or domain I/O.
 
-Two exit-1 codes describe the tool itself rather than the call: `cli_invocation_invalid` means the program misread its own resolved invocation — an unknown action id, or an argument id the selected combination cannot produce — and `output_setup_failed` means an output sink (`--stdout-file`, `--stderr-file`, stream redirection) could not be established. Both are defects to report, not inputs to correct; retrying the same command cannot help.
+`cli_invocation_invalid` (exit 1) describes the tool itself rather than the call: the program misread its own resolved invocation — an unknown action id, or an argument id the selected combination cannot produce. It is a defect to report, not an input to correct; retrying the same command cannot help. `output_setup_failed` (exit 1) means an output sink (`--stdout-file`, `--stderr-file`, stream redirection) could not be established; the message names the flag and path, which is usually a missing directory or a permission to fix.
+
+A tool may also exit 2 with a code of its own for a usage error its argument grammar cannot express — two arguments that are each valid but cannot be combined, or a value whose meaning depends on the target. Such a call is likewise refused before anything is changed.
 
 Domain failures (exit 1) carry their own stable `error.code` instead, drawn from whatever this tool defines rather than from the `cli_*` set. Error events are routinely logged, so a message never quotes a value that came from an argument able to carry a credential — a header, a cookie, a token, a password, a proxy URL, an environment value, a form field. Such an error names the argument and the shape that was wrong, and stops there. A value that cannot be a secret — a path, a dot-path, a session name — is quoted, because an error that cannot say which one it means is not worth logging either.

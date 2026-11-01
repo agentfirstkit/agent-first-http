@@ -21,6 +21,9 @@
 //! [`Client::inline_ephemeral`] convenience that spawns a private host
 //! in-process is only available with the `host` feature.
 
+#[cfg(feature = "cli")]
+mod runtime_selection;
+
 pub mod sdk;
 pub mod shared;
 

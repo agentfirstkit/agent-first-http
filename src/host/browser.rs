@@ -13,7 +13,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chromiumoxide::Browser;
-use tokio::io::AsyncBufReadExt;
 use tokio::net::TcpStream;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
@@ -64,14 +63,14 @@ enum BackendKeepalive {
     Chromium {
         _browser: Arc<Mutex<Browser>>,
         handler_task: JoinHandle<()>,
-        child: Child,
+        child: Mutex<Child>,
     },
     /// Generic subprocess slot used by CDP-compatible subprocess backends
     /// (lightpanda's own `serve`, the foxbridge -> camoufox stack, future
     /// subprocess-driven engines). `kill_on_drop` plus the explicit
     /// `start_kill` below guarantee the child process tree dies with
     /// this handle.
-    Subprocess { child: Child },
+    Subprocess { child: Mutex<Child> },
     /// No-op keepalive for synthetic handles (tests only).
     None,
 }
@@ -85,13 +84,13 @@ impl Drop for BackendKeepalive {
                 ..
             } => {
                 handler_task.abort();
-                let _ = child.start_kill();
+                let _ = child.get_mut().start_kill();
             }
             BackendKeepalive::Subprocess { child, .. } => {
                 // start_kill is non-blocking and the only thing we can do
                 // from a synchronous Drop. The subprocess gets SIGKILL'd by
                 // the OS; tempdir cleanup happens after.
-                let _ = child.start_kill();
+                let _ = child.get_mut().start_kill();
             }
             BackendKeepalive::None => {}
         }
@@ -99,6 +98,28 @@ impl Drop for BackendKeepalive {
 }
 
 impl BrowserHandle {
+    /// Whether the supervised browser process still exists. Synthetic or
+    /// externally supplied handles have no supervised process identity.
+    pub(crate) async fn process_running(&self) -> Result<Option<bool>, Error> {
+        let child = match &self._keepalive {
+            BackendKeepalive::Chromium { child, .. } | BackendKeepalive::Subprocess { child } => {
+                child
+            }
+            BackendKeepalive::None => return Ok(None),
+        };
+        child
+            .lock()
+            .await
+            .try_wait()
+            .map(|status| Some(status.is_none()))
+            .map_err(|error| {
+                Error::new(
+                    ErrorCode::IoError,
+                    format!("probe browser process: {error}"),
+                )
+            })
+    }
+
     /// Create a synthetic handle that carries only a `profile_path`. Used
     /// in tests that exercise the HTTP path without a real browser subprocess.
     #[cfg(any(test, feature = "host"))]
@@ -260,23 +281,41 @@ fn apply_subprocess_env(cmd: &mut Command, engine_envs: &[(String, String)]) {
     }
 }
 
-/// Spawn a task that reads `stderr` lines into a bounded ring buffer. Returns
-/// an empty ring when stderr is not piped.
+/// Read `stderr` lines into a bounded ring buffer. Returns an empty ring when
+/// stderr is not piped.
+///
+/// The reader is a detached OS thread, not a runtime task. The pipe reaches
+/// EOF only when every process holding its write end has exited, and a browser
+/// child (a crash handler, or a process wedged mid-exit) can outlive the
+/// browser. On Windows tokio reads child pipes on its blocking pool, which a
+/// runtime waits for on shutdown, so a never-ending read there kept the
+/// process from ever exiting after the browser was gone.
 fn new_stderr_ring(stderr: Option<tokio::process::ChildStderr>) -> Arc<Mutex<VecDeque<String>>> {
     let ring = Arc::new(Mutex::new(VecDeque::<String>::new()));
-    if let Some(stderr) = stderr {
-        let ring_w = ring.clone();
-        tokio::spawn(async move {
-            let mut reader = tokio::io::BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
-                let mut guard = ring_w.lock().await;
+    let Some(stderr) = stderr else {
+        return ring;
+    };
+    #[cfg(unix)]
+    let file = stderr.into_owned_fd().map(std::fs::File::from);
+    #[cfg(windows)]
+    let file = stderr.into_owned_handle().map(std::fs::File::from);
+    let Ok(file) = file else {
+        return ring;
+    };
+    let ring_w = ring.clone();
+    let _ = std::thread::Builder::new()
+        .name("afhttp-browser-stderr".into())
+        .spawn(move || {
+            use std::io::BufRead;
+            for line in std::io::BufReader::new(file).lines() {
+                let Ok(line) = line else { break };
+                let mut guard = ring_w.blocking_lock();
                 if guard.len() >= STDERR_RING_CAP {
                     guard.pop_front();
                 }
                 guard.push_back(line);
             }
         });
-    }
     ring
 }
 
@@ -523,5 +562,45 @@ mod tests {
         );
         // Zero is never returned (would no-op the upstream tool).
         assert_ne!(fingerprint_seed_from_path(std::path::Path::new("")), 0);
+    }
+}
+
+#[cfg(test)]
+mod stderr_ring_tests {
+    use super::*;
+
+    /// The browser can be gone while something else still holds its stderr
+    /// pipe open. Shutting the runtime down must not wait for that pipe.
+    #[test]
+    fn runtime_shutdown_does_not_wait_for_an_open_stderr_pipe() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut child = runtime.block_on(async {
+            #[cfg(windows)]
+            let mut command = Command::new("cmd");
+            #[cfg(windows)]
+            command.args(["/C", "ping -n 30 127.0.0.1 >NUL"]);
+            #[cfg(not(windows))]
+            let mut command = Command::new("sleep");
+            #[cfg(not(windows))]
+            command.arg("30");
+            let mut child = command
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+            let _ring = new_stderr_ring(child.stderr.take());
+            child
+        });
+        let started = std::time::Instant::now();
+        runtime.shutdown_timeout(Duration::from_secs(10));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "runtime shutdown waited {:?} on the stderr reader",
+            started.elapsed()
+        );
+        let _ = child.start_kill();
     }
 }

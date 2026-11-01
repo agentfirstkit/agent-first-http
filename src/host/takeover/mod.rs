@@ -10,7 +10,9 @@
 //! the authenticated host listener.
 
 use std::net::SocketAddr;
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -37,6 +39,7 @@ use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite;
 
 use crate::host::bootstrap::TakeoverProviderKind;
+#[cfg(unix)]
 use crate::host::browser::{pick_ephemeral_port, resolve_named_bin, wait_for_tcp_ready};
 use crate::shared::error::{Error, ErrorCode};
 
@@ -228,6 +231,7 @@ fn spawn_window_manager(display: &str) -> Option<Child> {
     None
 }
 
+#[cfg(unix)]
 fn resolve_kasmvnc_bin() -> Result<PathBuf, Error> {
     if let Ok(raw) = std::env::var("AFHTTP_KASMVNC_BIN") {
         let path = PathBuf::from(raw);
@@ -238,6 +242,7 @@ fn resolve_kasmvnc_bin() -> Result<PathBuf, Error> {
     resolve_named_bin("Xvnc", &None).or_else(|_| resolve_named_bin("kasmvncserver", &None))
 }
 
+#[cfg(unix)]
 fn resolve_kasmvnc_web_root() -> Result<PathBuf, Error> {
     if let Ok(raw) = std::env::var("AFHTTP_KASMVNC_WEB_ROOT") {
         let path = PathBuf::from(raw);
@@ -311,6 +316,43 @@ pub struct TakeoverProxyState {
 }
 
 impl TakeoverProxyState {
+    /// Check the supervised provider plus both connections needed to display
+    /// and control a browser. A configured provider alone is not a live one.
+    pub(crate) async fn probe(&self) -> Result<(), Error> {
+        let check = async {
+            if let Some(handle) = &self._handle {
+                if handle.child.lock().await.try_wait()?.is_some() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::NotConnected,
+                        "display provider process exited",
+                    ));
+                }
+                #[cfg(unix)]
+                let _display = UnixStream::connect(format!(
+                    "/tmp/.X11-unix/X{}",
+                    self.display.trim_start_matches(':')
+                ))
+                .await?;
+            }
+            let _web = tokio::net::TcpStream::connect(self.web_addr).await?;
+            Ok::<(), std::io::Error>(())
+        };
+        tokio::time::timeout(Duration::from_secs(2), check)
+            .await
+            .map_err(|_| {
+                Error::new(
+                    ErrorCode::CdpUnavailable,
+                    "takeover display connection probe timed out",
+                )
+            })?
+            .map_err(|error| {
+                Error::new(
+                    ErrorCode::CdpUnavailable,
+                    format!("takeover display unavailable: {error}"),
+                )
+            })
+    }
+
     pub fn new(provider: TakeoverProviderKind, handle: Arc<ProviderHandle>, quality: u8) -> Self {
         Self {
             provider,
@@ -404,6 +446,17 @@ async fn proxy_kasmvnc(
 
     let upstream_path = display_upstream_path_and_query(&uri);
     if let Ok(ws) = ws {
+        // The handoff cookie is SameSite=Lax and scoped to the host, not the
+        // port, so any page on the same site (another localhost service) can
+        // open this socket with it. Only the panel's own origin may; a request
+        // with no Origin at all is a relay such as AFUI's proxy, not a page.
+        if !websocket_origin_matches_host(request.headers()) {
+            return (
+                StatusCode::FORBIDDEN,
+                "cross-origin takeover socket refused",
+            )
+                .into_response();
+        }
         let upstream = format!("ws://{}{}", display.web_addr, upstream_path);
         // KasmVNC's websockify speaks the `binary` WebSocket subprotocol and
         // closes the stream if it isn't negotiated. Echo it back to the
@@ -415,6 +468,20 @@ async fn proxy_kasmvnc(
     }
 
     forward_display_http(display.web_addr, upstream_path, request).await
+}
+
+fn websocket_origin_matches_host(headers: &HeaderMap) -> bool {
+    let Some(origin) = headers.get(header::ORIGIN) else {
+        return true;
+    };
+    let (Ok(origin), Some(Ok(host))) = (
+        origin.to_str(),
+        headers.get(header::HOST).map(|value| value.to_str()),
+    ) else {
+        return false;
+    };
+    origin.eq_ignore_ascii_case(&format!("http://{host}"))
+        || origin.eq_ignore_ascii_case(&format!("https://{host}"))
 }
 
 /// The landing page's own bootstrap: a page rather than a redirect, because
@@ -506,6 +573,10 @@ fn kasmvnc_quality_params(pct: u8) -> String {
     )
 }
 
+/// Upper bound on one panel HTTP exchange and on the display WebSocket
+/// handshake, both against the display's own loopback listener.
+const DISPLAY_UPSTREAM_TIMEOUT: Duration = Duration::from_secs(30);
+
 async fn forward_display_http(
     upstream: std::net::SocketAddr,
     path_and_query: String,
@@ -526,8 +597,25 @@ async fn forward_display_http(
         }
     };
 
-    let client = reqwest::Client::new();
-    let mut upstream_req = client.request(method, url).body(body);
+    // Loopback to the display's own listener: never through an ambient
+    // HTTP_PROXY, which would send the panel's URLs off the machine.
+    // Bounded: a display that accepts and never answers must not pin the
+    // request (and its socket) for good.
+    let Ok(client) = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(DISPLAY_UPSTREAM_TIMEOUT)
+        .build()
+    else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "display proxy: could not build the loopback client",
+        )
+            .into_response();
+    };
+    let mut upstream_req = client
+        .request(method, url)
+        .header(header::ACCEPT_ENCODING, "identity")
+        .body(body);
     for (name, value) in &parts.headers {
         if should_forward_header(name) {
             upstream_req = upstream_req.header(name, value);
@@ -553,6 +641,10 @@ async fn forward_display_http(
             headers.insert(name.clone(), value.clone());
         }
     }
+    let is_html = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/html"));
     let bytes = match resp.bytes().await {
         Ok(bytes) => bytes,
         Err(e) => {
@@ -564,6 +656,16 @@ async fn forward_display_http(
         }
     };
 
+    if is_html && status.is_success() {
+        // The panel credential remains in its HttpOnly cookie. Relative paths
+        // also work when the panel is delivered through an AFUI proxy prefix.
+        let mut html = String::from_utf8_lossy(&bytes).into_owned();
+        html.push_str(include_str!("health-watch.html"));
+        // The representation changed; upstream validators no longer apply.
+        headers.remove(header::ETAG);
+        headers.remove(header::CONTENT_ENCODING);
+        return (status, headers, Body::from(html)).into_response();
+    }
     (status, headers, Body::from(bytes)).into_response()
 }
 
@@ -596,9 +698,14 @@ async fn forward_kasmvnc_ws(client: WebSocket, upstream_url: String) {
             return;
         }
     };
-    let upstream_stream = match tokio_tungstenite::connect_async(upstream_req).await {
-        Ok((stream, _resp)) => stream,
-        Err(_) => {
+    let upstream_stream = match tokio::time::timeout(
+        DISPLAY_UPSTREAM_TIMEOUT,
+        tokio_tungstenite::connect_async(upstream_req),
+    )
+    .await
+    {
+        Ok(Ok((stream, _resp))) => stream,
+        _ => {
             let _ = client_tx.close().await;
             return;
         }
@@ -677,6 +784,7 @@ fn should_forward_header(name: &header::HeaderName) -> bool {
     !matches!(
         name.as_str().to_ascii_lowercase().as_str(),
         "host"
+            | "accept-encoding"
             | "connection"
             | "upgrade"
             | "content-length"
@@ -698,7 +806,29 @@ fn should_forward_response_header(name: &header::HeaderName) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{js_string, kasmvnc_quality_params};
+    use super::{js_string, kasmvnc_quality_params, websocket_origin_matches_host};
+    use axum::http::{HeaderMap, header};
+
+    #[test]
+    fn only_the_panel_origin_or_a_relay_opens_the_display_socket() {
+        let headers = |origin: Option<&str>| {
+            let mut map = HeaderMap::new();
+            map.insert(header::HOST, "127.0.0.1:9222".parse().unwrap());
+            if let Some(origin) = origin {
+                map.insert(header::ORIGIN, origin.parse().unwrap());
+            }
+            map
+        };
+        assert!(websocket_origin_matches_host(&headers(None)));
+        assert!(websocket_origin_matches_host(&headers(Some(
+            "http://127.0.0.1:9222"
+        ))));
+        // Same site, other port: the Lax handoff cookie would ride along.
+        assert!(!websocket_origin_matches_host(&headers(Some(
+            "http://127.0.0.1:8080"
+        ))));
+        assert!(!websocket_origin_matches_host(&headers(Some("null"))));
+    }
 
     #[test]
     fn a_seeded_setting_cannot_close_the_script_it_is_written_in() {

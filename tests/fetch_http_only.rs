@@ -258,7 +258,7 @@ async fn http_only_fetch_applies_request_overrides() {
         .cookie("theme", "light")
         .cookie_full(
             cookie::Cookie::build(("scoped", "yes"))
-                .path("/headers")
+                .path("/headers.json")
                 .http_only(true)
                 .same_site(cookie::SameSite::Lax)
                 .build(),
@@ -652,7 +652,7 @@ fn redacted_cli_error(output: &std::process::Output) -> serde_json::Value {
 }
 
 #[tokio::test]
-async fn http_failure_redacts_url_credentials_in_sdk_and_cli() {
+async fn http_failure_redacts_url_credentials_in_cli() {
     // Select a loopback port rather than assuming a fixed port is unused.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -676,12 +676,6 @@ async fn http_failure_redacts_url_credentials_in_sdk_and_cli() {
         .expect("closed port must fail");
     assert_eq!(failure.error_code, ErrorCode::TargetUnreachable);
     assert!(failure.retryable);
-    assert_error_canaries_absent(&failure.detail);
-    assert_error_canaries_absent(&serde_json::to_string(&failure).expect("fetch error JSON"));
-    let error = failure.as_error();
-    assert_error_canaries_absent(&error.detail);
-    assert_error_canaries_absent(&error.to_string());
-    assert_error_canaries_absent(&serde_json::to_string(&error).expect("SDK error JSON"));
     assert_eq!(failure.trace.timeout_ms, 5000);
     assert_eq!(failure.trace.current_stage, "navigate");
     assert!(
@@ -788,4 +782,26 @@ async fn cli_fetch_rejects_legacy_timeout_flag() {
     // The closed-world registry names the rule it broke; a flag it never
     // registered is an unknown argument, not a generic bad value.
     assert_eq!(body["error"]["code"], "cli_unknown_argument");
+}
+
+#[tokio::test]
+async fn http_only_embedded_turnstile_is_not_a_bot_wall() {
+    let fixture = support::fixture_server::spawn().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let client = Client::http_only().expect("client");
+    let result = client
+        .fetch(format!("{}/embedded-turnstile.html", fixture.base_url()))
+        .render(RenderMode::None)
+        .want([Artifact::Body])
+        .out_dir(tmp.path().to_path_buf())
+        .send()
+        .await
+        .expect("fetch");
+    assert!(result.next_action.is_none());
+    assert!(
+        !result
+            .warnings
+            .iter()
+            .any(|warning| warning.code == ErrorCode::BotWallDetected)
+    );
 }

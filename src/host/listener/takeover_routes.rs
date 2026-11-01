@@ -22,6 +22,27 @@ pub async fn display_proxy(
     let Some(display) = state.takeover.clone() else {
         return service_unavailable("display takeover is not enabled");
     };
+    // Gate document loads and WebSocket upgrades. Static assets do not each
+    // need an independent CDP connection while a client is bootstrapping.
+    let path = uri.path();
+    if ws.is_ok()
+        || path.ends_with("/panel")
+        || path.ends_with('/')
+        || path.ends_with(".html")
+        || path.ends_with("/afhttp-status")
+    {
+        match super::health::require_takeover_ready(&state).await {
+            Ok(health) if path.ends_with("/afhttp-status") => {
+                return axum::Json(crate::shared::afdata::result_value(
+                    "takeover_health",
+                    serde_json::to_value(health).unwrap_or_default(),
+                ))
+                .into_response();
+            }
+            Ok(_) => {}
+            Err(error) => return service_unavailable(&error.detail),
+        }
+    }
     display.proxy(ws, uri, request).await
 }
 

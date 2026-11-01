@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck source-path=SCRIPTDIR
 # Manual real-display takeover smoke test (KasmVNC provider, human in the loop).
 #
 # Runs `examples/manual_display_takeover.rs` inside the test container
@@ -23,24 +24,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPORE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 IMAGE_TAG="${AFHTTP_TEST_CONTAINER_IMAGE:-${AFHTTP_DOCKER_IMAGE:-afhttp-test:local}}"
 
-CONTAINER_RUNTIME="${AFHTTP_TEST_CONTAINER_RUNTIME:-}"
-if [ -z "$CONTAINER_RUNTIME" ]; then
-  if [ "${CI:-}" = "true" ]; then
-    CONTAINER_RUNTIME="docker"
-  elif [ "$(uname -s)" = "Darwin" ]; then
-    CONTAINER_RUNTIME="apple"
-  else
-    CONTAINER_RUNTIME="docker"
-  fi
-fi
-case "$CONTAINER_RUNTIME" in
-  apple) CONTAINER_BIN="container" ;;
-  docker) CONTAINER_BIN="docker" ;;
-  *)
-    echo "AFHTTP_TEST_CONTAINER_RUNTIME must be apple or docker" >&2
-    exit 2
-    ;;
-esac
+# shellcheck source=../scripts/container-runtime.sh
+source "$SPORE_DIR/scripts/container-runtime.sh"
+af_container_resolve "${AFHTTP_TEST_CONTAINER_RUNTIME:-}"
+export AFHTTP_TEST_CONTAINER_RUNTIME="$CONTAINER_RUNTIME"
 
 # Reuse the generic harness's image-build logic so we never duplicate it.
 # Running any trivial command makes it build the image if missing.

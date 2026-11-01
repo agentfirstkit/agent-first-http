@@ -1,6 +1,7 @@
 //! `storage` artifact: localStorage, sessionStorage, and IndexedDB database
 //! names captured via `Runtime.evaluate`. Default off — sensitive data risk.
-//! Capped at 256 KiB of JSON; values truncated if the cap is exceeded.
+//! Capped at 256 KiB of JSON; past the cap every value is dropped and a
+//! `truncated` note says so.
 
 use std::path::PathBuf;
 
@@ -11,7 +12,7 @@ use crate::sdk::fetch::writer;
 use crate::shared::artifacts::ArtifactPaths;
 use crate::shared::error::{Error, ErrorCode};
 
-/// Hard cap on the serialized JSON size. Values are truncated if exceeded.
+/// Hard cap on the serialized JSON size. Past it the values are dropped.
 const SIZE_CAP_BYTES: usize = 256 * 1024;
 pub const STORAGE_SCHEMA_VERSION: u32 = 2;
 
@@ -40,29 +41,31 @@ pub async fn capture(
     session_id: &str,
     url: &str,
 ) -> Result<StorageSnapshot, Error> {
-    // localStorage
+    // A storage area the page cannot read (an opaque origin, a sandboxed
+    // frame, storage blocked by policy) throws. That is a failed capture, not
+    // an empty store.
     let ls = eval_json(
         conn,
         session_id,
+        "localStorage",
         "(function(){ var o={}; for(var i=0;i<localStorage.length;i++){ \
          var k=localStorage.key(i); o[k]=localStorage.getItem(k); } \
          return JSON.stringify(o); })()",
     )
-    .await
-    .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
+    .await?;
 
-    // sessionStorage
     let ss = eval_json(
         conn,
         session_id,
+        "sessionStorage",
         "(function(){ var o={}; for(var i=0;i<sessionStorage.length;i++){ \
          var k=sessionStorage.key(i); o[k]=sessionStorage.getItem(k); } \
          return JSON.stringify(o); })()",
     )
-    .await
-    .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
+    .await?;
 
-    // IndexedDB names
+    // IndexedDB names are best-effort: `indexedDB.databases()` is missing on
+    // some engines, and a missing list says nothing about the stores above.
     let idb_names = eval_str_array(
         conn,
         session_id,
@@ -73,7 +76,7 @@ pub async fn capture(
 
     let mut snapshot = StorageSnapshot {
         schema_version: STORAGE_SCHEMA_VERSION,
-        page_url: crate::shared::redact::redact_url(url),
+        page_url: url.to_string(),
         local_storage: ls,
         session_storage: ss,
         indexed_db_names: idb_names,
@@ -112,6 +115,7 @@ pub async fn write(paths: &ArtifactPaths, snapshot: &StorageSnapshot) -> Result<
 async fn eval_json(
     conn: &Connection,
     session_id: &str,
+    area: &str,
     expr: &str,
 ) -> Result<serde_json::Value, Error> {
     let r = conn
@@ -125,7 +129,7 @@ async fn eval_json(
             Some(session_id),
         )
         .await?;
-    let s = r["result"]["value"].as_str().unwrap_or("{}");
+    let s = evaluated_string(&r, area)?;
     serde_json::from_str(s).map_err(|e| {
         Error::new(
             ErrorCode::ArtifactCaptureFailed,
@@ -150,7 +154,7 @@ async fn eval_str_array(
             Some(session_id),
         )
         .await?;
-    let s = r["result"]["value"].as_str().unwrap_or("[]");
+    let s = evaluated_string(&r, "indexedDB")?;
     serde_json::from_str::<Vec<serde_json::Value>>(s)
         .map(|arr| {
             arr.into_iter()
@@ -163,4 +167,57 @@ async fn eval_str_array(
                 format!("storage: parse idb names: {e}"),
             )
         })
+}
+
+/// The string an evaluation returned, or a capture failure when the page
+/// threw (or returned something else) instead.
+fn evaluated_string<'a>(reply: &'a serde_json::Value, area: &str) -> Result<&'a str, Error> {
+    if let Some(details) = reply.get("exceptionDetails") {
+        let message = details
+            .pointer("/exception/description")
+            .or_else(|| details.get("text"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("exception");
+        return Err(Error::new(
+            ErrorCode::ArtifactCaptureFailed,
+            format!("storage: reading {area} threw: {message}"),
+        ));
+    }
+    reply["result"]["value"].as_str().ok_or_else(|| {
+        Error::new(
+            ErrorCode::ArtifactCaptureFailed,
+            format!("storage: reading {area} returned no string"),
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_throwing_storage_read_is_a_capture_failure_not_an_empty_store() {
+        let threw = json!({
+            "result": {"type": "object", "subtype": "error"},
+            "exceptionDetails": {"text": "Uncaught", "exception": {
+                "description": "SecurityError: Failed to read the 'localStorage' property"
+            }},
+        });
+        let error = evaluated_string(&threw, "localStorage").unwrap_err();
+        assert_eq!(error.error_code, ErrorCode::ArtifactCaptureFailed);
+        assert_eq!(
+            error.detail,
+            "storage: reading localStorage threw: SecurityError: Failed to read the 'localStorage' property"
+        );
+        let undefined = json!({"result": {"type": "undefined"}});
+        assert_eq!(
+            evaluated_string(&undefined, "sessionStorage")
+                .unwrap_err()
+                .error_code,
+            ErrorCode::ArtifactCaptureFailed
+        );
+        let ok = json!({"result": {"type": "string", "value": "{}"}});
+        assert_eq!(evaluated_string(&ok, "localStorage").unwrap(), "{}");
+    }
 }

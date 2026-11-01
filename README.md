@@ -25,11 +25,11 @@ own session.
 
 ## The basics: hand it a URL, get the page back as data
 
-Give afhttp a URL; it writes the page to disk and prints one line of JSON saying what it got:
+Give afhttp a URL; it writes the page to disk and prints one line of JSON saying what it got (here with `--render none`, so no browser starts; `trace` shortened):
 
 ```bash
-$ afhttp fetch https://example.com
-{"kind":"result","result":{"code":"fetch","request_url":"https://example.com","status":200,"final_url":"https://example.com/","body_file":"/tmp/afhttp-out/<id>/body.html"},"trace":{}}
+$ afhttp fetch https://example.com --render none
+{"kind":"result","result":{"code":"fetch","request_url":"https://example.com","status":200,"final_url":"https://example.com/","content_type":"text/html; charset=utf-8","body_file":"/tmp/afhttp-out/<id>/body.html","trace":{"render_decision":"http_only","render_mode":"none","render_used":false}},"trace":{}}
 ```
 
 That is the whole job: **hand it a URL, get the page back as files an agent can read** — never a terminal blob to scrape. CLI output follows AFDATA protocol v1: command data is in `result`; failures use `kind: "error"` with stable `error.code` values rather than guesses.
@@ -83,9 +83,9 @@ The agent never has to parse a human-readable error message. Every CLI output
 is an AFDATA protocol-v1 JSON event, and every failure carries a stable
 `error.code`. See [docs/architecture.md](docs/architecture.md) for the full contract.
 
-## Two roles: host and driver
+## Host and driver
 
-afhttp splits into two roles that are independently locatable:
+afhttp splits into roles that are independently locatable:
 
 | Role | Command | What it does |
 | --- | --- | --- |
@@ -94,15 +94,13 @@ afhttp splits into two roles that are independently locatable:
 
 Run the host where the browser needs to be (residential IP, GUI machine,
 datacenter); run the driver wherever the agent runs. Connectivity is your mesh's
-problem, not afhttp's. The CLI has 12 commands: `host`, `fetch`, `upload`,
-`cdp`, `panel`, `ui`, `health`, `capabilities`, `profile`, `tabs`, `skill`, and
-`container`.
+problem, not afhttp's.
 
 ## Running it: inline for a one-shot, a host for sessions
 
 `afhttp fetch <url>` with no `--endpoint-url` runs **inline** — it spins up a sandboxed browser for that one fetch and tears it down. Zero setup; use it for stateless, one-shot acquisition.
 
-For state that outlives a single fetch — a reused login, a warmed profile, human takeover — run a long-lived **host** in a container (the isolation boundary). One command builds the image from a recipe embedded in the binary and runs it (Docker, Podman, or Apple `container`, auto-detected — override with `--runtime`); it prints structured connection metadata and a ready-to-run driver command without exposing the long-lived host token by default:
+For state that outlives a single fetch — a reused login, a warmed profile, human takeover — run a long-lived **host** in a container (the isolation boundary). One command builds the image from a recipe embedded in the binary and runs it (Apple `container`, Podman, or Docker, auto-detected in that order — override with `--runtime`); it prints structured connection metadata and a ready-to-run driver command without exposing the long-lived host token by default:
 
 ```bash
 afhttp container install
@@ -146,7 +144,7 @@ container setup, upgrades, and security posture.
 
 afhttp is not "headless Chromium." How hard a site fights back decides which engine actually reaches it, so afhttp drives a whole spectrum behind one CDP contract — pick one with `--browser` (or point `--browser-bin` at a binary):
 
-- **chromium / chrome** — the default: full rendering, screenshots, downloads, all artifacts, observation, network body capture, and optional real-display takeover, with multi-attach.
+- **chromium** — the default (`--browser auto` looks for a Chromium binary, then falls back to Google Chrome): full rendering, screenshots, downloads, all artifacts, observation, network body capture, and optional real-display takeover, with multi-attach.
 - **fingerprint-chromium** — the Chromium capability matrix (including optional real-display takeover) plus engine-level fingerprint spoofing (UA, WebGL, canvas, CDP-detection evasion) for bot-walled sites; a stable seed derived from the profile path keeps identity per-profile.
 - **camoufox** (via foxbridge) — a Firefox stealth fork for sites that fingerprint Chromium, driven through the [foxbridge](https://foxbridge.vulpineos.com/) CDP→Juggler proxy. Same CDP subset as Lightpanda (no Chromium screenshot), but optional real-display takeover works because the human drives the real X display.
 - **lightpanda** — an ultralight engine covering a rendering subset: HTML / text / network metadata / console / limited observation only — no screenshot, no display takeover (no rendering).
@@ -167,10 +165,10 @@ Handing over a URL leaves the agent guessing when the person is finished. Where 
 
 ### One-shot fetch, no host
 
-The shortest path starts with pure HTTP. `--render none` never starts a browser. With the default `--render auto`, afhttp tries the same HTTP fast path first and only starts an inline ephemeral host if the response needs browser rendering.
+The shortest path starts with pure HTTP. `--render none` never starts a browser. With the default `--render auto`, afhttp tries the same HTTP fast path first and only starts an inline ephemeral host if the response needs browser rendering, reporting why in `trace.escalation_reason`.
 
 ```bash
-afhttp fetch https://example.com
+afhttp fetch https://example.com --render none
 ```
 
 The following is an excerpt of the event's `result` field:
@@ -180,17 +178,21 @@ The following is an excerpt of the event's `result` field:
   "code": "fetch",
   "status": 200,
   "final_url": "https://example.com/",
+  "content_type": "text/html; charset=utf-8",
   "body_file": "/tmp/afhttp-out/<id>/body.html",
   "trace": {
     "render_decision": "http_only",
-    "render_mode": "auto",
+    "render_mode": "none",
     "render_used": false,
+    "main_request_observed": true,
     "current_stage": "complete",
-    "duration_ms": 120,
+    "duration_ms": 180,
     "timeout_ms": 30000,
     "stages": [
-      {"name": "navigate", "status": "ok", "duration_ms": 110},
-      {"name": "capture_body", "status": "ok", "duration_ms": 12}
+      {"name": "resolve_cookie_jar", "status": "ok", "duration_ms": 0},
+      {"name": "prepare_request", "status": "ok", "duration_ms": 0},
+      {"name": "navigate", "status": "ok", "duration_ms": 176},
+      {"name": "capture_body", "status": "ok", "duration_ms": 0}
     ]
   }
 }
@@ -215,14 +217,10 @@ afhttp host --listen tcp:0.0.0.0:9222 --profile work --display headless \
 # (container:NAME) — so the secret never goes through the shell:
 afhttp fetch --endpoint-url ws://host.mesh.internal:9222 \
              --token-secret file:$HOME/.afhttp/hosts.json#work.token_secret \
-             --render auto --wait auto \
-             --want rendered_html --want observation --want screenshot \
-             --want network --want console \
-             --network-bodies xhr \
              https://target.example.com/dashboard
 ```
 
-The token secret gates `/cdp`, display takeover, and `/profile`; bind `tcp:127.0.0.1:<port>` or a `unix:` socket instead when the host and driver share a machine and you want to skip it. The profile persists across host restarts. Cookies and localStorage acquired in one fetch are available to the next.
+The token secret gates `/cdp`, display takeover, and `/profile`; bind `tcp:127.0.0.1:<port>` or a `unix:` socket instead when the host and driver share a machine and you want to skip it. A token-less TCP host still refuses any request carrying a foreign `Origin`, a non-loopback `Host`, or a cross-site non-navigation `Sec-Fetch-Site` header, so a web page open on that machine cannot reach `/cdp` or frame a takeover panel, and DNS rebinding is refused; afhttp's own CLI and SDK send no `Origin`. The profile persists across host restarts. Cookies and localStorage acquired in one fetch are available to the next.
 
 ### Raw CDP escape hatch
 
@@ -289,18 +287,7 @@ A human opens the `takeover_url_secret` in a local browser and drives the real d
 
 ### Manage persistent profiles
 
-Persistent browser profiles are local disk identities. Operators can inspect and clean them up without guessing which temp directory belongs to which host:
-
-```bash
-afhttp profile list
-afhttp profile info work --backend brave
-afhttp profile lock-status work --backend brave
-afhttp profile downloads work --backend brave
-afhttp profile prune --older-than 30d --dry-run
-afhttp profile delete old-work --backend brave --confirm old-work
-```
-
-Profile lifecycle commands are local-only; `downloads` only lists captured files, and destructive commands refuse locked profiles.
+Persistent browser profiles are local disk identities that operators can inspect and clean up without guessing which temp directory belongs to which host. `afhttp profile --help` lists the lifecycle commands; they are local-only, and the destructive ones refuse locked profiles.
 Profile names are logical and persistent storage is backend-scoped, so
 `work` under Brave and `work` under Chromium are different directories.
 
@@ -309,7 +296,7 @@ Profile names are logical and persistent storage is backend-scoped, so
 The library is a thin SDK over the same endpoint protocol. It is **not** an embedded browser engine; it talks to a running `afhttp host` over CDP.
 
 ```rust
-use afhttp::{Client, RenderMode, Wait, Artifact};
+use afhttp::{Client, sdk::{RenderMode, Wait}, shared::artifacts::Artifact};
 
 let client = Client::connect("ws://host.mesh.internal:9222")?;
 
@@ -340,7 +327,7 @@ afhttp does not operate in isolation. Here is how it fits with the rest of the a
 When a page requires an emailed verification link or OTP, hand off to **afmail** rather than polling IMAP yourself:
 
 1. `afhttp fetch` navigates to the login form and submits credentials.
-2. The page sends an email. The agent calls `afmail triage` (or `afmail fetch`) to find the message, extract the link or code.
+2. The page sends an email. The agent runs `afmail pull`, then `afmail triage`, to find the message, extract the link or code.
 3. The agent feeds the link/code back to afhttp via `--evaluate-after-wait` or a subsequent `afhttp fetch`.
 
 afhttp handles the browser-side state; afmail handles the mailbox-side state. They share no storage and are always driven by the agent — never by each other.

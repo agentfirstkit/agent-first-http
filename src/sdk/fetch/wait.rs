@@ -5,10 +5,10 @@ use crate::shared::error::{Error, ErrorCode};
 /// When to consider a page ready.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Wait {
-    /// Mechanical readiness: load, network quiet, then DOM/text stable.
+    /// Strict full-page network quiet plus DOM/text stability.
     #[default]
     Auto,
-    /// CDP `Page.loadEventFired`. Default.
+    /// CDP `Page.loadEventFired`.
     Load,
     /// CDP `Network.idle` (no requests for ~500 ms).
     Idle,
@@ -23,6 +23,10 @@ pub enum Wait {
     /// `visibility != "hidden"`. Catches the common framework pattern of
     /// rendering the node into the DOM before the layout has painted it.
     SelectorVisible(String),
+    /// All matched regions must be visible, contain text, and remain stable.
+    /// Main-frame requests and frames inside the regions must finish; frames
+    /// outside them are reported as ancillary, without a domain allowlist.
+    SelectorStable(String),
     /// A fixed wall-clock delay after navigation start.
     Ms(u64),
 }
@@ -35,6 +39,15 @@ impl Wait {
             Ok(Self::Load)
         } else if s == "idle" {
             Ok(Self::Idle)
+        } else if let Some(sel) = s.strip_prefix("selector-stable:") {
+            if sel.trim().is_empty() {
+                Err(Error::new(
+                    ErrorCode::InvalidArgument,
+                    "--wait selector-stable: requires a non-empty CSS selector",
+                ))
+            } else {
+                Ok(Self::SelectorStable(sel.to_string()))
+            }
         } else if let Some(sel) = s.strip_prefix("selector-visible:") {
             if sel.is_empty() {
                 Err(Error::new(
@@ -66,7 +79,7 @@ impl Wait {
                 ErrorCode::InvalidArgument,
                 format!(
                     "--wait: unknown mode {s:?}; expected \
-                     auto|load|idle|selector:<css>|selector-visible:<css>|ms:<n>"
+                     auto|load|idle|selector:<css>|selector-visible:<css>|selector-stable:<css>|ms:<n>"
                 ),
             ))
         }
@@ -80,6 +93,7 @@ impl Wait {
             Self::Idle => "idle",
             Self::Selector(_) => "selector",
             Self::SelectorVisible(_) => "selector_visible",
+            Self::SelectorStable(_) => "selector_stable",
             Self::Ms(_) => "ms",
         }
     }
@@ -103,6 +117,10 @@ mod tests {
             Wait::SelectorVisible("#root".into())
         );
         assert_eq!(Wait::parse("ms:250").unwrap(), Wait::Ms(250));
+        assert_eq!(
+            Wait::parse("selector-stable:#prices").unwrap(),
+            Wait::SelectorStable("#prices".into())
+        );
     }
 
     #[test]
@@ -110,6 +128,8 @@ mod tests {
         let err = Wait::parse("selector:").err();
         assert_eq!(err.map(|e| e.error_code), Some(ErrorCode::InvalidArgument));
         let err = Wait::parse("selector-visible:").err();
+        assert_eq!(err.map(|e| e.error_code), Some(ErrorCode::InvalidArgument));
+        let err = Wait::parse("selector-stable: ").err();
         assert_eq!(err.map(|e| e.error_code), Some(ErrorCode::InvalidArgument));
     }
 

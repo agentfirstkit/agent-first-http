@@ -13,7 +13,7 @@ use crate::sdk::fetch::result::Warning;
 use crate::shared::artifacts::{Artifact, ArtifactPaths};
 use crate::shared::error::ErrorCode;
 
-use super::capture::decode_response_body;
+use super::capture::{CDP_RESPONSE_BODY_MAX_BYTES, decode_response_body};
 
 pub(super) struct NetworkBodyCapture<'a> {
     pub(super) conn: &'a Connection,
@@ -39,8 +39,10 @@ pub(super) async fn capture_network_bodies(
         }
         // The CDP call returns a complete JSON body. Skip known oversized
         // responses before requesting/decoding it; unknown or compressed
-        // decoded sizes still require the post-decode truncation below.
-        if known_body_exceeds_limit(&entry, ctx.max_bytes) {
+        // decoded sizes still require the post-decode truncation below. Past
+        // the CDP message bound a body is skipped whatever the cap says.
+        let skip_above = ctx.max_bytes.min(CDP_RESPONSE_BODY_MAX_BYTES);
+        if known_body_exceeds_limit(&entry, skip_above) {
             ctx.collector
                 .set_hint(
                     &request_id,
@@ -52,8 +54,7 @@ pub(super) async fn capture_network_bodies(
                 artifact: Artifact::Network,
                 code: ErrorCode::NetworkBodyTruncated,
                 detail: format!(
-                    "body for {request_id} skipped before capture: known size exceeds {} bytes",
-                    ctx.max_bytes
+                    "body for {request_id} skipped before capture: known size exceeds {skip_above} bytes"
                 ),
             });
             continue;
@@ -148,17 +149,18 @@ pub(super) async fn capture_network_bodies(
     }
 }
 
-fn known_body_exceeds_limit(entry: &NetworkEntry, max_bytes: u64) -> bool {
-    let encoded_exceeds = entry.hints.get("encoded_data_length").is_some_and(|value| {
-        if let Some(length) = value.as_u64() {
-            length > max_bytes
-        } else {
-            value.as_f64().is_some_and(|length| {
-                length.is_finite()
-                    && length >= 0.0
-                    && (length >= u64::MAX as f64 || length.ceil() as u64 > max_bytes)
-            })
-        }
+pub(super) fn known_body_exceeds_limit(entry: &NetworkEntry, max_bytes: u64) -> bool {
+    let length = |key: &str| {
+        entry
+            .hints
+            .get(key)
+            .and_then(|value| value.as_f64())
+            .filter(|length| length.is_finite() && *length >= 0.0)
+    };
+    // CDP's total counts the header block too; only the body is limited.
+    let encoded_exceeds = length("encoded_data_length").is_some_and(|total| {
+        let body = total - length("encoded_header_length").unwrap_or(0.0);
+        body >= u64::MAX as f64 || (body > 0.0 && body.ceil() as u64 > max_bytes)
     });
     encoded_exceeds
         || entry.response_headers.iter().any(|(name, value)| {
@@ -229,9 +231,9 @@ mod tests {
                 ),
             ] {
                 for event in [
-                    json!({"method": "Network.requestWillBeSent", "params": {"requestId": request_id, "type": "XHR", "request": {"url": "https://example.test/data"}}}),
-                    json!({"method": "Network.responseReceived", "params": {"requestId": request_id, "response": {"status": 200, "mimeType": "text/plain", "headers": headers}}}),
-                    json!({"method": "Network.loadingFinished", "params": {"requestId": request_id, "encodedDataLength": encoded_length}}),
+                    json!({"method": "Network.requestWillBeSent", "sessionId": "capture", "params": {"requestId": request_id, "type": "XHR", "request": {"url": "https://example.test/data"}}}),
+                    json!({"method": "Network.responseReceived", "sessionId": "capture", "params": {"requestId": request_id, "response": {"status": 200, "mimeType": "text/plain", "headers": headers}}}),
+                    json!({"method": "Network.loadingFinished", "sessionId": "capture", "params": {"requestId": request_id, "encodedDataLength": encoded_length}}),
                 ] {
                     socket
                         .send(Message::Text(event.to_string().into()))
@@ -242,8 +244,8 @@ mod tests {
             // A main-document status is an ordered completion marker: all
             // preceding response metadata has reached the same collector.
             for event in [
-                json!({"method": "Network.requestWillBeSent", "params": {"requestId": "main", "type": "Document", "request": {"url": "https://example.test/"}}}),
-                json!({"method": "Network.responseReceived", "params": {"requestId": "main", "response": {"status": 200}}}),
+                json!({"method": "Network.requestWillBeSent", "sessionId": "capture", "params": {"requestId": "main", "type": "Document", "request": {"url": "https://example.test/"}}}),
+                json!({"method": "Network.responseReceived", "sessionId": "capture", "params": {"requestId": "main", "response": {"status": 200}}}),
             ] {
                 socket
                     .send(Message::Text(event.to_string().into()))
@@ -266,11 +268,11 @@ mod tests {
         let conn = Connection::connect(&format!("ws://{address}/cdp"), None)
             .await
             .unwrap();
-        let collector = NetworkCollector::start(&conn, true, false, false);
+        let collector = NetworkCollector::start(&conn, "capture", true, false, false);
         start_tx.send(()).unwrap();
         assert_eq!(
             collector
-                .wait_for_main_status(Duration::from_secs(1))
+                .wait_for_main_status(Duration::from_secs(1), None)
                 .await
                 .unwrap()
                 .status,
@@ -348,6 +350,15 @@ mod tests {
             entry.hints.insert("encoded_data_length".into(), size);
             assert_eq!(known_body_exceeds_limit(&entry, max_bytes), exceeds);
         }
+        // A body just under the limit is not refused for its header block.
+        entry
+            .hints
+            .insert("encoded_data_length".into(), json!(1300));
+        entry
+            .hints
+            .insert("encoded_header_length".into(), json!(400));
+        assert!(!known_body_exceeds_limit(&entry, 1000));
+        assert!(known_body_exceeds_limit(&entry, 899));
         entry.hints.clear();
         entry
             .response_headers

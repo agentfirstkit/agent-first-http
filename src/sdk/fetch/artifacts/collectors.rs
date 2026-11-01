@@ -1,8 +1,9 @@
 //! Async event subscribers for the browser fetch path.
 //!
 //! Each collector spawns a tokio task that drains a CDP event stream
-//! (`Connection::subscribe`) into a shared in-memory aggregate. The task
-//! is aborted on finish or drop;
+//! (`Connection::subscribe`) into a shared in-memory aggregate. A connection
+//! carries every session's events, so a collector keeps only those of the
+//! fetch's own session. The task is aborted on finish or drop;
 //! whatever has been observed up to that point is returned.
 
 use std::collections::HashMap;
@@ -24,17 +25,36 @@ use crate::shared::redact;
 const NETWORK_ENTRY_LIMIT: usize = 4096;
 const CONSOLE_EVENT_LIMIT: usize = 4096;
 const STREAM_EVENT_LIMIT_PER_REQUEST: usize = 1024;
+/// Payload bytes kept per WebSocket/SSE request. The event that crosses the
+/// budget keeps a prefix and is marked `payload_truncated`; later events are
+/// dropped and the network summary reports `truncated`.
+const STREAM_PAYLOAD_BYTES_PER_REQUEST: usize = 1024 * 1024;
 
 #[derive(Default)]
 struct StreamEvents {
     events: Vec<Value>,
     /// Retained after a drain so repeated drains cannot reset the limit.
     captured_total: usize,
+    /// Payload bytes kept so far; survives drains like `captured_total`.
+    captured_bytes: usize,
 }
 
 /// Per-request slot. Held until `loadingFinished` / `loadingFailed` lands.
 struct NetworkSlot {
     entry: NetworkEntry,
+    started_at: Instant,
+    updated_at: Instant,
+}
+
+pub(crate) struct ObservedRequest {
+    pub(crate) entry: NetworkEntry,
+    pub(crate) waited: Duration,
+    pub(crate) idle_for: Duration,
+}
+
+pub(crate) struct ReadinessNetwork {
+    pub(crate) requests: Vec<ObservedRequest>,
+    pub(crate) complete: bool,
 }
 
 fn default_entry() -> NetworkEntry {
@@ -87,6 +107,8 @@ struct NetworkInner {
     ws_frames: HashMap<String, StreamEvents>,
     /// SSE events keyed by requestId. Populated when capture_sse=true.
     sse_events: HashMap<String, StreamEvents>,
+    /// Redirect hops already moved to their own entry, per CDP request id.
+    redirect_hops: HashMap<String, usize>,
     /// Last time any network event changed the aggregate. Used for the
     /// default readiness wait instead of Chrome's lifecycle-only networkIdle.
     last_activity: Option<Instant>,
@@ -105,15 +127,23 @@ pub struct NetworkQuietSnapshot {
 impl NetworkCollector {
     pub fn start(
         conn: &Connection,
+        session_id: &str,
         redact_headers: bool,
         capture_ws: bool,
         capture_sse: bool,
     ) -> Self {
-        Self::from_receiver(conn.subscribe(), redact_headers, capture_ws, capture_sse)
+        Self::from_receiver(
+            conn.subscribe(),
+            session_id.to_string(),
+            redact_headers,
+            capture_ws,
+            capture_sse,
+        )
     }
 
     fn from_receiver(
         mut rx: broadcast::Receiver<CdpEvent>,
+        session_id: String,
         redact_headers: bool,
         capture_ws: bool,
         capture_sse: bool,
@@ -134,6 +164,9 @@ impl NetworkCollector {
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 };
+                if ev.session_id.as_deref() != Some(session_id.as_str()) {
+                    continue;
+                }
                 let mut guard = inner_w.lock().await;
                 let touched_main = handle_event(&mut guard, &ev, redact_headers);
                 if capture_ws {
@@ -172,13 +205,26 @@ impl NetworkCollector {
     /// until `timeout` elapses. Returns whatever main_entry is at that
     /// point (possibly None if the navigation never produced a Document
     /// resource — e.g. data: URLs).
-    pub async fn wait_for_main_status(&self, timeout: Duration) -> Option<NetworkEntry> {
+    ///
+    /// With `main_frame_id`, the main entry is re-resolved on every check
+    /// the way [`Self::readiness_snapshot`] does it — the latest root-frame
+    /// Document — so a script redirect does not pair the first page's
+    /// status and body with the second page's URL. Without it (the root
+    /// frame could not be read) the first Document seen stays the main one.
+    pub async fn wait_for_main_status(
+        &self,
+        timeout: Duration,
+        main_frame_id: Option<&str>,
+    ) -> Option<NetworkEntry> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             // Register the notify future BEFORE checking, so a notification
             // that arrives between check and await is not lost.
             let notified = self.main_notify.notified();
             tokio::pin!(notified);
+            if let Some(frame_id) = main_frame_id {
+                select_main_document(&mut *self.inner.lock().await, frame_id);
+            }
             if let Some(entry) = self.main_entry().await
                 && (entry.status.is_some() || entry.failure.is_some())
             {
@@ -219,6 +265,23 @@ impl NetworkCollector {
         let guard = self.inner.lock().await;
         let request_id = guard.main_request_id.as_ref()?;
         guard.slots.get(request_id).map(|s| s.entry.clone())
+    }
+
+    pub(crate) async fn readiness_snapshot(&self, main_frame_id: &str) -> ReadinessNetwork {
+        let mut guard = self.inner.lock().await;
+        select_main_document(&mut guard, main_frame_id);
+        ReadinessNetwork {
+            requests: guard
+                .slots
+                .values()
+                .map(|slot| ObservedRequest {
+                    entry: slot.entry.clone(),
+                    waited: slot.started_at.elapsed(),
+                    idle_for: slot.updated_at.elapsed(),
+                })
+                .collect(),
+            complete: guard.events_dropped == 0 && !guard.truncated,
+        }
     }
 
     /// Mechanical network quiet signal for readiness: no pending/responded
@@ -290,6 +353,30 @@ impl Drop for NetworkCollector {
     }
 }
 
+/// A subframe Document is never the main document, even if it was observed
+/// first, and neither is a redirect hop that already ended. The latest
+/// root-frame navigation owns main status. Leaves the current choice alone
+/// when no root-frame Document has been seen.
+fn select_main_document(inner: &mut NetworkInner, main_frame_id: &str) {
+    if let Some(main) = inner
+        .slots
+        .values()
+        .filter(|slot| {
+            slot.entry.resource_type == "Document"
+                && slot.entry.frame_id.as_deref() == Some(main_frame_id)
+                && !is_redirect_hop(&slot.entry)
+        })
+        .max_by_key(|slot| slot.entry.timing.start_monotonic_ms)
+    {
+        inner.main_request_id = Some(main.entry.request_id.clone());
+    }
+}
+
+/// True for the entry of a redirect hop that ended with the redirect.
+pub(crate) fn is_redirect_hop(entry: &NetworkEntry) -> bool {
+    entry.hints.get("redirected") == Some(&Value::Bool(true))
+}
+
 /// Returns `true` when the event mutated the main-document entry (set
 /// the main_request_id, updated its status, finished, or failed it) so
 /// the caller can wake `main_notify` waiters.
@@ -298,6 +385,12 @@ fn handle_event(
     ev: &crate::sdk::cdp::ws_client::CdpEvent,
     redact_headers: bool,
 ) -> bool {
+    if let Some(request_id) = ev.params.get("requestId").and_then(Value::as_str)
+        && let Some(slot) = inner.slots.get_mut(request_id)
+        && ev.method.starts_with("Network.")
+    {
+        slot.updated_at = Instant::now();
+    }
     // Preserve the metadata activity signal. Events rejected by the request
     // limit still count; uncaptured streams and unrelated CDP events do not.
     if matches!(
@@ -355,9 +448,7 @@ fn handle_event(
             let request_url = request
                 .get("url")
                 .and_then(|v| v.as_str())
-                .map(|url| {
-                    crate::sdk::fetch::artifacts::network::redact_request_url(url, redact_headers)
-                })
+                .map(str::to_string)
                 .unwrap_or_default();
             let method = request
                 .get("method")
@@ -368,33 +459,43 @@ fn handle_event(
             if redact_headers {
                 redact_inplace(&mut request_headers);
             }
-            // Redirect chain: if redirectResponse is present, finalize the
-            // existing entry first as a redirect and link via hint.
+            // Redirect chain: CDP reuses one requestId for every hop. The
+            // hop that just ended moves to its own entry, keyed
+            // `{requestId}#redirect{n}`, and the new hop links back to it.
+            let mut redirect_from = None;
             if let Some(redirect) = ev.params.get("redirectResponse")
-                && let Some(existing) = inner.slots.get_mut(&req_id)
+                && let Some(mut hop) = inner.slots.remove(&req_id)
             {
-                let status = redirect
-                    .get("status")
-                    .and_then(|v| v.as_u64())
-                    .map(|s| s as u16);
-                existing.entry.status = status;
-                existing.entry.state = NetworkEntryState::Finished;
-                let mut h = headers_map(redirect.get("headers"));
-                if redact_headers {
-                    redact_inplace(&mut h);
+                // The new hop takes the requestId's slot back; the ended hop
+                // needs one more, if the limit leaves room.
+                if inner.slots.len() + 2 > NETWORK_ENTRY_LIMIT {
+                    inner.truncated = true;
+                } else {
+                    let count = inner.redirect_hops.entry(req_id.clone()).or_insert(0);
+                    let hop_id = format!("{req_id}#redirect{count}");
+                    *count += 1;
+                    hop.entry.request_id = hop_id.clone();
+                    hop.entry.status = redirect
+                        .get("status")
+                        .and_then(|v| v.as_u64())
+                        .map(|s| s as u16);
+                    hop.entry.state = NetworkEntryState::Finished;
+                    hop.entry.timing.end_monotonic_ms = Some((timestamp * 1000.0) as u64);
+                    let mut h = headers_map(redirect.get("headers"));
+                    if redact_headers {
+                        redact_inplace(&mut h);
+                    }
+                    hop.entry.response_headers = h;
+                    hop.entry
+                        .hints
+                        .insert("redirected".into(), Value::Bool(true));
+                    inner.slots.insert(hop_id.clone(), hop);
+                    redirect_from = Some(hop_id);
                 }
-                existing.entry.response_headers = h;
-                existing
-                    .entry
-                    .hints
-                    .insert("redirected".into(), Value::Bool(true));
-                inner.finished.insert(req_id.clone());
             }
             let mut entry = default_entry();
             entry.request_id = req_id.clone();
-            if ev.params.get("redirectResponse").is_some() {
-                entry.redirect_from_request_id = Some(req_id.clone());
-            }
+            entry.redirect_from_request_id = redirect_from;
             entry.frame_id = frame_id;
             entry.loader_id = loader_id;
             entry.resource_type = resource_type;
@@ -427,7 +528,15 @@ fn handle_event(
                     }
                 }
             }
-            inner.slots.insert(req_id.clone(), NetworkSlot { entry });
+            let now = Instant::now();
+            inner.slots.insert(
+                req_id.clone(),
+                NetworkSlot {
+                    entry,
+                    started_at: now,
+                    updated_at: now,
+                },
+            );
             return inner.main_request_id.as_deref() == Some(req_id.as_str());
         }
         "Network.responseReceived" => {
@@ -453,6 +562,13 @@ fn handle_event(
                 .get("remoteIPAddress")
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
+            // What has arrived by the time the response is reported: the
+            // header block. loadingFinished's total includes it, so the body
+            // size is the difference.
+            let header_length = response
+                .get("encodedDataLength")
+                .filter(|v| v.as_f64().is_some_and(|n| n.is_finite() && n >= 0.0))
+                .cloned();
             if let Some(s) = inner.slots.get_mut(&req_id) {
                 s.entry.status = status;
                 s.entry.state = NetworkEntryState::Responded;
@@ -467,6 +583,9 @@ fn handle_event(
                     s.entry
                         .hints
                         .insert("remote_address".into(), Value::String(r));
+                }
+                if let Some(n) = header_length {
+                    s.entry.hints.insert("encoded_header_length".into(), n);
                 }
             }
             return inner.main_request_id.as_deref() == Some(req_id.as_str());
@@ -614,11 +733,11 @@ struct ConsoleInner {
 }
 
 impl ConsoleCollector {
-    pub fn start(conn: &Connection) -> Self {
-        Self::from_receiver(conn.subscribe())
+    pub fn start(conn: &Connection, session_id: &str) -> Self {
+        Self::from_receiver(conn.subscribe(), session_id.to_string())
     }
 
-    fn from_receiver(mut rx: broadcast::Receiver<CdpEvent>) -> Self {
+    fn from_receiver(mut rx: broadcast::Receiver<CdpEvent>, session_id: String) -> Self {
         let inner = Arc::new(Mutex::new(ConsoleInner::default()));
         let inner_w = inner.clone();
         let task = tokio::spawn(async move {
@@ -635,7 +754,8 @@ impl ConsoleCollector {
                 if !matches!(
                     ev.method.as_str(),
                     "Runtime.consoleAPICalled" | "Runtime.exceptionThrown"
-                ) {
+                ) || ev.session_id.as_deref() != Some(session_id.as_str())
+                {
                     continue;
                 }
                 let mut guard = inner_w.lock().await;
@@ -682,10 +802,15 @@ fn take_stream_events(map: &mut HashMap<String, StreamEvents>) -> HashMap<String
         .collect()
 }
 
+/// Keep `event` under the per-request count and byte limits. `payload_key`
+/// names the event's payload string; the event that crosses the byte budget
+/// keeps a prefix and gains `payload_truncated: true` and the original
+/// `payload_bytes`. Returns false when anything was dropped or cut.
 fn push_stream_event(
     map: &mut HashMap<String, StreamEvents>,
     request_id: String,
-    event: Value,
+    mut event: Value,
+    payload_key: &str,
 ) -> bool {
     if !map.contains_key(&request_id) && map.len() >= NETWORK_ENTRY_LIMIT {
         return false;
@@ -694,9 +819,29 @@ fn push_stream_event(
     if bucket.captured_total >= STREAM_EVENT_LIMIT_PER_REQUEST {
         return false;
     }
+    let budget = STREAM_PAYLOAD_BYTES_PER_REQUEST - bucket.captured_bytes;
+    let payload_len = event
+        .get(payload_key)
+        .and_then(Value::as_str)
+        .map_or(0, str::len);
+    let kept = if payload_len > budget {
+        if budget == 0 {
+            return false;
+        }
+        let payload = event[payload_key].as_str().unwrap_or("");
+        let prefix = payload[..payload.floor_char_boundary(budget)].to_string();
+        event[payload_key] = Value::String(prefix);
+        event["payload_truncated"] = Value::Bool(true);
+        event["payload_bytes"] = Value::from(payload_len);
+        // The budget is spent: a later event would be cut to nothing.
+        budget
+    } else {
+        payload_len
+    };
     bucket.captured_total += 1;
+    bucket.captured_bytes += kept;
     bucket.events.push(event);
-    true
+    payload_len <= budget
 }
 
 fn handle_ws_event(inner: &mut NetworkInner, ev: &crate::sdk::cdp::ws_client::CdpEvent) {
@@ -728,7 +873,7 @@ fn handle_ws_event(inner: &mut NetworkInner, ev: &crate::sdk::cdp::ws_client::Cd
                 "payload": response.get("payloadData").and_then(|v| v.as_str()).unwrap_or(""),
                 "timestamp_epoch_ms": now_ms,
             });
-            if !push_stream_event(&mut inner.ws_frames, req_id, frame) {
+            if !push_stream_event(&mut inner.ws_frames, req_id, frame, "payload") {
                 inner.truncated = true;
             }
         }
@@ -745,7 +890,7 @@ fn handle_ws_event(inner: &mut NetworkInner, ev: &crate::sdk::cdp::ws_client::Cd
                 "payload": response.get("payloadData").and_then(|v| v.as_str()).unwrap_or(""),
                 "timestamp_epoch_ms": now_ms,
             });
-            if !push_stream_event(&mut inner.ws_frames, req_id, frame) {
+            if !push_stream_event(&mut inner.ws_frames, req_id, frame, "payload") {
                 inner.truncated = true;
             }
         }
@@ -764,7 +909,7 @@ fn handle_ws_event(inner: &mut NetworkInner, ev: &crate::sdk::cdp::ws_client::Cd
                 "error": error,
                 "timestamp_epoch_ms": now_ms,
             });
-            if !push_stream_event(&mut inner.ws_frames, req_id, frame) {
+            if !push_stream_event(&mut inner.ws_frames, req_id, frame, "payload") {
                 inner.truncated = true;
             }
         }
@@ -791,7 +936,7 @@ fn handle_sse_event(inner: &mut NetworkInner, ev: &crate::sdk::cdp::ws_client::C
             .map(|t| (t * 1000.0) as u64)
             .unwrap_or(0),
     });
-    if !push_stream_event(&mut inner.sse_events, req_id, event) {
+    if !push_stream_event(&mut inner.sse_events, req_id, event, "data") {
         inner.truncated = true;
     }
 }
@@ -822,7 +967,7 @@ fn map_console_event(ev: &crate::sdk::cdp::ws_client::CdpEvent) -> Option<Consol
                 level,
                 timestamp_epoch_ms,
                 text,
-                source_url: url.map(|url| redact::redact_url(&url)),
+                source_url: url,
                 line_number,
             })
         }
@@ -856,7 +1001,7 @@ fn map_console_event(ev: &crate::sdk::cdp::ws_client::CdpEvent) -> Option<Consol
                 level: ConsoleLevel::Exception,
                 timestamp_epoch_ms,
                 text,
-                source_url: url.map(|url| redact::redact_url(&url)),
+                source_url: url,
                 line_number,
             })
         }
@@ -936,8 +1081,9 @@ mod tests {
     #[tokio::test]
     async fn collectors_continue_after_a_lagged_burst_and_report_loss() {
         let (tx, rx) = broadcast::channel(256);
-        let mut network = NetworkCollector::from_receiver(rx, true, false, false);
-        let mut console_collector = ConsoleCollector::from_receiver(tx.subscribe());
+        let mut network = NetworkCollector::from_receiver(rx, "capture".into(), true, false, false);
+        let mut console_collector =
+            ConsoleCollector::from_receiver(tx.subscribe(), "capture".into());
         let network_guard = network.inner.lock().await;
         let console_guard = console_collector.inner.lock().await;
         tx.send(console("before burst")).unwrap();
@@ -987,8 +1133,8 @@ mod tests {
     #[tokio::test]
     async fn dropping_collectors_aborts_their_receivers() {
         let (tx, rx) = broadcast::channel(256);
-        let network = NetworkCollector::from_receiver(rx, true, true, true);
-        let console_collector = ConsoleCollector::from_receiver(tx.subscribe());
+        let network = NetworkCollector::from_receiver(rx, "capture".into(), true, true, true);
+        let console_collector = ConsoleCollector::from_receiver(tx.subscribe(), "capture".into());
         let network_inner = Arc::downgrade(&network.inner);
         let console_inner = Arc::downgrade(&console_collector.inner);
         assert_eq!(tx.receiver_count(), 2);
@@ -1009,8 +1155,13 @@ mod tests {
     async fn uncaptured_stream_events_do_not_delay_network_quiet() {
         for capture_streams in [false, true] {
             let (tx, rx) = broadcast::channel(16);
-            let mut collector =
-                NetworkCollector::from_receiver(rx, true, capture_streams, capture_streams);
+            let mut collector = NetworkCollector::from_receiver(
+                rx,
+                "capture".into(),
+                true,
+                capture_streams,
+                capture_streams,
+            );
             tx.send(event(
                 "Network.webSocketFrameReceived",
                 json!({"requestId": "background"}),
@@ -1097,7 +1248,7 @@ mod tests {
             slot.entry.state = NetworkEntryState::Finished;
         }
         let (_tx, rx) = broadcast::channel(1);
-        let collector = NetworkCollector::from_receiver(rx, true, false, false);
+        let collector = NetworkCollector::from_receiver(rx, "capture".into(), true, false, false);
         *collector.inner.lock().await = inner;
         assert!(
             !collector
@@ -1155,22 +1306,26 @@ mod tests {
         assert!(!push_stream_event(
             &mut inner.ws_frames,
             "stream-0".into(),
-            json!({})
+            json!({}),
+            "payload"
         ));
         assert!(!push_stream_event(
             &mut inner.sse_events,
             "stream-0".into(),
-            json!({})
+            json!({}),
+            "payload"
         ));
         assert!(!push_stream_event(
             &mut inner.ws_frames,
             "new-after-drain".into(),
-            json!({})
+            json!({}),
+            "payload"
         ));
         assert!(!push_stream_event(
             &mut inner.sse_events,
             "new-after-drain".into(),
-            json!({})
+            json!({}),
+            "payload"
         ));
         assert!(take_stream_events(&mut inner.ws_frames).is_empty());
         assert!(take_stream_events(&mut inner.sse_events).is_empty());
@@ -1197,7 +1352,7 @@ mod tests {
     #[tokio::test]
     async fn console_capture_has_a_fixed_event_limit() {
         let (tx, rx) = broadcast::channel(CONSOLE_EVENT_LIMIT * 2);
-        let mut collector = ConsoleCollector::from_receiver(rx);
+        let mut collector = ConsoleCollector::from_receiver(rx, "capture".into());
         for _ in 0..CONSOLE_EVENT_LIMIT + 8 {
             tx.send(console("entry")).unwrap();
         }
@@ -1227,5 +1382,199 @@ mod tests {
         let summary: NetworkSummary = serde_json::from_value(value).unwrap();
         assert_eq!(summary.events_dropped, 0);
         assert!(!summary.truncated);
+    }
+
+    #[tokio::test]
+    async fn collectors_keep_only_their_own_session() {
+        let (tx, rx) = broadcast::channel(64);
+        let mut network = NetworkCollector::from_receiver(rx, "capture".into(), true, false, false);
+        let mut console_collector =
+            ConsoleCollector::from_receiver(tx.subscribe(), "capture".into());
+        let mut other = request("other-tab", "Document");
+        other.session_id = Some("other".into());
+        let mut unscoped = request("browser-level", "XHR");
+        unscoped.session_id = None;
+        let mut other_console = console("other tab");
+        other_console.session_id = Some("other".into());
+        for ev in [
+            other,
+            unscoped,
+            other_console,
+            request("mine", "Document"),
+            console("mine"),
+        ] {
+            tx.send(ev).unwrap();
+        }
+        drop(tx);
+        tokio::time::timeout(Duration::from_secs(1), &mut network.task)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), &mut console_collector.task)
+            .await
+            .unwrap()
+            .unwrap();
+        let log = network.finish().await;
+        let ids: Vec<_> = log.entries.iter().map(|e| e.request_id.as_str()).collect();
+        assert_eq!(ids, ["mine"]);
+        assert_eq!(log.main_request_id.as_deref(), Some("mine"));
+        let log = console_collector.finish().await;
+        let texts: Vec<_> = log.events.iter().map(|e| e.text.as_str()).collect();
+        assert_eq!(texts, ["mine"]);
+    }
+
+    #[test]
+    fn redirect_hops_are_kept_as_a_linked_chain() {
+        let mut inner = NetworkInner::default();
+        let hop = |url: &str, ts: f64, redirect: Option<u16>| {
+            let mut params = json!({
+                "requestId": "main",
+                "type": "Document",
+                "frameId": "root",
+                "timestamp": ts,
+                "request": {"url": url, "method": "GET"},
+            });
+            if let Some(status) = redirect {
+                params["redirectResponse"] =
+                    json!({"status": status, "headers": {"Location": url}});
+            }
+            event("Network.requestWillBeSent", params)
+        };
+        handle_event(&mut inner, &hop("https://a.test/", 1.0, None), true);
+        handle_event(&mut inner, &hop("https://b.test/", 2.0, Some(302)), true);
+        handle_event(&mut inner, &hop("https://c.test/", 3.0, Some(301)), true);
+        handle_event(
+            &mut inner,
+            &event(
+                "Network.responseReceived",
+                json!({"requestId": "main", "response": {"status": 200}}),
+            ),
+            true,
+        );
+        assert_eq!(inner.slots.len(), 3);
+        let first = &inner.slots["main#redirect0"].entry;
+        assert_eq!(first.request_url, "https://a.test/");
+        assert_eq!(first.status, Some(302));
+        assert_eq!(first.state, NetworkEntryState::Finished);
+        assert_eq!(first.redirect_from_request_id, None);
+        assert_eq!(first.response_headers["Location"], "https://b.test/");
+        let second = &inner.slots["main#redirect1"].entry;
+        assert_eq!(second.request_url, "https://b.test/");
+        assert_eq!(second.status, Some(301));
+        assert_eq!(
+            second.redirect_from_request_id.as_deref(),
+            Some("main#redirect0")
+        );
+        let last = &inner.slots["main"].entry;
+        assert_eq!(last.request_url, "https://c.test/");
+        assert_eq!(last.status, Some(200));
+        assert_eq!(
+            last.redirect_from_request_id.as_deref(),
+            Some("main#redirect1")
+        );
+        assert_eq!(inner.main_request_id.as_deref(), Some("main"));
+        // An ended hop is never chosen as the main document, even when its
+        // timestamp ties the live request's.
+        inner
+            .slots
+            .get_mut("main")
+            .unwrap()
+            .entry
+            .timing
+            .start_monotonic_ms = 0;
+        select_main_document(&mut inner, "root");
+        assert_eq!(inner.main_request_id.as_deref(), Some("main"));
+        assert!(inner.finished.is_empty());
+    }
+
+    #[tokio::test]
+    async fn main_status_follows_the_latest_root_frame_document() {
+        let (tx, rx) = broadcast::channel(64);
+        let mut collector =
+            NetworkCollector::from_receiver(rx, "capture".into(), true, false, false);
+        for (id, frame, ts, status) in [
+            ("page-a", "root", 1.0, 200),
+            ("subframe", "child", 3.0, 500),
+            ("page-b", "root", 2.0, 404),
+        ] {
+            tx.send(event(
+                "Network.requestWillBeSent",
+                json!({"requestId": id, "type": "Document", "frameId": frame, "timestamp": ts,
+                       "request": {"url": format!("https://example.test/{id}")}}),
+            ))
+            .unwrap();
+            tx.send(event(
+                "Network.responseReceived",
+                json!({"requestId": id, "response": {"status": status}}),
+            ))
+            .unwrap();
+        }
+        drop(tx);
+        tokio::time::timeout(Duration::from_secs(1), &mut collector.task)
+            .await
+            .unwrap()
+            .unwrap();
+        // Without the root frame, the first Document seen stays the main one.
+        let first = collector
+            .wait_for_main_status(Duration::ZERO, None)
+            .await
+            .unwrap();
+        assert_eq!(first.request_id, "page-a");
+        let latest = collector
+            .wait_for_main_status(Duration::ZERO, Some("root"))
+            .await
+            .unwrap();
+        assert_eq!(latest.request_id, "page-b");
+        assert_eq!(latest.status, Some(404));
+        assert_eq!(collector.main_request_id().await.as_deref(), Some("page-b"));
+    }
+
+    #[test]
+    fn stream_payloads_have_a_per_request_byte_budget() {
+        let mut inner = NetworkInner::default();
+        let half = "x".repeat(STREAM_PAYLOAD_BYTES_PER_REQUEST / 2);
+        for _ in 0..2 {
+            handle_ws_event(
+                &mut inner,
+                &event(
+                    "Network.webSocketFrameReceived",
+                    json!({"requestId": "ws", "response": {"payloadData": half}}),
+                ),
+            );
+        }
+        assert!(!inner.truncated);
+        // Multi-byte text is cut on a character boundary.
+        let sse = format!("x{}", "é".repeat(STREAM_PAYLOAD_BYTES_PER_REQUEST / 2));
+        handle_sse_event(
+            &mut inner,
+            &event(
+                "Network.eventSourceMessageReceived",
+                json!({"requestId": "sse", "data": sse}),
+            ),
+        );
+        assert!(inner.truncated);
+        let cut = &inner.sse_events["sse"].events[0];
+        assert_eq!(cut["payload_truncated"], true);
+        assert_eq!(cut["payload_bytes"], sse.len());
+        assert_eq!(
+            cut["data"].as_str().unwrap().len(),
+            STREAM_PAYLOAD_BYTES_PER_REQUEST - 1
+        );
+        inner.truncated = false;
+        handle_ws_event(
+            &mut inner,
+            &event(
+                "Network.webSocketFrameSent",
+                json!({"requestId": "ws", "response": {"payloadData": "one more"}}),
+            ),
+        );
+        assert!(inner.truncated);
+        let frames = take_stream_events(&mut inner.ws_frames);
+        assert_eq!(frames["ws"].len(), 2);
+        assert!(
+            frames["ws"]
+                .iter()
+                .all(|f| f.get("payload_truncated").is_none())
+        );
     }
 }

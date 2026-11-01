@@ -40,20 +40,21 @@ mod capture;
 mod download;
 mod navigate;
 mod network_bodies;
+mod readiness;
 mod wait;
 
 use capture::{
-    PageSnapshot, capture_content, capture_inner_text, capture_location, capture_outer_html,
-    capture_page_snapshot, capture_response_body, capture_screenshot,
-    navigation_status_from_performance,
+    CDP_RESPONSE_BODY_MAX_BYTES, PageSnapshot, capture_content, capture_inner_text,
+    capture_location, capture_outer_html, capture_page_snapshot, capture_response_body,
+    capture_screenshot, navigation_status_from_performance,
 };
 use download::{
-    DownloadNavigation, configure_download_capture, finish_download_navigation,
+    DownloadFrames, DownloadNavigation, configure_download_capture, finish_download_navigation,
     navigate_has_download_flag, navigation_became_download, snapshot_download_dir,
     wait_for_download_start,
 };
-use navigate::navigate_with_method;
-use network_bodies::{NetworkBodyCapture, capture_network_bodies};
+use navigate::{NavigationHeaders, navigate_with_method};
+use network_bodies::{NetworkBodyCapture, capture_network_bodies, known_body_exceeds_limit};
 use wait::{WaitContext, WaitTuning, wait_for_condition};
 
 pub(super) fn reject_http_only_evaluate(
@@ -129,6 +130,7 @@ pub(super) async fn browser_path(
         ));
     }
 
+    let mut injected_jar = None;
     if let Some(jar_path) = &builder.cookie_jar.path
         && let Ok(url) = Url::parse(&builder.url)
         && let Ok(jar) = crate::sdk::profile::cookie_jar::CookieJar::load(jar_path)
@@ -140,6 +142,7 @@ pub(super) async fn browser_path(
             }
         }
         request_options.merge_jar_cookies(prepared);
+        injected_jar = Some(jar);
     }
 
     let conn = deadline
@@ -150,10 +153,9 @@ pub(super) async fn browser_path(
         )
         .await?;
 
-    // `created_target` is what error paths key on: an errored fetch mints no
-    // takeover handoff, so a target this fetch opened has no owner and is
-    // closed even under `keep_tab_open`, while a caller-named `--tab` is left
-    // as we found it. The success path decides via [`close_after_success`].
+    // Preserve takeover tabs on every error path, including newly-created
+    // targets. Their ids are included in the failure trace for manual review.
+    // Ordinary fetches recycle only targets that they created.
     let (target_id, session_id, created_target) = if let Some(tab) = builder.tab.as_ref() {
         let target_id = tab.as_str().to_string();
         let session_id = deadline
@@ -165,13 +167,39 @@ pub(super) async fn browser_path(
             .await?;
         (target_id, session_id, false)
     } else {
-        let (target_id, session_id) = deadline
+        let target_id = deadline
             .run_result(
                 "open_target",
                 ErrorCode::NavigationTimeout,
-                session::open_blank_target(&conn),
+                session::create_blank_target(&conn),
             )
             .await?;
+        let attached = deadline
+            .run_result(
+                "attach_target",
+                ErrorCode::NavigationTimeout,
+                session::attach_to_target(&conn, &target_id),
+            )
+            .await;
+        let session_id = match attached {
+            Ok(session_id) => session_id,
+            Err(error) => {
+                // The tab exists and no session ever reached it. Left alone it
+                // would sit at `about:blank`, which the reaper rightly ignores,
+                // for the life of the browser.
+                if builder.keep_tab_open {
+                    deadline.update_trace(|trace| trace.retained_tab_id = Some(target_id.clone()));
+                } else {
+                    let _ = session::close_target_preserving_browser(
+                        &conn,
+                        &target_id,
+                        TARGET_CLEANUP_TIMEOUT,
+                    )
+                    .await;
+                }
+                return Err(error);
+            }
+        };
         (target_id, session_id, true)
     };
 
@@ -197,10 +225,18 @@ pub(super) async fn browser_path(
         })
         .await
     {
-        finish_target(&conn, &target_id, &session_id, created_target).await;
+        finish_failed_target(
+            &conn,
+            &target_id,
+            &session_id,
+            created_target && !builder.keep_tab_open,
+            deadline,
+        )
+        .await;
         return Err(error);
     }
 
+    let (everywhere_headers, origin_headers) = request_options.cdp_headers_by_scope();
     if let Err(e) = deadline
         .run_result(
             "prepare_request",
@@ -210,23 +246,33 @@ pub(super) async fn browser_path(
                 &session_id,
                 &builder.url,
                 &request_options,
+                &everywhere_headers,
                 deadline,
             ),
         )
         .await
     {
-        finish_target(&conn, &target_id, &session_id, created_target).await;
+        finish_failed_target(
+            &conn,
+            &target_id,
+            &session_id,
+            created_target && !builder.keep_tab_open,
+            deadline,
+        )
+        .await;
         return Err(e);
     }
 
+    let main_frame_id = root_frame_id(&conn, &session_id, deadline).await;
     let network_collector = NetworkCollector::start(
         &conn,
+        &session_id,
         builder.network.redact,
         builder.network.capture_ws,
         builder.network.capture_sse,
     );
     let console_collector = if builder.want.contains(&Artifact::Console) {
-        Some(ConsoleCollector::start(&conn))
+        Some(ConsoleCollector::start(&conn, &session_id))
     } else {
         None
     };
@@ -253,15 +299,34 @@ pub(super) async fn browser_path(
                 &builder.url,
                 &request_options.method,
                 &request_options.body_payload,
+                NavigationHeaders {
+                    everywhere: &everywhere_headers,
+                    origin_only: &origin_headers,
+                },
                 builder.timeout,
                 deadline,
             ),
         )
         .await;
-    let navigate = match navigate {
+    // Held to the end of the fetch: the page keeps making requests that
+    // need the caller's origin-scoped headers.
+    let (navigate, _request_intercept) = match navigate {
         Ok(v) => v,
         Err(e) => {
-            finish_target(&conn, &target_id, &session_id, created_target).await;
+            finish_failed_target(
+                &conn,
+                &target_id,
+                &session_id,
+                created_target && !builder.keep_tab_open,
+                deadline,
+            )
+            .await;
+            // The inner CDP waits run on the same remaining budget as this
+            // stage, and under load one of them can expire first; the fetch
+            // still ran out of time navigating, as the wait stage reports too.
+            if e.error_code == ErrorCode::CdpTimeout {
+                return Err(Error::new(ErrorCode::NavigationTimeout, e.detail));
+            }
             return Err(e);
         }
     };
@@ -275,7 +340,12 @@ pub(super) async fn browser_path(
         } else {
             Duration::ZERO
         };
-        wait_for_download_start(rx, wait, &session_id).await
+        let frames = DownloadFrames {
+            session_id: &session_id,
+            target_id: &target_id,
+            main_frame_id: main_frame_id.as_deref(),
+        };
+        wait_for_download_start(rx, wait, &frames).await
     } else {
         None
     };
@@ -295,6 +365,7 @@ pub(super) async fn browser_path(
             escalation_reason,
             target_id,
             session_id,
+            main_frame_id,
             created_target,
             deadline: deadline.clone(),
         })
@@ -304,7 +375,14 @@ pub(super) async fn browser_path(
         && !err.is_empty()
     {
         let code = classify_navigate_error(err);
-        finish_target(&conn, &target_id, &session_id, created_target).await;
+        finish_failed_target(
+            &conn,
+            &target_id,
+            &session_id,
+            created_target && !builder.keep_tab_open,
+            deadline,
+        )
+        .await;
         return Err(Error::new(code, format!("Page.navigate errorText: {err}")));
     }
 
@@ -322,7 +400,14 @@ pub(super) async fn browser_path(
         )
         .await
     {
-        finish_target(&conn, &target_id, &session_id, created_target).await;
+        finish_failed_target(
+            &conn,
+            &target_id,
+            &session_id,
+            created_target && !builder.keep_tab_open,
+            deadline,
+        )
+        .await;
         return Err(e);
     }
 
@@ -353,7 +438,14 @@ pub(super) async fn browser_path(
     {
         Ok(outcome) => outcome,
         Err(e) => {
-            finish_target(&conn, &target_id, &session_id, created_target).await;
+            finish_failed_target(
+                &conn,
+                &target_id,
+                &session_id,
+                created_target && !builder.keep_tab_open,
+                deadline,
+            )
+            .await;
             if e.error_code == ErrorCode::CdpTimeout {
                 return Err(Error::new(ErrorCode::NavigationTimeout, e.detail));
             }
@@ -371,18 +463,27 @@ pub(super) async fn browser_path(
             )
             .await
     {
-        finish_target(&conn, &target_id, &session_id, created_target).await;
+        finish_failed_target(
+            &conn,
+            &target_id,
+            &session_id,
+            created_target && !builder.keep_tab_open,
+            deadline,
+        )
+        .await;
         return Err(e);
     }
 
     let mut warnings: Vec<Warning> = Vec::new();
     let mut result = FetchResult::new(request_id.clone(), builder.url.clone(), deadline.snapshot());
     result.tab_id = Some(TabId::new(target_id.clone()));
+    result.readiness = wait_outcome.readiness.clone();
 
     let main_entry = network_collector
-        .wait_for_main_status(Duration::from_millis(
-            builder.readiness.observe_main_wait_ms,
-        ))
+        .wait_for_main_status(
+            Duration::from_millis(builder.readiness.observe_main_wait_ms),
+            main_frame_id.as_deref(),
+        )
         .await;
     result.trace.main_request_observed = main_entry.is_some();
     deadline.update_trace(|trace| {
@@ -404,7 +505,7 @@ pub(super) async fn browser_path(
             artifact: Artifact::Network,
             code: ErrorCode::ReadinessTimeout,
             detail: format!(
-                "--wait auto captured before all readiness signals settled: network_quiet={:?}, dom_stable={:?}, text_stable={:?}",
+                "requested wait condition timed out; artifacts may contain usable partial content: network_quiet={:?}, dom_stable={:?}, text_stable={:?}",
                 wait_outcome.network_quiet, wait_outcome.dom_stable, wait_outcome.text_stable
             ),
         });
@@ -425,7 +526,14 @@ pub(super) async fn browser_path(
         main_entry.as_ref(),
         page_snapshot.as_ref(),
     ) {
-        finish_target(&conn, &target_id, &session_id, created_target).await;
+        finish_failed_target(
+            &conn,
+            &target_id,
+            &session_id,
+            created_target && !builder.keep_tab_open,
+            deadline,
+        )
+        .await;
         return Err(e);
     }
     if let Some(snapshot) = page_snapshot.as_ref()
@@ -436,6 +544,10 @@ pub(super) async fn browser_path(
         )
     {
         result.set_page_kind(classification.kind);
+        if let Some(readiness) = result.readiness.as_mut() {
+            readiness.target_content = crate::sdk::fetch::readiness::ReadinessState::Blocked;
+            readiness.wait_satisfied = false;
+        }
         warnings.push(Warning {
             artifact: Artifact::RenderedHtml,
             code: classification.code,
@@ -597,7 +709,19 @@ pub(super) async fn browser_path(
     }
 
     if builder.want.contains(&Artifact::Body) {
-        if let Some(main) = main_entry.as_ref() {
+        if let Some(main) = main_entry
+            .as_ref()
+            .filter(|main| known_body_exceeds_limit(main, CDP_RESPONSE_BODY_MAX_BYTES))
+        {
+            warnings.push(Warning {
+                artifact: Artifact::Body,
+                code: ErrorCode::NetworkBodyTruncated,
+                detail: format!(
+                    "body for {} skipped before capture: known size exceeds {CDP_RESPONSE_BODY_MAX_BYTES} bytes, more than one CDP message carries safely",
+                    main.request_id
+                ),
+            });
+        } else if let Some(main) = main_entry.as_ref() {
             match deadline
                 .run_result(
                     "capture_body",
@@ -743,7 +867,7 @@ pub(super) async fn browser_path(
     }
 
     let effective_network_bodies = if matches!(builder.network.bodies, NetworkBodies::Off)
-        && matches!(builder.wait, Wait::Auto)
+        && matches!(builder.wait, Wait::Auto | Wait::SelectorStable(_))
     {
         NetworkBodies::Xhr
     } else {
@@ -812,7 +936,11 @@ pub(super) async fn browser_path(
         }
     } else {
         let log = network_collector.finish().await;
-        push_network_capture_warnings(&log.summary, &mut warnings);
+        if result.readiness.is_some() {
+            push_network_readiness_warnings(&log.summary, &mut warnings);
+        } else {
+            push_network_capture_warnings(&log.summary, &mut warnings);
+        }
     }
 
     if let Some(jar_path) = &builder.cookie_jar.path {
@@ -820,21 +948,40 @@ pub(super) async fn browser_path(
             .run_result(
                 "sync_cookie_jar",
                 ErrorCode::NavigationTimeout,
-                sync_browser_cookies_to_jar(&conn, &session_id, &result.final_url, jar_path),
+                sync_browser_cookies_to_jar(
+                    &conn,
+                    &session_id,
+                    &result.final_url,
+                    jar_path,
+                    injected_jar.as_ref(),
+                ),
             )
             .await;
         warnings.extend(cookie_jar_sync_warning(synced));
     }
 
-    if close_after_success(
-        created_target,
-        builder.keep_tab_open,
-        result.next_action.is_some(),
-    ) {
-        finish_target(&conn, &target_id, &session_id, true).await;
-        // The id would name a target that no longer exists; a reported
-        // `tab_id` always points at a tab that is still open.
-        result.tab_id = None;
+    let content_verified = takeover_content_verified(&result, page_snapshot.as_ref(), &warnings);
+    if builder.keep_tab_open && !content_verified && result.next_action.is_none() {
+        result.next_action = Some(crate::sdk::fetch::result::NextAction::human_takeover(
+            &builder.url,
+        ));
+        warnings.push(Warning {
+            artifact: Artifact::RenderedHtml,
+            code: ErrorCode::TakeoverContentUnverified,
+            detail: format!("takeover tab retained for manual review: status={}, snapshot_available={}, target readiness or requested artifacts do not confirm complete content; inspect tab_id and retry after review", result.status, page_snapshot.is_some()),
+        });
+    }
+    if close_after_success(created_target, builder.keep_tab_open, content_verified) {
+        if finish_target(&conn, &target_id, &session_id, true).await {
+            result.tab_id = None;
+        } else {
+            warnings.push(Warning {
+                artifact: Artifact::RenderedHtml,
+                code: ErrorCode::CdpError,
+                detail: "could not safely recycle the tab; tab_id retained; the last browser window is protected".into(),
+            });
+            finish_target(&conn, &target_id, &session_id, false).await;
+        }
     } else {
         finish_target(&conn, &target_id, &session_id, false).await;
     }
@@ -852,9 +999,11 @@ async fn apply_browser_request_options(
     session_id: &str,
     url: &str,
     request_options: &PreparedRequestOptions,
+    extra_headers: &std::collections::BTreeMap<String, String>,
     deadline: &FetchDeadline,
 ) -> Result<(), Error> {
-    let extra_headers = request_options.cdp_extra_headers();
+    // Origin-scoped headers (credentials) are not here: the navigation's
+    // request intercept adds them to the target's origin alone.
     if !extra_headers.is_empty() {
         cdp_send(
             conn,
@@ -1012,43 +1161,115 @@ fn runtime_exception_detail(exception: &Value) -> String {
         .to_string()
 }
 
-const TARGET_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+/// How long closing or detaching a tab may take once the fetch itself is
+/// over. The whole-fetch timer in `execute_once_with_timeout` adds this on
+/// top of the caller's budget: every stage already ends at that budget, and
+/// the cleanup that follows must not be cancelled by the same clock.
+pub(crate) const TARGET_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The tab's root frame id: the frame Network events name for the main
+/// document. It stays the same across the tab's navigations. `None` when the
+/// backend cannot report it; callers then keep their first-seen fallbacks.
+async fn root_frame_id(
+    conn: &Connection,
+    session_id: &str,
+    deadline: &FetchDeadline,
+) -> Option<String> {
+    let tree = cdp_send(
+        conn,
+        session_id,
+        "Page.getFrameTree",
+        &serde_json::json!({}),
+        "browser_enable",
+        deadline,
+    )
+    .await
+    .ok()?;
+    tree.pointer("/frameTree/frame/id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
+async fn finish_failed_target(
+    conn: &Connection,
+    target_id: &str,
+    session_id: &str,
+    close: bool,
+    deadline: &FetchDeadline,
+) {
+    if !finish_target(conn, target_id, session_id, close).await {
+        deadline.update_trace(|trace| trace.retained_tab_id = Some(target_id.to_string()));
+    }
+}
 
 pub(super) async fn finish_target(
     conn: &Connection,
     target_id: &str,
     session_id: &str,
     close: bool,
-) {
-    let (method, params) = if close {
-        (
-            "Target.closeTarget",
-            serde_json::json!({"targetId": target_id}),
+) -> bool {
+    if close {
+        return crate::sdk::cdp::session::close_target_preserving_browser(
+            conn,
+            target_id,
+            TARGET_CLEANUP_TIMEOUT,
         )
-    } else {
-        (
-            "Target.detachFromTarget",
-            serde_json::json!({"sessionId": session_id}),
-        )
-    };
+        .await
+        .is_ok();
+    }
     let _ = conn
-        .send_timeout(method, &params, None, TARGET_CLEANUP_TIMEOUT)
+        .send_timeout(
+            "Target.detachFromTarget",
+            &serde_json::json!({"sessionId":session_id}),
+            None,
+            TARGET_CLEANUP_TIMEOUT,
+        )
         .await;
+    false
 }
 
-/// Whether a successful fetch closes its target. The rule: a tab that stays
-/// open must have someone coming to it.
-///
-/// `keep_tab_open` is the takeover intent, but it only holds the tab when the
-/// page actually needs a human (`next_action` was set, and the caller mints a
-/// handoff URL for it). A takeover fetch whose warmed profile reached the
-/// content directly keeps nothing — nobody was ever going to visit that tab —
-/// and a `--tab` re-fetch that comes back clean after the human cleared the
-/// wall closes the tab, completing the loop instead of leaking it. Plain
-/// `--tab` fetches without takeover intent never close what they were handed.
-fn close_after_success(created_target: bool, keep_tab_open: bool, has_next_action: bool) -> bool {
-    let takeover_pending = keep_tab_open && has_next_action;
-    !takeover_pending && (created_target || keep_tab_open)
+/// Takeover completion requires affirmative capture evidence. No next_action
+/// merely means that the classifier did not recognize a known challenge.
+fn takeover_content_verified(
+    result: &FetchResult,
+    snapshot: Option<&PageSnapshot>,
+    warnings: &[Warning],
+) -> bool {
+    use crate::sdk::fetch::readiness::ReadinessState;
+    (200..300).contains(&result.status)
+        && result.next_action.is_none()
+        && result.page_kind.is_none()
+        && snapshot.is_some_and(|snapshot| {
+            snapshot.has_dom_content()
+                && !snapshot.text.trim().is_empty()
+                && matches!(snapshot.ready_state.as_str(), "interactive" | "complete")
+        })
+        && result.readiness.as_ref().is_none_or(|readiness| {
+            readiness.wait_satisfied
+                && !readiness.timed_out
+                && readiness.target_content == ReadinessState::Ready
+        })
+        && !warnings.iter().any(|warning| {
+            matches!(
+                warning.code,
+                ErrorCode::ArtifactCaptureFailed
+                    | ErrorCode::ArtifactCaptureTimeout
+                    | ErrorCode::ArtifactEmpty
+                    | ErrorCode::ObservationEmpty
+                    | ErrorCode::NavigationStale
+                    | ErrorCode::ReadinessTimeout
+                    | ErrorCode::WaitSelectorUnmatched
+            )
+        })
+}
+
+fn close_after_success(created_target: bool, takeover: bool, content_verified: bool) -> bool {
+    if takeover {
+        content_verified
+    } else {
+        created_target
+    }
 }
 
 async fn wait_for_navigation_commit(
@@ -1227,7 +1448,7 @@ fn cookie_jar_sync_warning(synced: Result<usize, Error>) -> Option<Warning> {
         Ok(0) => None,
         Ok(rejected_count) => Some(Warning {
             artifact: Artifact::Network,
-            code: ErrorCode::ArtifactCaptureFailed,
+            code: ErrorCode::CookieRejected,
             detail: format!("cookie jar sync: rejected_cookie_count={rejected_count}"),
         }),
         Err(e) => Some(Warning {
@@ -1377,7 +1598,7 @@ mod tests {
                         serde_json::json!({"id": id, "result": {"success": true}})
                     }
                     "Target.getTargets" => {
-                        serde_json::json!({"id": id, "result": {"targetInfos": if target_exists { vec![serde_json::json!({"targetId": "created"})] } else { vec![] }}})
+                        serde_json::json!({"id": id, "result": {"targetInfos": if target_exists { vec![serde_json::json!({"targetId": "created", "type": "page"}), serde_json::json!({"targetId": "anchor", "type": "page", "url":"about:blank#afhttp-window-anchor"})] } else { vec![] }}})
                     }
                     method => panic!("unexpected CDP command {method}"),
                 };
@@ -1410,6 +1631,55 @@ mod tests {
             .unwrap();
     }
 
+    /// A wedged browser accepts connections and never answers. Whether it
+    /// stalls before the WebSocket handshake or after it, the fetch must end
+    /// with its timeout error inside the budget plus bounded cleanup, never
+    /// wait on it forever.
+    #[tokio::test]
+    async fn fetch_against_a_silent_endpoint_times_out_within_budget() {
+        use futures::StreamExt;
+        for complete_handshake in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let peer = tokio::spawn(async move {
+                let mut held = Vec::new();
+                while let Ok((stream, _)) = listener.accept().await {
+                    if complete_handshake {
+                        if let Ok(mut websocket) = tokio_tungstenite::accept_async(stream).await {
+                            tokio::spawn(async move { while websocket.next().await.is_some() {} });
+                        }
+                    } else {
+                        held.push(stream);
+                    }
+                }
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let client = crate::sdk::Client::connect(&format!("ws://{address}")).unwrap();
+            let budget = std::time::Duration::from_secs(2);
+            let started = std::time::Instant::now();
+            let error = tokio::time::timeout(
+                budget + TARGET_CLEANUP_TIMEOUT + std::time::Duration::from_secs(2),
+                client
+                    .fetch("https://example.test/")
+                    .render(crate::sdk::fetch::RenderMode::Always)
+                    .no_cookie_jar()
+                    .out_dir(dir.path().to_path_buf())
+                    .timeout(budget)
+                    .send(),
+            )
+            .await
+            .expect("fetch returned within its budget and bounded cleanup")
+            .unwrap_err();
+            assert_eq!(
+                error.error_code,
+                ErrorCode::NavigationTimeout,
+                "handshake={complete_handshake}: {error:?}"
+            );
+            assert!(started.elapsed() >= budget, "{:?}", started.elapsed());
+            peer.abort();
+        }
+    }
+
     #[tokio::test]
     async fn finish_target_is_bounded_when_peer_never_replies() {
         use futures::StreamExt;
@@ -1439,12 +1709,32 @@ mod tests {
     }
 
     #[test]
-    fn rejected_jar_cookies_are_counted_in_a_capture_warning() {
+    fn rejected_jar_cookies_are_a_policy_warning_not_a_capture_failure() {
         assert!(cookie_jar_sync_warning(Ok(0)).is_none());
         let warning = cookie_jar_sync_warning(Ok(3)).unwrap();
         assert_eq!(warning.artifact, Artifact::Network);
-        assert_eq!(warning.code, ErrorCode::ArtifactCaptureFailed);
+        assert_eq!(warning.code, ErrorCode::CookieRejected);
         assert_eq!(warning.detail, "cookie jar sync: rejected_cookie_count=3");
+        // A refused cookie does not make verified content unverified, so a
+        // completed takeover still closes its tab.
+        let mut result = FetchResult::new(
+            RequestId::new_v4(),
+            "https://site.test/".into(),
+            Default::default(),
+        );
+        result.status = 200;
+        let snapshot = PageSnapshot {
+            url: "https://site.test/".into(),
+            title: "Site".into(),
+            ready_state: "complete".into(),
+            text: "content".into(),
+            html: "<html><body>content</body></html>".into(),
+        };
+        assert!(takeover_content_verified(
+            &result,
+            Some(&snapshot),
+            std::slice::from_ref(&warning)
+        ));
         let warning =
             cookie_jar_sync_warning(Err(Error::new(ErrorCode::IoError, "jar unwritable"))).unwrap();
         assert_eq!(warning.code, ErrorCode::IoError);
@@ -1478,25 +1768,13 @@ mod tests {
     }
 
     #[test]
-    fn a_kept_tab_needs_a_pending_takeover() {
-        // A fresh target closes after a plain one-shot fetch.
+    fn takeover_recycling_requires_affirmative_content_evidence() {
         assert!(close_after_success(true, false, false));
-        // Takeover intent alone does not hold the tab: the warmed profile
-        // reached the content, so no human is coming.
-        assert!(close_after_success(true, true, false));
-        // A wall was detected; the tab stays open for the handoff.
-        assert!(!close_after_success(true, true, true));
-        // The takeover re-fetch of that tab came back clean — loop complete.
-        assert!(close_after_success(false, true, false));
-        // The re-fetch still hit the wall; the human is still working.
-        assert!(!close_after_success(false, true, true));
-        // A plain `--tab` fetch never closes what it was handed, even when
-        // the page classified as a wall.
-        assert!(!close_after_success(false, false, false));
         assert!(!close_after_success(false, false, true));
-        // A fresh target closes even when a wall was detected, when no
-        // takeover was requested: nobody will be sent to it.
-        assert!(close_after_success(true, false, true));
+        for created in [true, false] {
+            assert!(!close_after_success(created, true, false));
+            assert!(close_after_success(created, true, true));
+        }
     }
 
     #[test]

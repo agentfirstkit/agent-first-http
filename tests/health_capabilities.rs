@@ -167,6 +167,8 @@ async fn capabilities_reports_browser_artifacts_unsupported_when_no_backend() {
     assert!(response.artifacts["network"].body_capture.is_empty());
     assert!(response.artifacts.contains_key("storage"));
     assert!(response.features.contains_key("selector_visible"));
+    assert!(response.features.contains_key("selector_stable"));
+    assert!(response.wait_modes.contains(&"selector_stable".to_string()));
     assert!(response.features.contains_key("capture_ws"));
     assert!(response.features.contains_key("capture_sse"));
     assert!(response.features.contains_key("recent_requests"));

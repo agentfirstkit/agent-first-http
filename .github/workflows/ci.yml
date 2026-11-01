@@ -44,12 +44,9 @@ jobs:
         run: cargo build --all-features
       - name: build --no-default-features --features sdk
         run: cargo build --no-default-features --features sdk
-      - name: SDK-only build excludes chromiumoxide
-        run: |
-          if cargo tree --no-default-features --features sdk | grep -q chromiumoxide; then
-            echo "::error::SDK-only build linked chromiumoxide"
-            exit 1
-          fi
+      - name: SDK floor links no host-only crate
+        shell: bash
+        run: bash tests/check_sdk_floor.sh
       - name: clippy --all-features
         run: cargo clippy --all-features --all-targets -- -D warnings
       - name: clippy --no-default-features --features sdk

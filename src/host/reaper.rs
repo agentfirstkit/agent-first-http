@@ -9,17 +9,22 @@
 //! The host is the only party that sees every target, so it is the one that
 //! reclaims them.
 //!
-//! A target is reaped when the host has been continuously idle for the
-//! timeout: no `/cdp` proxy client connected and no takeover credential
+//! A target is reaped when it has been idle for the timeout. For a tab the
+//! host cannot attribute to anyone, idle means the whole host has been quiet
+//! that long: no `/cdp` proxy client connected and no takeover credential
 //! live. The connection count covers every driver (all CDP traffic flows
 //! through the proxy); credential liveness covers the human on the real
-//! display, who drives the browser without a CDP connection. The backend's
-//! per-target `attached` flag is deliberately not consulted: on a
-//! chromium-family host the launcher itself keeps every page attached, so
-//! the flag says nothing about drivers. Only `http(s)` pages are considered
-//! — `about:blank` and browser-internal pages cost nothing and keeping them
-//! means a headful browser (which exits with its last window) always has a
-//! window left.
+//! display, who drives the browser without a CDP connection. A tab the proxy
+//! saw a connection create and never close is different once that connection
+//! has ended: it is an orphan (see `listener::target_ledger`), no driver will
+//! ever close it, and its clock runs while other drivers keep working. Only a
+//! live takeover credential still holds it, because a human may be on their
+//! way to exactly that tab. The backend's per-target `attached` flag is
+//! deliberately not consulted: on a chromium-family host the launcher itself
+//! keeps every page attached, so the flag says nothing about drivers. Only
+//! `http(s)` pages are considered — `about:blank` and browser-internal pages
+//! cost nothing and keeping them means a headful browser (which exits with
+//! its last window) always has a window left.
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -95,18 +100,25 @@ async fn sweep(state: &AppState, idle_timeout: Duration, tracker: &mut Tracker) 
         tracker.idle_since.clear();
         return;
     };
-    // A connected driver or a live credential means someone is using (or on
-    // their way to) this browser. Clearing the clocks rather than pausing
-    // them gives every tab a full timeout of grace after the activity ends,
-    // instead of reaping the instant the last connection or credential
-    // lapses.
-    if state.cdp_client_count() > 0 || state.has_live_takeover_credentials() {
+    // A live credential means a human is at, or on their way to, some tab,
+    // and the host cannot tell which: every clock clears. Clearing rather than
+    // pausing gives every tab a full timeout of grace after the activity
+    // ends, instead of reaping the instant the last credential lapses.
+    if state.has_live_takeover_credentials() {
         tracker.idle_since.clear();
         return;
     }
     if tracker.ws_url != entry.ws_url() {
         tracker.idle_since.clear();
         tracker.ws_url = entry.ws_url().to_string();
+    }
+    // A connected driver gets the same grace for every tab it might be
+    // driving. Orphans are not among them: their driver is gone for good.
+    let driver_connected = state.cdp_client_count() > 0;
+    let orphans = state.orphaned_targets();
+    if driver_connected && orphans.is_empty() {
+        tracker.idle_since.clear();
+        return;
     }
     let Ok(Ok(conn)) =
         tokio::time::timeout(CONNECT_TIMEOUT, Connection::connect(entry.ws_url(), None)).await
@@ -129,49 +141,29 @@ async fn sweep(state: &AppState, idle_timeout: Duration, tracker: &mut Tracker) 
     let now = Instant::now();
     let mut seen: HashSet<String> = HashSet::new();
     let mut expired: Vec<String> = Vec::new();
-    let mut surviving_pages = 0usize;
     for target in page_targets(&targets) {
         seen.insert(target.id.clone());
-        if !is_reapable_url(&target.url) {
+        if !is_reapable_url(&target.url) || (driver_connected && !orphans.contains(&target.id)) {
             tracker.idle_since.remove(&target.id);
-            surviving_pages += 1;
             continue;
         }
         let since = *tracker.idle_since.entry(target.id.clone()).or_insert(now);
         if now.duration_since(since) >= idle_timeout {
             expired.push(target.id);
-        } else {
-            surviving_pages += 1;
         }
     }
     tracker.idle_since.retain(|id, _| seen.contains(id));
+    state.retain_orphaned_targets(&seen);
 
     if expired.is_empty() {
         conn.close();
         return;
     }
-    // A headful browser exits when its last window closes; make sure one
-    // survives the sweep.
-    if surviving_pages == 0 {
-        let _ = conn
-            .send_timeout(
-                "Target.createTarget",
-                &serde_json::json!({ "url": "about:blank" }),
-                None,
-                COMMAND_TIMEOUT,
-            )
-            .await;
-    }
     for id in expired {
-        let closed = conn
-            .send_timeout(
-                "Target.closeTarget",
-                &serde_json::json!({ "targetId": id }),
-                None,
-                COMMAND_TIMEOUT,
-            )
-            .await
-            .is_ok();
+        let closed =
+            crate::sdk::cdp::session::close_target_preserving_browser(&conn, &id, COMMAND_TIMEOUT)
+                .await
+                .is_ok();
         if closed {
             tracker.idle_since.remove(&id);
             // The URL stays out of this event: page URLs can carry session

@@ -5,9 +5,10 @@ use std::time::Duration;
 use crate::host::bootstrap::HealthPublic;
 use crate::host::listener::{AppState, ProfileEntry};
 use crate::sdk::cdp::ws_client::Connection;
-use crate::sdk::health::{BackendError, BackendInfo, HealthResponse};
+use crate::sdk::health::{BackendError, BackendInfo, HealthResponse, TakeoverHealth};
 use crate::shared::error::{Error, ErrorCode};
 use crate::shared::profile_snapshot::ProfileSnapshot;
+use crate::shared::redact::redact_urls_in_text;
 
 pub async fn build(state: &AppState, authenticated: bool) -> HealthResponse {
     let uptime_s = state.started_at.elapsed().as_secs();
@@ -18,6 +19,8 @@ pub async fn build(state: &AppState, authenticated: bool) -> HealthResponse {
             code: "health".into(),
             status: status_string(state, false),
             version: env!("CARGO_PKG_VERSION").into(),
+            build: None,
+            takeover: None,
             uptime_s,
             backend: None,
             backend_error: None,
@@ -39,7 +42,7 @@ pub async fn build(state: &AppState, authenticated: bool) -> HealthResponse {
             Err(e) => {
                 backend_error = Some(BackendError {
                     error_code: e.error_code,
-                    error: e.detail,
+                    error: redact_urls_in_text(&e.detail),
                 });
                 false
             }
@@ -63,10 +66,17 @@ pub async fn build(state: &AppState, authenticated: bool) -> HealthResponse {
         locked: e.kind == "persistent",
     });
 
+    let takeover = takeover_health(state, backend_connected).await;
+
     HealthResponse {
         code: "health".into(),
-        status: status_string(state, backend_error.is_some()),
+        status: status_string(
+            state,
+            backend_error.is_some() || (takeover.configured && !takeover.ready),
+        ),
         version: env!("CARGO_PKG_VERSION").into(),
+        build: Some(env!("GIT_SHA").to_string()),
+        takeover: Some(takeover),
         uptime_s,
         backend,
         backend_error,
@@ -74,6 +84,62 @@ pub async fn build(state: &AppState, authenticated: bool) -> HealthResponse {
         tabs_active,
         capabilities_url: Some("/capabilities".into()),
     }
+}
+
+async fn takeover_health(state: &AppState, cdp_connected: bool) -> TakeoverHealth {
+    let configured = state.takeover_enabled && state.takeover.is_some();
+    let (browser_running, process_error) = match state.get_profile() {
+        Some(entry) => match entry.handle.process_running().await {
+            Ok(running) => (running, None),
+            Err(error) => (None, Some(redact_urls_in_text(&error.detail))),
+        },
+        None => (Some(false), None),
+    };
+    let display_error = match &state.takeover {
+        Some(display) => display
+            .probe()
+            .await
+            .err()
+            .map(|error| redact_urls_in_text(&error.detail)),
+        None => Some("display takeover is not enabled".into()),
+    };
+    let display_connected = state.takeover.is_some() && display_error.is_none();
+    let reason = if !configured {
+        Some("display takeover is not enabled".into())
+    } else if browser_running == Some(false) {
+        Some("browser process exited; host/display liveness does not imply browser availability; profile data has been preserved".into())
+    } else if process_error.is_some() {
+        process_error
+    } else if !cdp_connected {
+        Some("browser CDP connection unavailable; the browser may have exited or stopped responding; profile data has been preserved".into())
+    } else {
+        display_error
+    };
+    TakeoverHealth {
+        configured,
+        browser_running,
+        cdp_connected,
+        display_connected,
+        ready: reason.is_none(),
+        reason,
+    }
+}
+
+pub(super) async fn require_takeover_ready(state: &AppState) -> Result<TakeoverHealth, Error> {
+    let cdp_connected = match state.get_profile() {
+        Some(entry) => probe_tabs_active(&entry).await.is_ok(),
+        None => false,
+    };
+    let health = takeover_health(state, cdp_connected).await;
+    if !health.ready {
+        return Err(Error::new(
+            ErrorCode::CdpUnavailable,
+            health
+                .reason
+                .unwrap_or_else(|| "takeover is unavailable".into()),
+        ));
+    }
+    Ok(health)
 }
 
 /// A backend under load is not a backend that is gone, and this probe is the

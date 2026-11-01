@@ -103,6 +103,14 @@ pub fn build(state: &AppState) -> CapabilitiesResponse {
         },
     );
     features.insert(
+        "selector_stable".into(),
+        FeatureSupport {
+            supported: true,
+            detail: Some("--wait selector-stable:<css>; frame-aware scoped readiness".into()),
+            risk: None,
+        },
+    );
+    features.insert(
         "network_body_capture".into(),
         FeatureSupport {
             supported: backend_ready,
@@ -169,6 +177,7 @@ pub fn build(state: &AppState) -> CapabilitiesResponse {
             "idle".into(),
             "selector".into(),
             "selector_visible".into(),
+            "selector_stable".into(),
             "ms".into(),
         ],
         takeover: TakeoverSupport {

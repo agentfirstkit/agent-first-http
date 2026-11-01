@@ -72,15 +72,24 @@ def wait_for_port(port, timeout=90.0, host="127.0.0.1"):
 # ── HTTP, by hand, so nothing a client library does is mistaken for the proxy ──
 
 
+def joined(message):
+    """Headers as one string per name, a repeated one joined the way HTTP reads
+    it: AFUI sends its frame sandbox as a policy of its own, beside the panel's."""
+    headers = {}
+    for name, value in message.items():
+        headers[name] = f"{headers[name]}, {value}" if name in headers else value
+    return headers
+
+
 def http(url, headers=None, method="GET"):
     request = urllib.request.Request(url, method=method)
     for name, value in (headers or {}).items():
         request.add_header(name, value)
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
-            return response.status, dict(response.headers.items()), response.read()
+            return response.status, joined(response.headers), response.read()
     except urllib.error.HTTPError as error:
-        return error.code, dict(error.headers.items()), error.read()
+        return error.code, joined(error.headers), error.read()
 
 
 # ── WebSocket, by hand, because what has to be observed is the handshake ──
@@ -326,9 +335,21 @@ def main():
         # this container has a display.
         stub = tempfile.mkdtemp(prefix="stub-browser-")
         argv_log = f"{stub}/argv"
+        target_log = f"{stub}/target"
+        # The window is launched on a private local page that forwards to the
+        # panel, so the credential never sits in the world-readable arguments.
+        # The stub resolves the page while it still exists: the window's
+        # directory goes with the window.
         with open(f"{stub}/browser", "w") as handle:
             handle.write(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + argv_log + "\nsleep 2\n"
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + argv_log + "\n"
+                'for arg in "$@"; do\n'
+                '  case "$arg" in\n'
+                "    --app=file://*) sed -n 's/.*location\\.replace(\"\\(.*\\)\");.*/\\1/p'"
+                ' "${arg#--app=file://}" > ' + target_log + " ;;\n"
+                "  esac\n"
+                "done\n"
+                "sleep 2\n"
             )
         os.chmod(f"{stub}/browser", 0o755)
         opened = subprocess.run(
@@ -338,14 +359,18 @@ def main():
             env={**env, "AFUI_BROWSER_BINARY": f"{stub}/browser"},
         )
         launched = ""
+        target = ""
         try:
             with open(argv_log) as handle:
                 launched = handle.read()
+            with open(target_log) as handle:
+                target = handle.read().strip()
         except OSError:
             pass
         check(
             "`afui session open` opens a window onto the announced panel",
-            "--app=http://127.0.0.1:9222/takeover/panel?handoff_secret=" in launched,
+            target.startswith("http://127.0.0.1:9222/takeover/panel?handoff_secret=")
+            and "handoff_secret" not in launched,
             (launched or opened.stdout + opened.stderr)[:600],
         )
         shutil.rmtree(stub, ignore_errors=True)
@@ -532,11 +557,29 @@ def shell_phase(procs, env, afui, name, port, origin_host, session_id, debug_por
     # afhttp's panel sends no CSP of its own, so the proxy has none to narrow —
     # a Provider that says nothing about framing is not told anything either.
     # When one is present it must name the page, which is a different origin in
-    # each shape and blanks every frame if it is wrong.
-    policy = headers.get("content-security-policy")
-    if policy:
-        wanted = f"frame-ancestors http://{shell.host}" if origin_host else "frame-ancestors 'self'"
-        check(f"[{shape}] only the page that framed it may frame it", wanted in policy, policy)
+    # each shape and blanks every frame if it is wrong. On a path the response
+    # also carries the frame's sandbox as a policy of its own, so opening the
+    # frame's address by hand does not put the panel on the shell's origin.
+    policies = [
+        policy.strip()
+        for policy in headers.get("content-security-policy", "").split(",")
+        if policy.strip()
+    ]
+    sandbox = [policy for policy in policies if policy.startswith("sandbox ")]
+    provider = [policy for policy in policies if not policy.startswith("sandbox ")]
+    if origin_host:
+        check(f"[{shape}] a session on its own origin carries no sandbox policy", not sandbox, policies)
+    else:
+        check(
+            f"[{shape}] a session on a path carries the frame's sandbox itself",
+            sandbox == ["sandbox allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox"],
+            policies,
+        )
+    if provider:
+        wanted = (
+            f"frame-ancestors 'self' http://{shell.host}" if origin_host else "frame-ancestors 'self'"
+        )
+        check(f"[{shape}] only the page that framed it may frame it", wanted in provider[0], provider)
     else:
         note("the panel sends no Content-Security-Policy, so the proxy narrows nothing")
     check(
@@ -761,11 +804,21 @@ def browser_report(shell, frame, procs, debug_port):
             + ("refused to run" if framed.get("blocked") else "carried on")
             + f"; connected: {framed.get('connected')}"
         )
-    check(
-        f"[{shape}] the same panel, reverse-proxied but not framed, runs",
-        unframed.get("blocked") is False,
-        unframed.get("evidence", "no report from the page"),
-    )
+    if shell.per_origin:
+        check(
+            f"[{shape}] the same panel, reverse-proxied but not framed, runs",
+            unframed.get("blocked") is False,
+            unframed.get("evidence", "no report from the page"),
+        )
+    else:
+        # On a path the frame's address is on the shell's own origin, so opened
+        # by hand it is sandboxed by the response exactly as the frame is: the
+        # same opaque origin, the same missing storage.
+        check(
+            f"[{shape}] the same panel opened by hand stays sandboxed",
+            str(unframed.get("storage", "")).startswith("SecurityError"),
+            f"storage: {unframed.get('storage')!r}",
+        )
     connection.close()
     shutil.rmtree(profile, ignore_errors=True)
 

@@ -88,7 +88,7 @@ impl Client {
             )
         })?;
         if !status.is_success() {
-            if let Ok(err) = crate::shared::afdata::decode_error(&bytes) {
+            if let Ok(err) = crate::shared::events::decode_error(&bytes) {
                 return Err(err);
             }
             return Err(Error::new(
@@ -99,7 +99,7 @@ impl Client {
                 ),
             ));
         }
-        crate::shared::afdata::decode_result(&bytes)
+        crate::shared::events::decode_result(&bytes)
     }
 
     /// Build a raw CDP request. Returns a [`crate::sdk::cdp::CdpBuilder`].

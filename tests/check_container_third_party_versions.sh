@@ -125,7 +125,7 @@ if kasm_json="$(fetch_json "kasmvnc" "https://api.github.com/repos/kasmtech/Kasm
     if usable "kasmvnc" "$latest_kasm"; then
         expect_eq "kasmvnc" "$(require_pin KASMVNC_VERSION)" "$latest_kasm" || fail=1
         for deb_arch in amd64 arm64; do
-            kasm_asset="kasmvncserver_trixie_${latest_kasm}_${deb_arch}.deb"
+            kasm_asset="kasmvncserver_debian_trixie_${latest_kasm}_${deb_arch}.deb"
             if ! printf '%s' "$kasm_json" | jq -e --arg name "$kasm_asset" 'any(.assets[].name; . == $name)' >/dev/null; then
                 echo "missing expected KasmVNC trixie asset: $kasm_asset" >&2
                 fail=1

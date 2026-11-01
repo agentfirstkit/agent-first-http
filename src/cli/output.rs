@@ -17,6 +17,14 @@ pub fn emit_unredacted<T: Serialize>(code: &str, payload: &T) -> Result<(), Erro
     crate::shared::afdata::emit_process_unredacted(code, payload)
 }
 
+/// Emit a result that is a faithful capture: the browser's own answer, which
+/// afhttp reports as given. No AFDATA `_secret` redaction, and the URL walk
+/// skips the `cdp` result (`shared::redact::redact_url_fields`). Only for a
+/// payload that carries nothing of afhttp's own beyond the capture.
+pub fn emit_raw_capture<T: Serialize>(code: &str, payload: &T) -> Result<(), Error> {
+    crate::shared::afdata::emit_process_unredacted(code, payload)
+}
+
 /// Emit an otherwise-redacted result while revealing only the short-lived
 /// takeover capability requested by an explicit panel/takeover operation.
 pub fn emit_revealing_takeover<T: Serialize>(code: &str, payload: &T) -> Result<(), Error> {

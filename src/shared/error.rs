@@ -20,7 +20,6 @@ pub enum ErrorCode {
     DnsResolutionFailed,
     TargetUnreachable,
     TlsError,
-    TabCrashed,
     ProfileLocked,
     BrowserLaunchFailed,
     CdpUnavailable,
@@ -39,7 +38,10 @@ pub enum ErrorCode {
     ObservationEmpty,
     PendingXhrAtCapture,
     ReadinessTimeout,
+    TakeoverContentUnverified,
     NetworkBodyTruncated,
+    /// A cookie the jar's scope rules refused: not captured, by policy.
+    CookieRejected,
     ProfileNotFound,
     ProfileDeleteLocked,
     ProfileInvalidName,
@@ -62,7 +64,6 @@ impl ErrorCode {
             | Self::HostUnreachable
             | Self::DnsResolutionFailed
             | Self::TargetUnreachable
-            | Self::TabCrashed
             | Self::CdpTimeout
             | Self::IoError => true,
 
@@ -82,7 +83,9 @@ impl ErrorCode {
             | Self::ObservationEmpty
             | Self::PendingXhrAtCapture
             | Self::ReadinessTimeout
+            | Self::TakeoverContentUnverified
             | Self::NetworkBodyTruncated
+            | Self::CookieRejected
             | Self::ProfileNotFound
             | Self::ProfileDeleteLocked
             | Self::ProfileInvalidName
@@ -109,7 +112,6 @@ impl ErrorCode {
             Self::DnsResolutionFailed => "dns_resolution_failed",
             Self::TargetUnreachable => "target_unreachable",
             Self::TlsError => "tls_error",
-            Self::TabCrashed => "tab_crashed",
             Self::ProfileLocked => "profile_locked",
             Self::BrowserLaunchFailed => "browser_launch_failed",
             Self::CdpUnavailable => "cdp_unavailable",
@@ -128,7 +130,9 @@ impl ErrorCode {
             Self::ObservationEmpty => "observation_empty",
             Self::PendingXhrAtCapture => "pending_xhr_at_capture",
             Self::ReadinessTimeout => "readiness_timeout",
+            Self::TakeoverContentUnverified => "takeover_content_unverified",
             Self::NetworkBodyTruncated => "network_body_truncated",
+            Self::CookieRejected => "cookie_rejected",
             Self::ProfileNotFound => "profile_not_found",
             Self::ProfileDeleteLocked => "profile_delete_locked",
             Self::ProfileInvalidName => "profile_invalid_name",
@@ -149,15 +153,14 @@ impl std::fmt::Display for ErrorCode {
 
 /// The structured error every `afhttp` failure path produces.
 ///
-/// CLI output converts this error into an AFDATA protocol-v1 `error` event.
+/// CLI output converts this error into an AFDATA protocol-v1 `error` event and
+/// redacts URL credentials in `detail` there. The SDK keeps `detail` as the
+/// failure produced it — a target URL the caller passed in comes back as
+/// passed — and hides only the credentials afhttp itself attached.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Error {
     pub error_code: ErrorCode,
-    #[serde(
-        rename = "error",
-        serialize_with = "serialize_detail",
-        deserialize_with = "deserialize_detail"
-    )]
+    #[serde(rename = "error")]
     pub detail: String,
     pub retryable: bool,
 }
@@ -167,7 +170,7 @@ impl Error {
     pub fn new(error_code: ErrorCode, detail: impl Into<String>) -> Self {
         Self {
             error_code,
-            detail: crate::shared::redact::redact_urls_in_text(&detail.into()),
+            detail: detail.into(),
             retryable: error_code.retryable_default(),
         }
     }
@@ -181,29 +184,8 @@ impl Error {
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}: {}",
-            self.error_code,
-            crate::shared::redact::redact_urls_in_text(&self.detail)
-        )
+        write!(f, "{}: {}", self.error_code, self.detail)
     }
-}
-
-// `detail` is public, so protect output even when a caller constructs or
-// mutates it without going through `Error::new`.
-pub(crate) fn serialize_detail<S: serde::Serializer>(
-    detail: &str,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    serializer.serialize_str(&crate::shared::redact::redact_urls_in_text(detail))
-}
-
-pub(crate) fn deserialize_detail<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<String, D::Error> {
-    String::deserialize(deserializer)
-        .map(|detail| crate::shared::redact::redact_urls_in_text(&detail))
 }
 
 impl std::error::Error for Error {}
@@ -227,7 +209,6 @@ mod tests {
             (ErrorCode::DnsResolutionFailed, "dns_resolution_failed"),
             (ErrorCode::TargetUnreachable, "target_unreachable"),
             (ErrorCode::TlsError, "tls_error"),
-            (ErrorCode::TabCrashed, "tab_crashed"),
             (ErrorCode::ProfileLocked, "profile_locked"),
             (ErrorCode::BrowserLaunchFailed, "browser_launch_failed"),
             (ErrorCode::CdpUnavailable, "cdp_unavailable"),
@@ -252,6 +233,10 @@ mod tests {
             (ErrorCode::ObservationEmpty, "observation_empty"),
             (ErrorCode::PendingXhrAtCapture, "pending_xhr_at_capture"),
             (ErrorCode::ReadinessTimeout, "readiness_timeout"),
+            (
+                ErrorCode::TakeoverContentUnverified,
+                "takeover_content_unverified",
+            ),
             (ErrorCode::NetworkBodyTruncated, "network_body_truncated"),
             (ErrorCode::ProfileNotFound, "profile_not_found"),
             (ErrorCode::ProfileDeleteLocked, "profile_delete_locked"),
@@ -278,7 +263,6 @@ mod tests {
         assert!(ErrorCode::HostUnreachable.retryable_default());
         assert!(ErrorCode::DnsResolutionFailed.retryable_default());
         assert!(ErrorCode::TargetUnreachable.retryable_default());
-        assert!(ErrorCode::TabCrashed.retryable_default());
         assert!(ErrorCode::CdpTimeout.retryable_default());
 
         assert!(!ErrorCode::TlsError.retryable_default());
@@ -306,42 +290,6 @@ mod tests {
         assert_eq!(json["error_code"], "navigation_timeout");
         assert_eq!(json["error"], "page never loaded");
         assert_eq!(json["retryable"], true);
-    }
-
-    #[test]
-    fn error_redacts_url_credentials_at_every_public_output_boundary() {
-        let detail = "connect https://reader:password-canary@example.test/path?token_secret=query-canary&api_key=legacy-canary&safe=ok";
-        let expected =
-            "connect https://reader:***@example.test/path?token_secret=***&api_key=***&safe=ok";
-        let created = Error::new(ErrorCode::HostUnreachable, detail);
-        assert_eq!(created.detail, expected);
-
-        let direct = Error {
-            error_code: ErrorCode::HostUnreachable,
-            detail: detail.to_string(),
-            retryable: true,
-        };
-        let mut mutated = Error::new(ErrorCode::HostUnreachable, "initial message");
-        mutated.detail = detail.to_string();
-        for err in [created, direct, mutated] {
-            assert_eq!(err.to_string(), format!("host_unreachable: {expected}"));
-            let json = serde_json::to_value(&err).expect("serialize error");
-            assert_eq!(json["error"], expected);
-            assert_eq!(json["error_code"], "host_unreachable");
-            assert_eq!(json["retryable"], true);
-            let serialized = serde_json::to_string(&err).expect("serialize error text");
-            assert!(!serialized.contains("password-canary"));
-            assert!(!serialized.contains("query-canary"));
-            assert!(!serialized.contains("legacy-canary"));
-        }
-
-        let decoded: Error = serde_json::from_value(serde_json::json!({
-            "error_code": "host_unreachable",
-            "error": detail,
-            "retryable": true
-        }))
-        .expect("deserialize error");
-        assert_eq!(decoded.detail, expected);
     }
 
     #[test]

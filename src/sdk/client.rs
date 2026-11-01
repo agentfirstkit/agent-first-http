@@ -3,7 +3,8 @@
 //! `Client::connect(endpoint)` does not open the WebSocket up front — CDP
 //! connections are lazy and cached per Client. The Client holds the parsed
 //! endpoint, the optional bearer token, an HTTP client for the `/health` +
-//! `/capabilities` calls, and one reusable CDP connection.
+//! `/capabilities` calls, a separate HTTP client for HTTP-path target
+//! fetches, and one reusable CDP connection.
 
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -37,6 +38,10 @@ pub(crate) struct ClientInner {
     /// the host switches its active profile (per-domain isolation).
     pub(crate) profile: Option<String>,
     pub(crate) http: reqwest::Client,
+    /// Client for HTTP-path fetches of the caller's target URL. Never bound to
+    /// the host's unix socket: a target is reached over the network even when
+    /// the host is not.
+    pub(crate) target_http: reqwest::Client,
     pub(crate) hostless: bool,
     pub(crate) inline_host: Option<crate::sdk::inline::InlineHost>,
     cdp: Mutex<Option<Arc<Connection>>>,
@@ -49,27 +54,21 @@ impl Client {
     pub fn connect(endpoint: &str) -> Result<Self, Error> {
         ensure_rustls_provider();
         let endpoint = Endpoint::parse(endpoint)?;
-        let mut http_builder = reqwest::Client::builder()
-            .user_agent(concat!("afhttp/", env!("CARGO_PKG_VERSION")))
-            // Isolation invariant: never honor `HTTP_PROXY` / `HTTPS_PROXY`
-            // from the environment. Per-fetch `--proxy-url` is the only opt-in.
-            .no_proxy();
+        let http_builder = base_http_builder();
         #[cfg(unix)]
-        if let Endpoint::Unix { path } = &endpoint {
-            http_builder = http_builder.unix_socket(path.clone());
-        }
-        let http = http_builder.build().map_err(|e| {
-            Error::new(
-                ErrorCode::InternalError,
-                format!("reqwest client build failed: {e}"),
-            )
-        })?;
+        let http_builder = match &endpoint {
+            Endpoint::Unix { path } => http_builder.unix_socket(path.clone()),
+            _ => http_builder,
+        };
+        let http = build_http(http_builder)?;
+        let target_http = build_http(base_http_builder())?;
         Ok(Self {
             inner: Arc::new(ClientInner {
                 endpoint,
                 token: None,
                 profile: None,
                 http,
+                target_http,
                 hostless: false,
                 inline_host: None,
                 cdp: Mutex::new(None),
@@ -105,6 +104,7 @@ impl Client {
                 token: Some(token),
                 profile: self.inner.profile.clone(),
                 http: self.inner.http.clone(),
+                target_http: self.inner.target_http.clone(),
                 hostless: self.inner.hostless,
                 inline_host: self.inner.inline_host.clone(),
                 cdp: Mutex::new(None),
@@ -129,6 +129,7 @@ impl Client {
                 token: self.inner.token.clone(),
                 profile: Some(profile),
                 http: self.inner.http.clone(),
+                target_http: self.inner.target_http.clone(),
                 hostless: self.inner.hostless,
                 inline_host: self.inner.inline_host.clone(),
                 cdp: Mutex::new(None),
@@ -161,6 +162,11 @@ impl Client {
         &self.inner.http
     }
 
+    /// The HTTP client for target fetches; see [`ClientInner::target_http`].
+    pub(crate) fn target_http(&self) -> &reqwest::Client {
+        &self.inner.target_http
+    }
+
     pub(crate) fn is_hostless(&self) -> bool {
         self.inner.hostless
     }
@@ -189,6 +195,7 @@ impl Client {
                 token: self.inner.token.clone(),
                 profile: self.inner.profile.clone(),
                 http: self.inner.http.clone(),
+                target_http: self.inner.target_http.clone(),
                 hostless: false,
                 inline_host: Some(inline_host),
                 cdp: Mutex::new(None),
@@ -213,10 +220,14 @@ impl Client {
         }
     }
 
-    /// Return the cached CDP connection, opening it lazily on first use.
+    /// Return the cached CDP connection, opening it lazily on first use. A
+    /// cached connection whose transport has closed is replaced, so one dead
+    /// socket does not fail every later call on this Client.
     pub(crate) async fn cdp_connection(&self) -> Result<Arc<Connection>, Error> {
         let mut guard = self.inner.cdp.lock().await;
-        if let Some(conn) = guard.as_ref() {
+        if let Some(conn) = guard.as_ref()
+            && !conn.is_closed()
+        {
             return Ok(conn.clone());
         }
         let endpoint = self.effective_endpoint().await?;
@@ -283,11 +294,33 @@ impl Client {
             )
         })?;
         let info: crate::sdk::profile::info::ProfileInfo =
-            crate::shared::afdata::decode_result(&bytes)?;
+            crate::shared::events::decode_result(&bytes)?;
         let arc = Arc::new(info);
         *guard = Some(arc.clone());
         Ok(arc)
     }
+}
+
+fn base_http_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .user_agent(concat!("afhttp/", env!("CARGO_PKG_VERSION")))
+        // Isolation invariant: never honor `HTTP_PROXY` / `HTTPS_PROXY`
+        // from the environment. Per-fetch `--proxy-url` is the only opt-in.
+        .no_proxy()
+        // reqwest adds the previous URL, query included, as `Referer` on every
+        // redirect it follows, so a `?token_secret=` would reach whatever
+        // origin the redirect names. The jar path builds hops by hand and never
+        // sends one; neither does this.
+        .referer(false)
+}
+
+fn build_http(builder: reqwest::ClientBuilder) -> Result<reqwest::Client, Error> {
+    builder.build().map_err(|e| {
+        Error::new(
+            ErrorCode::InternalError,
+            format!("reqwest client build failed: {e}"),
+        )
+    })
 }
 
 fn profile_url(base: &str) -> Result<String, Error> {

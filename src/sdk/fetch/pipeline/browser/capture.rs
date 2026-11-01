@@ -86,6 +86,14 @@ const PAGE_SNAPSHOT_JS: &str = r#"(() => {
   });
 })()"#;
 
+/// Largest known response body afhttp asks CDP for. `Network.getResponseBody`
+/// returns a whole body in one WebSocket message, base64 for binary bodies so
+/// a third larger, and a message past the transport's frame limit (16 MiB by
+/// default, on the host's relay as well as here) closes the connection for
+/// every fetch that shares it. A body whose known size is larger is skipped
+/// with a warning instead; an unknown or compressed size is still requested.
+pub(super) const CDP_RESPONSE_BODY_MAX_BYTES: u64 = 10 * 1024 * 1024;
+
 pub(super) async fn capture_response_body(
     conn: &Connection,
     session_id: &str,

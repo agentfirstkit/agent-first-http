@@ -42,9 +42,13 @@ echo "      --endpoint-url ws://<host>:${AFHTTP_PORT} --token-secret container:<
 echo "    (from elsewhere: --token-secret file:<config-path>#<dot.path>, or env:<NAME>)"
 echo "========================================="
 
+# The host reads its token from the environment, never from argv: a command line
+# is visible to every process in the container's PID namespace.
+export AFHTTP_TOKEN_SECRET
+
 # Extra flags (e.g. --browser camoufox, --takeover-provider kasmvnc) pass through as "$@".
 exec afhttp host \
     --listen "tcp:0.0.0.0:${AFHTTP_PORT}" \
-    --token-secret "$AFHTTP_TOKEN_SECRET" \
+    --token-secret env:AFHTTP_TOKEN_SECRET \
     --profile "$AFHTTP_PROFILE" \
     "$@"

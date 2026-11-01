@@ -1,6 +1,6 @@
 # Agent-First HTTP - Protocol Reference
 
-> Reflects the v0.6.0 implementation. [architecture.md](architecture.md) is the canonical contract; this file documents the on-wire JSON shapes the CLI and SDK actually emit. Coverage of the ten artifact tokens and 11 CLI commands matches `src/shared/`, `src/sdk/`, and `src/host/`.
+> Reflects the current implementation. [architecture.md](architecture.md) is the canonical contract; this file documents the on-wire JSON shapes the CLI and SDK actually emit. Coverage of the artifact tokens and CLI commands matches `src/shared/`, `src/sdk/`, and `src/host/`.
 
 All command outputs are AFDATA protocol-v1 JSON events. With the default
 `--output-to split`, successes go to stdout and failures go to stderr;
@@ -36,7 +36,9 @@ other commands may omit it.
 | `request_url` | always on success | URL originally requested by the agent. |
 | `status` | if HTTP response exists | Final HTTP status code. 4xx/5xx are successful transport responses, not `error` envelopes. |
 | `final_url` | always on success | URL after redirects/navigation. |
-| `tab_id` | when the tab is still open | CDP target/tab id for follow-up `afhttp cdp` or `afhttp fetch --tab`. Present only for a caller-named `--tab` or a pending takeover; a tab the fetch opened and closed is not reported. |
+| `page_kind` | when the page was recognized as a wall | `bot_wall_detected` or `security_challenge_detected`. The page is not verified target content; do not answer from it. |
+| `readiness` | browser `auto` and `selector-stable` waits | Last readiness sample before capture: main document, target content, ancillary frames, wait outcome. See [readiness](readiness.md#result-fields). |
+| `tab_id` | when the tab is still open | CDP target/tab id for follow-up `afhttp cdp` or `afhttp fetch --tab`. Also present for unverified takeover captures or failed safe cleanup; a tab the fetch opened and closed is not reported. |
 | `content_type` | when the response carried one | Response `Content-Type` verbatim. Prefer it over guessing from `body_file`'s extension: the extension comes from a lossy table and unknown types land in `body.bin`. |
 | `body_file` | when `body` requested and body exists | Raw HTTP response body path. |
 | `rendered_html_file` | when produced | Serialized post-JS DOM path. |
@@ -54,8 +56,8 @@ other commands may omit it.
 | `download_url` | with `download_file` | URL that triggered the download. |
 | `download_state` | with `download_file` | Mechanical state, currently `"completed"`. |
 | `warnings` | if non-empty | Per-artifact or per-entry non-fatal failures. |
-| `next_action` | `fetch --takeover`, when human takeover is needed | Present only when `--takeover` could not reach the target with the warmed profile. See [Next action](#next-action). |
-| `trace` | always | Render decision, readiness, phase timings, bytes, and escalation signals. |
+| `next_action` | recognized challenge or unverified takeover capture | Manual review action; panel URL can be absent if handoff fails. See [Next action](#next-action). |
+| `trace` | always | Render decision, readiness, phase timings, bytes, and escalation signals. Fetch errors add optional `retained_tab_id` when a tab was retained. |
 
 Example:
 
@@ -108,18 +110,22 @@ Warnings do not fail the whole fetch.
 | --- | --- |
 | `artifact` | Artifact token, for example `screenshot`, `network`, or `observation`. |
 | `code` | Stable warning/error code such as `backend_unsupported` or `artifact_capture_failed`. |
-| `detail` | Human-readable detail. |
-| `request_id` | Optional network request id when the warning applies to one network entry. |
+| `detail` | Human-readable detail. A network body warning names its request here. |
 
 ### Next action
 
-`afhttp fetch --takeover` emits `next_action` only when the warmed profile did
-not reach the target and a human must drive the browser. When the profile already
-reaches the target, the result carries the usual artifacts and no `next_action`.
+`afhttp fetch --takeover` retains tabs for HTTP errors, unverified or incomplete
+content and recognized challenges. Reclaiming a takeover tab requires
+positive mechanical capture evidence. A failure to mint its panel URL retains
+the result, tab and review action, with the actual error in `warnings` and no
+`takeover_url_secret`. A fetch error can report `trace.retained_tab_id` for
+manual inspection. See [takeover reliability](takeover-reliability.md) for
+completion conditions.
 
 | Field | Description |
 | --- | --- |
 | `kind` | Currently `"human_takeover"`. |
+| `target_content_verified` | Always present. `false` whenever a next action is emitted: the captured page is not confirmed target content. |
 | `takeover_url_secret` | Complete short-lived takeover display capability URL with `handoff_secret=...` for a human to open in a local browser. It is intentionally revealed only in explicit takeover/panel results. |
 | `takeover_url_expires_at_rfc3339` | Expiry time for the handoff URL. Default TTL is 900 seconds. |
 | `takeover_url_ttl_s` | Handoff TTL in seconds. |
@@ -154,16 +160,16 @@ reaches the target, the result carries the usual artifacts and no `next_action`.
 | `render_decision` | `http_only` when the HTTP fast path was used, `browser` when a CDP-driven render was used. |
 | `render_mode` | Requested render mode (`none`, `auto`, or `always`). |
 | `render_used` | Convenience boolean mirroring whether the browser path actually ran. |
-| `escalation_reason` | Stable token describing why the browser path was taken. Values: `"empty_html_shell"` (HTTP returned a JS-bootstrap with no visible text), `"http_status_NNN"` (HTTP returned status NNN), `"http_failed_<code>"` (transport error, `<code>` is `error.code`). |
+| `escalation_reason` | Stable token describing why the browser path was taken. Values: `"bot_wall_detected"` / `"security_challenge_detected"` (the HTTP body was recognized as a wall or challenge page), `"empty_html_shell"` (HTTP returned a JS-bootstrap with no visible text), `"requested_content_artifact"` (`content` or `content_json` was requested, and those are composed from the rendered page), `"http_status_NNN"` (HTTP returned status NNN), `"http_failed_<code>"` (transport error, `<code>` is `error.code`). |
 | `main_request_observed` | Whether the main document request was observed by the active fetch path. HTTP-only successes set this true; browser-internal URLs like `about:blank` or cancelled navigations may set it false. |
 | `navigation_duration_ms` | Browser-path only: wall-clock from `Page.navigate` to the wait condition resolving. |
-| `wait_mode` | Browser-path wait mode (`auto`, `load`, `idle`, `selector`, `selector_visible`, or `ms`). |
+| `wait_mode` | Browser-path wait mode (`auto`, `load`, `idle`, `selector`, `selector_visible`, `selector_stable`, or `ms`). |
 | `wait_satisfied_by` | Mechanical readiness condition that allowed capture, such as `network_quiet_dom_text_stable`, `load`, `selector`, or `network_idle_event`. |
 | `network_quiet` / `dom_stable` / `text_stable` | `--wait auto` booleans report the last readiness samples, before artifact capture. A network sample stays idle-based after event loss or a capture limit: every network event still counts as activity even when its request was not retained, so readiness degrades from "no pending request" to "no network event for the idle window" rather than waiting out the deadline. The loss itself is reported by warnings and the final summary without rewriting this trace. Skipping or truncating response bodies does not change readiness. |
 | `capture_reason` | Why artifacts were captured, for example `wait_satisfied`, `readiness_timeout`, or `download`. |
 | `cookie_jar_file` | Absolute cookie jar path used for this fetch, when a jar was resolved. |
 | `cookie_jar_warning` | Structured note when `/profile` was unavailable and implicit cookie-jar persistence was disabled. |
-| `sensitive_capture` | Non-empty when `--no-network-redact`, `--capture-ws`, or `--capture-sse` may write tokens/PII into artifacts. |
+| `sensitive_capture` | Non-empty when `--no-network-redact`, `--capture-ws`, or `--capture-sse` may write tokens/PII from headers or bodies into artifacts. URLs in artifacts are always recorded as the page had them, so this does not cover a token in a query string. |
 | `stages[]` | Ordered stage timings. Each stage has `name`, `status`, and `duration_ms`; `status` is one of `ok`, `error`, `timeout`, or `started`. |
 
 Failure envelopes for `afhttp fetch` also include this trace:
@@ -246,12 +252,12 @@ Top-level fields:
 | Field | Description |
 | --- | --- |
 | `schema_version` | Observation schema version. |
-| `page_url` | Page URL at capture time. Credential-bearing URL components are redacted. |
+| `page_url` | Page URL at capture time, as the page had it. |
 | `title` | Document title. |
 | `viewport` | Width, height, device scale factor. |
 | `frames` | Frame list with `frame_id` and `frame_url`. |
 | `nodes` | Interactive and meaningful visible accessibility/DOM nodes. |
-| `forms` | Mechanical form ownership and control refs. |
+| `forms` | Mechanical form ownership: each has `ref`, `action` when present, and `field_refs`. |
 | `focused_ref` | `ref` of focused node, if any. |
 | `truncated` | Present when the global node or scan cap stopped traversal. |
 
@@ -270,6 +276,8 @@ Node fields:
 | `actions` | Mechanical possible actions such as `click`, `fill`, `select`, `check`, `focus`. |
 | `href` / `src` | URL-bearing attributes when present. |
 | `frame_ref` | On iframe nodes, the matching `frames[].frame_id` for the child frame entry. |
+| `input_type` | The `type` of an `input` element. |
+| `checked` / `selected` / `focused` | Control state, present only where it applies. |
 | `value_redacted` | True when an input has a value that was intentionally not emitted. |
 | `selector_hint` | Optional best-effort selector hint for CDP resolution in the node's context; iframe nodes use `frame_ref`, iframe children use frame-relative selectors, and shadow nodes use `host >> shadow >> inner` chains. |
 | `selector_hint_unique` | Present when `selector_hint` is present; true when it matches exactly one element in that node's actual document/shadow context. |
@@ -309,11 +317,11 @@ Each `entries[]` item may include:
 | --- | --- |
 | `request_id` | Stable request id from the browser backend. |
 | `state` | Mechanical lifecycle state: `pending`, `responded`, `finished`, or `failed`. |
-| `redirect_from_request_id` | Prior request id for redirect chains. |
+| `redirect_from_request_id` | Request id of the previous hop in a redirect chain. Each finished hop is kept as its own entry with id `<request_id>#redirect<n>`, so the chain reads back hop by hop. |
 | `frame_id` / `loader_id` | CDP frame/loader ids when known. |
 | `resource_type` | `Document`, `XHR`, `Fetch`, `Script`, `Stylesheet`, `Image`, etc. |
 | `initiator` | CDP initiator type and stack when available. |
-| `request_url` | Request URL. URL userinfo and known secret query parameters are redacted by default. |
+| `request_url` | Request URL, as the page sent it. |
 | `method` | HTTP request method. |
 | `status` / `mime_type` | Response status and MIME type when a response was observed. |
 | `request_headers` / `response_headers` | Captured headers, with credential-bearing values redacted by default. |
@@ -327,17 +335,29 @@ The summary optionally includes `events_dropped` (missing CDP events) and
 `truncated` (a capture limit was reached). Missing values mean zero and false.
 Network capture retains at most 4,096 entries; counts cover retained entries
 and cannot establish complete page activity after loss or truncation. Console
-capture retains at most 4,096 events and uses the same two diagnostic fields
+capture retains at most 4,096 events and uses the same diagnostic fields
 at the top level of `console.json`. Existing entries continue to receive
 lifecycle updates after the entry cap, and the main document has a reserved
 slot.
 
-Sensitive request/response headers and credential-bearing URL components are
-redacted by default in `network.json`: cookies, authorization values,
-token/secret-like header names, URL userinfo, and known secret query
-parameters. `--no-network-redact` disables this for trusted local debugging and
-may write raw tokens, cookies, and PII into `network.json`;
-`trace.sensitive_capture` records that opt-in.
+Sensitive request/response headers are redacted by default in `network.json`:
+cookies, authorization values, and token/secret-like header names.
+`--no-network-redact` disables this for trusted local debugging and may write
+raw tokens, cookies, and PII into `network.json`; `trace.sensitive_capture`
+records that opt-in.
+
+`summary.redacted` describes headers only. URLs in artifacts are captured data
+and are written as the page had them. URL credentials — userinfo passwords,
+`_secret` query parameters, and common third-party credential parameters — are
+redacted only where afhttp emits an AFDATA event: CLI output and host HTTP
+responses. There they are removed from `_url` fields, the target `url`s of a
+`tabs` listing, and URLs quoted in a fetch warning's `detail` or in
+`next_action.recommended_command`; a recommended command with a credentialed
+URL therefore needs that credential put back before it is rerun. Text the page
+produced, and the browser's own answer to `afhttp cdp`, are emitted as they
+were. An SDK caller receives
+URLs and error details unredacted, except afhttp's own host token, which never
+appears in an error.
 
 Network body capture modes:
 
@@ -349,12 +369,14 @@ Network body capture modes:
 
 Body capture failures become warnings, not fetch failures. `--capture-ws` and `--capture-sse` write WebSocket/SSE payloads to frame/event files and may expose bearer tokens, session identifiers, chat content, or other PII.
 
-Stream payload capture retains at most 4,096 request keys per stream kind and
-1,024 frames/events per request. Capture truncation or event loss also emits a
+Stream payload capture retains at most 4,096 request keys per stream kind, and
+1,024 frames/events and 1 MiB of payload per request. The event that crosses the
+byte budget keeps a prefix and carries `payload_truncated: true` and the
+original `payload_bytes`; later events for that request are dropped. Capture truncation or event loss also emits a
 network warning if no `network_file` was requested.
 
-Known oversized `encodedDataLength` or `Content-Length` causes network body
-capture to skip `Network.getResponseBody` and emit `network_body_truncated`.
+Known oversized `encodedDataLength` (less the header bytes CDP reports with the
+response) or `Content-Length` causes network body capture to skip `Network.getResponseBody` and emit `network_body_truncated`.
 For unknown sizes, afhttp still retrieves and decodes the response before
 keeping its configured prefix. Compressed size is not decoded size, so this
 filter does not bound peak memory. The separate `body_file` artifact is not
@@ -376,11 +398,15 @@ collide with the top-level command envelope:
 {"kind":"result","result":{"code":"cdp","result":{"result":{"type":"number","value":42}}},"trace":{}}
 ```
 
-CDP method errors return the standard error event with `error.code: "cdp_error"` or `error.code: "cdp_timeout"`.
+CDP method errors return the standard error event with `error.code: "cdp_error"` or `error.code: "cdp_timeout"`. Connecting, attaching to `--tab`, and the reply share a 30s bound; `--wait-event` adds its own timeout.
 
 ## Health Result
 
-Authenticated `/health` and `afhttp health` return:
+Authenticated `/health` and `afhttp health` return the fields below, plus
+optional `build` and `takeover` runtime checks (`configured`,
+`browser_running`, `cdp_connected`, `display_connected`, `ready`, `reason`).
+A running container or configured capability alone does not imply a live
+browser/display. See [takeover reliability](takeover-reliability.md).
 
 | Field | Description |
 | --- | --- |
@@ -394,7 +420,7 @@ Authenticated `/health` and `afhttp health` return:
 | `tabs_active` | Current browser page target count from `Target.getTargets`. |
 | `capabilities_url` | Relative URL for capabilities. |
 
-Unauthenticated public health, when enabled, returns only `status`.
+Unauthenticated public health (`--health-public minimal` on a token-protected host) returns `code`, `status`, `version`, `uptime_s`, and `tabs_active: 0`. It never includes the backend, profile, build, or takeover details.
 
 ## Capabilities Result
 
@@ -420,7 +446,7 @@ events rather than one result. It emits a `progress` event once the panel is
 resolved and announced, immediately before it starts waiting:
 
 ```json
-{"kind":"progress","progress":{"code":"ui_takeover","panel_url":"http://127.0.0.1:9222/takeover/panel","session":"watch","mode":"window"},"trace":{}}
+{"kind":"progress","progress":{"code":"ui_takeover","panel_url":"http://127.0.0.1:9222/takeover/panel","session":"watch","mode":"window","session_id":"…"},"trace":{}}
 ```
 
 and one terminal `result` when the session ends:
@@ -433,9 +459,9 @@ and one terminal `result` when the session ends:
 | --- | --- |
 | `panel_url` | Where the upstream panel is served, without its credential. The takeover credential never appears in these events. |
 | `session` | Always `watch`. A VNC canvas has no submit control, so there is nothing for the person to confirm and no typed result to collect. |
-| `mode` | Which of AFUI's three deliveries this run resolved to: `window`, `link`, or `session`. `--mode` names it; with no flag, `AFUI_DELIVERY` does, and failing that it is `window`. |
-| `link_url` | Present only for `link`: the AFUI-owned one-session LAN page. It is a bearer capability — anyone holding it reaches the panel — published here because handing it to a person is what `link` is for, and published under a name no redactor masks for the same reason. The upstream takeover credential remains private behind AFUI's proxy. |
-| `session_id` | The identity to use with `afui session open`, `serve`, or `close`. |
+| `mode` | Which AFUI delivery this run resolved to: `window`, `link`, or `session`. `--mode` names it; with no flag, `AFUI_DELIVERY` does, and failing that it is `window`. |
+| `link_url` | Present only for `link`: the AFUI-owned one-session LAN page. It is a bearer capability — anyone holding it reaches the panel — published here because handing it to a person is what `link` is for, and published under a name no redactor masks for the same reason. The upstream takeover credential remains private behind AFUI's proxy. A link frames the panel on an opaque origin with no browser storage, so the KasmVNC client, the only takeover provider, cannot run there; use `--mode session` instead, then `afui session serve --session-origin-host` for another device, or `afui session open` on the machine itself. |
+| `session_id` | Progress event only. The identity to use with `afui session open`, `serve`, or `close`. |
 | `idle_timeout_s`, `grace_period_s` | Present only for `link`: the global AFUI attention policy applied to that remote page. |
 | `outcome` | `closed` when the local window closed, `expired` when an AFUI Link's attention policy lapsed, and `stopped` when the command was interrupted. A registered Session has no AFUI deadline. |
 | `open_s` | How long the session was open. |
@@ -505,9 +531,15 @@ Read-only listing of files the browser captured in the profile download director
 }
 ```
 
+### `profile cookies`
+
+Lists the profile's cookie jar with every value replaced by `"[redacted]"`:
+`backend`, `name`, `jar_path`, `count`, and `cookies`, each with `name`,
+`domain`, `path`, `expires_epoch_s`, `secure`, `http_only`, and `same_site`.
+
 ### `profile delete` / `profile prune`
 
-`profile delete` returns the deleted profile name. `profile prune` returns the resolved `profile_root`, `dry_run`, and the matching profile entries. Locked profiles are skipped; missing profiles return `profile_not_found`.
+`profile delete` returns `backend`, `name`, and `deleted: true`. `profile prune` returns the resolved `profile_root`, `dry_run`, and the matching profile entries. Locked profiles are skipped; missing profiles return `profile_not_found`.
 
 ## Error Codes
 
@@ -523,7 +555,6 @@ Examples below are representative `error` / Chromium `errorText` strings.
 | `dns_resolution_failed` | `net::ERR_NAME_NOT_RESOLVED` | Check spelling/DNS/network; retry later only if DNS may recover. |
 | `target_unreachable` | `net::ERR_CONNECTION_REFUSED` | Check target service/firewall/port; retry when the target is reachable. |
 | `tls_error` | `net::ERR_CERT_AUTHORITY_INVALID` | Do not blind-retry; fix trust/certificate settings or choose an HTTP-safe route. |
-| `tab_crashed` | `Target.detachedFromTarget: target crashed` | Reopen the tab and retry the operation. |
 | `profile_locked` | `profile "work" is already locked by pid 1234` | Reuse that host/profile or wait for the lock holder to exit. |
 | `browser_launch_failed` | `chromium exited before DevTools endpoint appeared` | Inspect browser path/dependencies/display and retry after fixing launch. |
 | `cdp_unavailable` | `wait_event: events channel closed` | Verify the endpoint speaks afhttp CDP and reconnect. |
@@ -536,6 +567,9 @@ Examples below are representative `error` / Chromium `errorText` strings.
 | `artifact_tiny` | `text artifact was 12 bytes; threshold is 32` | Inspect network bodies or retry with a larger timeout if the page is still rendering. |
 | `bot_wall_detected` | `detected bot wall/security challenge` | Treat the page as unverified target content; use `next_action` / `fetch --takeover` instead of answering from the challenge page. |
 | `security_challenge_detected` | `detected security challenge/access denied page` | Treat the page as unverified target content; use human takeover or report that verification failed. |
+| `cookie_rejected` | `cookie jar sync: rejected_cookie_count=1` | The cookie jar refused a cookie by policy (a public-suffix `Domain`, for example). Not a capture failure; the fetch result is still the target's. |
+| `navigation_stale` | `navigation captured a stale page: requested https://example.com/b, initial https://example.com/a, final https://example.com/a` | The navigation never committed, so the capture shows the previous or a blank page, not the requested one. Do not answer from it; retry once, in a new tab if the fetch reused one with `--tab`. |
+| `takeover_content_unverified` | `takeover tab retained for manual review: status=200, snapshot_available=true, …` | Warning on `fetch --takeover`: readiness or requested artifacts do not confirm complete content, so the tab is kept with a `next_action`. Inspect `tab_id` or hand the panel to a person before trusting the page. |
 | `network_not_idle` | `1 request(s) were still pending/responded at capture` | Inspect pending entries and captured XHR bodies before deciding whether to retry. |
 | `pending_xhr_at_capture` | `pending XHR/fetch/EventSource at capture` | Treat `status: 200` as incomplete acquisition until network payloads are checked. |
 | `observation_empty` | `observation contained zero projected nodes` | Fall back to rendered/text/network artifacts or retry after readiness improves. |

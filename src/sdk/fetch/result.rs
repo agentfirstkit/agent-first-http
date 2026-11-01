@@ -23,6 +23,8 @@ pub struct FetchResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tab_id: Option<TabId>,
     pub trace: Trace,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<super::readiness::Readiness>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub warnings: Vec<Warning>,
     /// Response `Content-Type` as the origin sent it, verbatim (parameters
@@ -66,6 +68,9 @@ pub struct FetchResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Trace {
+    /// A tab retained after a fetch error for manual inspection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_tab_id: Option<String>,
     pub render_decision: RenderDecision,
     /// The `--render` mode the agent requested. Distinct from
     /// `render_decision`: a fetch with `render_mode: "auto"` that escalates
@@ -88,7 +93,7 @@ pub struct Trace {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub navigation_duration_ms: Option<u64>,
     /// Browser wait mode requested for this fetch (`auto`, `load`, `idle`,
-    /// `selector`, `selector_visible`, or `ms`). HTTP-only results omit it.
+    /// `selector`, `selector_visible`, `selector_stable`, or `ms`). HTTP-only results omit it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wait_mode: Option<String>,
     /// Mechanical condition that allowed artifact capture to proceed.
@@ -201,7 +206,7 @@ pub enum NextActionKind {
 }
 
 impl NextAction {
-    fn human_takeover(url: &str) -> Self {
+    pub(crate) fn human_takeover(url: &str) -> Self {
         Self {
             kind: NextActionKind::HumanTakeover,
             recommended_command: format!("afhttp fetch {} --takeover", shell_quote(url)),
@@ -219,11 +224,7 @@ impl NextAction {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FetchError {
     pub error_code: ErrorCode,
-    #[serde(
-        rename = "error",
-        serialize_with = "crate::shared::error::serialize_detail",
-        deserialize_with = "crate::shared::error::deserialize_detail"
-    )]
+    #[serde(rename = "error")]
     pub detail: String,
     pub retryable: bool,
     pub trace: Trace,
@@ -234,7 +235,7 @@ impl FetchError {
     pub fn new(error: Error, trace: Trace) -> Self {
         Self {
             error_code: error.error_code,
-            detail: crate::shared::redact::redact_urls_in_text(&error.detail),
+            detail: error.detail,
             retryable: error.retryable,
             trace,
         }
@@ -301,6 +302,7 @@ impl FetchResult {
             next_action: None,
             tab_id: None,
             trace,
+            readiness: None,
             warnings: Vec::new(),
             content_type: None,
             body_file: None,
@@ -367,29 +369,35 @@ impl FetchResult {
         endpoint: Option<&str>,
         profile: Option<&str>,
     ) {
-        let url = self.request_url.clone();
-        let tab = self.tab_id.as_ref().map(|t| t.as_str().to_string());
         if let Some(next) = self.next_action.as_mut() {
             next.takeover_url_secret = Some(takeover_url_secret);
             next.takeover_url_expires_at_rfc3339 = expires_at_rfc3339;
             next.takeover_url_ttl_s = ttl_s;
             next.takeover_url_scope = scope;
-            if let Some(tab) = tab {
-                let mut command = format!(
-                    "afhttp fetch {} --takeover --tab {}",
-                    shell_quote(&url),
-                    shell_quote(&tab),
-                );
-                if let Some(endpoint) = endpoint {
-                    command.push_str(" --endpoint-url ");
-                    command.push_str(&shell_quote(endpoint));
-                }
-                if let Some(profile) = profile {
-                    command.push_str(" --profile ");
-                    command.push_str(&shell_quote(profile));
-                }
-                next.recommended_command = command;
+        }
+        self.prepare_takeover_retry(endpoint, profile);
+    }
+
+    pub(crate) fn prepare_takeover_retry(&mut self, endpoint: Option<&str>, profile: Option<&str>) {
+        let url = self.request_url.clone();
+        let tab = self.tab_id.as_ref().map(|t| t.as_str().to_string());
+        if let Some(next) = self.next_action.as_mut()
+            && let Some(tab) = tab
+        {
+            let mut command = format!(
+                "afhttp fetch {} --takeover --tab {}",
+                shell_quote(&url),
+                shell_quote(&tab),
+            );
+            if let Some(endpoint) = endpoint {
+                command.push_str(" --endpoint-url ");
+                command.push_str(&shell_quote(endpoint));
             }
+            if let Some(profile) = profile {
+                command.push_str(" --profile ");
+                command.push_str(&shell_quote(profile));
+            }
+            next.recommended_command = command;
         }
     }
 
@@ -426,66 +434,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fetch_error_redacts_url_credentials_at_every_public_output_boundary() {
-        let detail = "request https://reader:password-canary@example.test/path?token_secret=query-canary&api_key=legacy-canary&safe=ok failed";
-        let expected = "request https://reader:***@example.test/path?token_secret=***&api_key=***&safe=ok failed";
-        let trace = Trace {
-            current_stage: "navigate".into(),
-            timeout_ms: 42,
-            ..Trace::default()
-        };
-        // Public Error fields can bypass its constructor before reaching us.
-        let created = FetchError::new(
-            Error {
-                error_code: ErrorCode::TargetUnreachable,
-                detail: detail.into(),
-                retryable: false,
-            },
-            trace.clone(),
-        );
-        assert_eq!(created.detail, expected);
-        let direct = FetchError {
-            error_code: ErrorCode::TargetUnreachable,
-            detail: detail.into(),
-            retryable: false,
-            trace: trace.clone(),
-        };
-        let mut mutated = FetchError::new(
-            Error::new(ErrorCode::TargetUnreachable, "initial message").with_retryable(false),
-            trace.clone(),
-        );
-        mutated.detail = detail.into();
-        for failure in [created, direct, mutated] {
-            assert_eq!(
-                failure.to_string(),
-                format!("target_unreachable: {expected}")
-            );
-            let json = serde_json::to_value(&failure).expect("serialize fetch error");
-            assert_eq!(json["error_code"], "target_unreachable");
-            assert_eq!(json["error"], expected);
-            assert_eq!(json["retryable"], false);
-            assert_eq!(
-                json["trace"],
-                serde_json::to_value(&trace).expect("trace JSON")
-            );
-            let serialized = serde_json::to_string(&failure).expect("fetch error JSON");
-            for canary in ["password-canary", "query-canary", "legacy-canary"] {
-                assert!(!serialized.contains(canary), "URL credential leaked");
-            }
-            for error in [failure.as_error(), failure.into_error()] {
-                assert_eq!(error.error_code, ErrorCode::TargetUnreachable);
-                assert_eq!(error.detail, expected);
-                assert!(!error.retryable);
-            }
-        }
+    fn older_fetch_results_without_readiness_still_deserialize() {
+        let envelope: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tests/golden/fetch-success.json")).unwrap();
+        let result: FetchResult = serde_json::from_value(envelope["result"].clone()).unwrap();
+        assert!(result.readiness.is_none());
     }
 
     #[test]
-    fn older_fetch_error_json_redacts_urls_without_changing_its_trace() {
+    fn older_fetch_error_json_keeps_its_detail_and_trace() {
         // Older traces omit the render-mode fields that now have defaults.
         let failure: FetchError = serde_json::from_value(serde_json::json!({
             "error_code": "target_unreachable",
-            "error": "connect https://reader:password-canary@example.test/?token_secret=query-canary&token=legacy-canary&safe=ok",
+            "error": "connect https://example.test/ refused",
             "retryable": true,
             "trace": {
                 "render_decision": "http_only",
@@ -497,8 +458,7 @@ mod tests {
             }
         }))
         .expect("deserialize older fetch error");
-        let expected =
-            "connect https://reader:***@example.test/?token_secret=***&token=***&safe=ok";
+        let expected = "connect https://example.test/ refused";
         assert_eq!(failure.detail, expected);
         assert!(failure.retryable);
         assert_eq!(failure.trace.render_mode, TraceRenderMode::Auto);
@@ -515,12 +475,14 @@ mod tests {
         assert_eq!(json["trace"]["current_stage"], "navigate");
     }
 
+    #[cfg(feature = "host")]
     #[test]
     fn fetch_success_json_is_flat_golden() {
         let mut result = FetchResult::new(
             RequestId("req-1".into()),
             "https://example.com/".into(),
             Trace {
+                retained_tab_id: None,
                 render_decision: RenderDecision::Browser,
                 render_mode: TraceRenderMode::Always,
                 render_used: true,

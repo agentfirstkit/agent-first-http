@@ -46,7 +46,7 @@ Runs in CI when a browser binary is available, and locally on demand. Separated 
 - Multi-client attach: two SDK clients to the same endpoint, both observe the same `Page.frameNavigated`.
 - Profile isolation: a `--profile` host's cookies are not visible to a separate `--profile -` host.
 - Profile lifecycle tooling: list/info/lock-status/downloads/delete/prune, refusing locked profile deletion.
-- Error code coverage: `navigation_timeout`, `profile_locked`, `host_unreachable`, `tab_crashed`, `cdp_unavailable`, `profile_not_found`, `profile_delete_locked`.
+- Error code coverage: `navigation_timeout`, `profile_locked`, `host_unreachable`, `cdp_unavailable`, `profile_not_found`, `profile_delete_locked`.
 
 ### Observation artifact tests
 
@@ -65,7 +65,7 @@ Fixture pages cover:
 - top-level document load, redirects, script/style/image resources, XHR/fetch JSON, GraphQL-shaped JSON, failed requests, cached requests, and service-worker responses when supported
 - default redaction for `Cookie`, `Authorization`, `Proxy-Authorization`, `Set-Cookie`, and token/secret-like headers
 - `--network-bodies off|xhr|all`, per-body byte limits, UTF-8 text bodies, binary bodies, and body-capture warning paths
-- SDK and real CLI error canaries for URL userinfo and credential query parameters,
+- real CLI error canaries for URL userinfo and credential query parameters,
   including unreachable and malformed targets; normal output goldens remain stable
 
 The network tests assert structure and linkage rather than exact event order when CDP does not guarantee ordering across resource types.
@@ -75,6 +75,9 @@ The network tests assert structure and linkage rather than exact event order whe
 Unit tests cover JSON shapes without a browser. Integration tests cover:
 
 - `/health` shallow readiness before and after browser startup, plus degraded status when the browser process exits
+- takeover retains explicit tabs for unmarked 403 challenges, unknown responses and incomplete target readiness; successful completion recycles the final work tab with a browser-window anchor
+- metadata fault injection covers ENOSPC after a partial write, WriteZero, interrupted writes and abandoned temporary files without overwriting old metadata
+- live display plus a terminated isolated browser degrades health and rejects new handoffs, panel access and lease renewal; existing persistent profiles are never killed by these tests
 - `/capabilities` matching the selected backend and reporting unsupported artifacts as unsupported rather than absent
 - `afhttp profile` behavior on real temp profile roots, including metadata creation, missing metadata fallback, lock detection, captured-download listing, delete confirmation, and prune dry-runs
 
@@ -109,6 +112,13 @@ rosetta = false
 # Default gates (Apple container on local macOS)
 bash tests/test.sh
 
+# Refresh the base image, browser packages, and moving backend downloads.
+# Cargo cache volumes and running hosts are retained.
+bash tests/test.sh refresh
+
+# Read Rust, Chromium, and Lightpanda versions from the resulting image.
+bash tests/test.sh versions
+
 # Full integration suite (Apple container on local macOS)
 bash tests/test.sh integration
 
@@ -131,7 +141,7 @@ ubuntu *native* leg: the ubuntu runner's chromium is a confined snap that can't
 complete download-to-disk tests.
 
 Camoufox/foxbridge installation is opt-in with `AFHTTP_TEST_INSTALL_CAMOUFOX=1`.
-Fingerprint Chromium is unavailable on arm64. Those two are the only backends
+Fingerprint Chromium is unavailable on arm64. These are the only backends
 left out of `AFHTTP_TEST_REQUIRE_BACKENDS` in the container, so they are the
 only ones whose tests may return early; a passing gate does not demonstrate
 that they were exercised unless the image carries them.
@@ -148,9 +158,10 @@ normal desktops:
 The matrix sets `RUST_MIN_STACK=16 MiB` so the deep fetch/host future chain
 doesn't overflow Windows' small default thread stack.
 
-The fixed harness selects Apple `container` on local macOS and Docker in CI.
-`AFHTTP_TEST_CONTAINER_RUNTIME=apple|docker` is available for an explicit
-backend check; ordinary local runs need no override.
+The fixed harness selects Apple `container` on macOS, then Podman, then Docker.
+`AFHTTP_TEST_CONTAINER_RUNTIME=apple|podman|docker` selects an explicit backend;
+`AF_CONTAINER_RUNTIME` supplies a shared override. CI can explicitly select Docker.
+A selected backend failure stops the run instead of trying another backend.
 
 The flaky-by-design **display takeover** suite runs in its own non-blocking
 nightly workflow (`.github/workflows/takeover-panel.yml`), not in the gating
@@ -162,7 +173,7 @@ its binary is present.
 Real-display takeover is exercised through the `display_takeover.rs` integration
 suite: it boots an `afhttp host --takeover-provider kasmvnc`, asserts the host brings up
 the KasmVNC display provider, serves `/takeover/panel` through the
-authenticated listener, and reports `display_takeover: true` in `/capabilities`.
+authenticated listener, and reports `takeover.supported: true` in `/capabilities`.
 These run in the nightly takeover workflow because the provider startup is
 timing-sensitive and version-dependent.
 
@@ -185,3 +196,31 @@ refuses to run without one, which is why it stays out of `tests/test.sh`.
   contracts.
 - **Performance / throughput**. The project does not promise latency or request-per-second targets.
 - **Network conditions**. Tests assume the loopback / fixture server is reachable; no chaos/network-impairment testing.
+
+## Readiness regressions and a warmed host
+
+`tests/test.sh unit`, `tests/test.sh integration`, and `tests/test.sh static`
+cover wait parsing, compatibility, redaction and diagnostic limits, plus browser
+fixtures for delayed prices, continuous changes, pending ancillary frames,
+required same-origin/cross-origin/streaming frames, shadow-host frame ownership,
+and real challenge documents. Use the configured test container runtime; do
+not mount the same Apple test volumes in concurrent gate invocations.
+
+For a real-site comparison without replacing a running host or system binary:
+
+```sh
+DOCKER_CONTEXT=colima python3 tests/live-readiness.py \
+  --build --profile vps --url https://provider.example/ \
+  --selector '#prices' --out /tmp/readiness-comparison
+```
+
+The fixed entrypoint builds through `tests/build.sh --native`, checks active
+fetch/takeover processes and the host's current profile, then runs strict and
+scoped captures sequentially. It refuses to switch profiles or start/rebuild a
+host and stops when review is requested, including a retained incomplete
+capture. It verifies retained tabs with `Page.bringToFront`. `--wait-mode target`
+selects only the scoped capture; `--wait-mode load` exercises load-based
+handoff, and `--tab ID` reuses a caller-specified tab with one wait mode. Review
+a challenge before authorizing a re-fetch. Inspect
+`summary.json`, the saved finite results, and composed content; readiness alone
+cannot verify the required business fields. See [readiness](readiness.md).

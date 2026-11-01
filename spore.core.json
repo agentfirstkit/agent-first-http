@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-http",
   "name": "Agent-First HTTP",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "Give your AI agent its own private browser — so it reads the real page, past logins and bot walls, without ever touching yours.",
@@ -13,28 +13,26 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Preserve host-only cookie scope and keep deleted cookies deleted",
-    "Follow redirects hop by hop with the cookie jar, up to ten",
-    "Skip an out-of-scope caller cookie on a redirect instead of failing",
-    "Cap network, console, WebSocket and SSE capture and report truncation and dropped events",
-    "Skip known-oversized network bodies before fetching them",
-    "Keep readiness idle-based after event loss or capture limits",
-    "Redact URL credentials in error messages",
-    "Reject whitespace-only host tokens",
-    "Bound tab cleanup and downloads, and release connections from peers that never answer",
-    "Pin Camoufox 156 and Fingerprint Chromium 150.0.7871.186",
-    "Upgrade to Agent-First UI 0.6.1 and Agent-First Data 0.35.0"
+    "Refuse foreign origins, DNS rebinding and framing on a token-less host, and serve token-less only on loopback",
+    "Keep tabs and browsers alive while any connection holds them; refuse a profile switch while CDP clients are connected",
+    "Add selector-stable waits and a readiness result",
+    "Keep jar cookie scope and lifetime through the browser, with RFC 6265 path, Secure and public-suffix rules",
+    "Keep Referer and credential headers off other origins, and never re-send a POST",
+    "Move redaction to CLI and host output; the SDK no longer depends on Agent-First Data",
+    "Bound every wait on a browser, including raw cdp calls",
+    "Refuse symlinked profiles and foreign containers, and hide secrets in logged command lines",
+    "Upgrade to Agent-First UI 0.9.0 and Agent-First Data 0.36.1, and require Rust 1.99"
   ],
   "bonds": [
     {
       "relation": "depends_on",
-      "uri": "cmn://agentfirstkit.com/b3.DfMUqiQWZqqo1YkmzSwxZuG75PLy6dRGMQmuNrSiEidg",
+      "uri": "cmn://agentfirstkit.com/b3.7nTogcFe2QTWBm8jmVvpGJnWdcokqaKyP9KT9FC8PngS",
       "id": "agent-first-data",
       "reason": "All request/response fields use Agent-First Data suffix conventions, and runtime protocol/log events are emitted on stdout only"
     },
     {
       "relation": "depends_on",
-      "uri": "cmn://agentfirstkit.com/b3.vDbdrHaHNZ5Y2BQmrMpRobduV4D6omqFbX29y7mNwbh",
+      "uri": "cmn://agentfirstkit.com/b3.3aMr8YN6bYnebgdKRHxze9XcSnas9GDWDZVyHLAgnojx",
       "id": "agent-first-ui",
       "reason": "Every short-lived takeover panel credential is an Agent-First UI access token, and `afhttp ui takeover` opens the panel in an Agent-First UI window"
     }

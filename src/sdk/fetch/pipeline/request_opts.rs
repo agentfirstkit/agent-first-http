@@ -194,14 +194,50 @@ impl PreparedRequestOptions {
         })?))
     }
 
-    pub(crate) fn cdp_extra_headers(&self) -> BTreeMap<String, String> {
-        self.headers
-            .iter()
-            .map(|header| (header.cdp_name.clone(), header.cdp_value.clone()))
-            .collect()
+    /// Caller headers for the browser path, split by where they may go: the
+    /// first set is sent to every request the page makes, the second (see
+    /// [`is_origin_scoped_header`]) only to the requested URL's origin.
+    pub(crate) fn cdp_headers_by_scope(&self) -> (BTreeMap<String, String>, Vec<(String, String)>) {
+        let mut everywhere = BTreeMap::new();
+        let mut origin_only = Vec::new();
+        for header in &self.headers {
+            let pair = (header.cdp_name.clone(), header.cdp_value.clone());
+            if is_origin_scoped_header(header.name.as_str()) {
+                origin_only.push(pair);
+            } else {
+                everywhere.insert(pair.0, pair.1);
+            }
+        }
+        (everywhere, origin_only)
     }
 
+    /// Add the jar's applicable cookies under whatever the caller set
+    /// itself; a caller's cookie of the same name wins.
+    ///
+    /// A caller-supplied `Cookie` header is the whole header on the wire, so
+    /// jar cookies join it rather than sit in `cookies`, where the header
+    /// would hide them — including the session a login hop just stored before
+    /// redirecting to the page that needs it.
     pub(crate) fn merge_jar_cookies(&mut self, extras: Vec<PreparedCookie>) {
+        if let Some((raw, value)) = &mut self.raw_cookie_header {
+            let existing: std::collections::HashSet<String> = self
+                .raw_cookie_pairs
+                .iter()
+                .map(|c| c.name.clone())
+                .collect();
+            for c in extras {
+                if existing.contains(&c.name) {
+                    continue;
+                }
+                let joined = format!("{raw}; {}={}", c.name, c.value);
+                if let Ok(joined_value) = HeaderValue::from_str(&joined) {
+                    *raw = joined;
+                    *value = joined_value;
+                    self.raw_cookie_pairs.push(c);
+                }
+            }
+            return;
+        }
         let existing: std::collections::HashSet<String> =
             self.cookies.iter().map(|c| c.name.clone()).collect();
         for c in extras {
@@ -222,6 +258,22 @@ impl PreparedRequestOptions {
     pub(crate) fn has_evaluate_after_wait(&self) -> bool {
         !self.evaluate_after_wait.is_empty()
     }
+}
+
+/// Headers that carry the caller's credentials for the URL it asked for. They
+/// go to that URL's origin only: the HTTP path drops them on a cross-origin
+/// redirect, and the browser path adds them to same-origin requests alone.
+/// `name` is a lowercase header name, as `HeaderName::as_str` gives it.
+pub(crate) fn is_origin_scoped_header(name: &str) -> bool {
+    matches!(
+        name,
+        "authorization"
+            | "proxy-authorization"
+            | "cookie"
+            | "cookie2"
+            | "host"
+            | "www-authenticate"
+    )
 }
 
 fn parse_header(name: &str, value: &str, source: &str) -> Result<(HeaderName, HeaderValue), Error> {
@@ -366,7 +418,7 @@ pub(crate) fn validate_cookie_scope(
         }
     }
     if let Some(path) = &cookie.path
-        && !url.path().starts_with(path)
+        && !crate::sdk::profile::cookie_jar::path_matches(Some(path), url.path())
     {
         return Err(Error::new(
             ErrorCode::InvalidArgument,
@@ -533,6 +585,14 @@ mod tests {
         let mut c = prepared("x");
         c.path = Some("/other".to_string());
         assert!(validate_cookie_scope(&c, &url, "s").is_err());
+
+        // RFC 6265 path match: a string prefix that splits a segment is not
+        // a match, because the browser would never send the cookie there.
+        let mut c = prepared("x");
+        c.path = Some("/adm".to_string());
+        let error = validate_cookie_scope(&c, &url, "s").unwrap_err();
+        assert_eq!(error.error_code, ErrorCode::InvalidArgument);
+        assert!(error.detail.contains("Path=\"/adm\""));
     }
 
     #[test]

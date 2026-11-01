@@ -7,6 +7,15 @@
   ].join(',');
 
   const trim = (s, n = 160) => (s || '').replace(/\s+/g, ' ').trim().slice(0, n);
+  // SVG URL properties are SVGAnimatedString objects, unlike HTML URLs.
+  const urlValue = (el, key) => {
+    const value = el[key];
+    if (typeof value === 'string') return value || null;
+    // Named form controls can also shadow URL properties such as action.
+    const raw = value && typeof value.baseVal === 'string' ? value.baseVal : el.getAttribute(key);
+    if (!raw) return null;
+    try { return new URL(raw, el.baseURI).href; } catch (_) { return raw; }
+  };
   const queryAll = (root, selector) => {
     try {
       return Array.from(root.querySelectorAll(selector));
@@ -192,8 +201,8 @@
       enabled: !(el.disabled || el.getAttribute('aria-disabled') === 'true'),
       bbox: {x: rect.x, y: rect.y, width: rect.width, height: rect.height},
       actions: actionsFor(el),
-      href: el.href || null,
-      src: el.src || null,
+      href: urlValue(el, 'href'),
+      src: urlValue(el, 'src'),
       frame_ref: frameRef,
       input_type: type,
       checked: (type === 'checkbox' || type === 'radio') ? !!el.checked : null,
@@ -212,7 +221,7 @@
         .filter(Boolean);
       state.forms.push({
         ref: `form-${state.nextForm++}`,
-        action: form.action || null,
+        action: urlValue(form, 'action'),
         field_refs
       });
     }

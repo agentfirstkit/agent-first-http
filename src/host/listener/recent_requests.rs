@@ -13,12 +13,26 @@ use tokio::sync::Mutex;
 use crate::host::listener::AppState;
 
 pub(super) struct SubscriberGuard {
-    task: tokio::task::JoinHandle<()>,
+    task: std::sync::Mutex<tokio::task::JoinHandle<()>>,
+}
+
+impl SubscriberGuard {
+    /// Follow a different browser: the one the host now serves after a
+    /// profile switch. The old subscription ends, so nothing it saw is mixed
+    /// with what the new profile does.
+    pub(super) fn follow(&self, ws_url: String, ring: RecentRequests) {
+        let next = spawn_task(ws_url, ring);
+        let mut task = self.task.lock().unwrap_or_else(|e| e.into_inner());
+        std::mem::replace(&mut *task, next).abort();
+    }
 }
 
 impl Drop for SubscriberGuard {
     fn drop(&mut self) {
-        self.task.abort();
+        self.task
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .abort();
     }
 }
 
@@ -51,6 +65,12 @@ impl RecentRequests {
         guard.push_back(record);
     }
 
+    /// Forget everything recorded so far — what one profile's browser fetched
+    /// is not the next profile's to report.
+    pub async fn clear(&self) {
+        self.ring.lock().await.clear();
+    }
+
     pub async fn snapshot(&self) -> Vec<RequestRecord> {
         let guard = self.ring.lock().await;
         guard.iter().cloned().collect()
@@ -66,7 +86,7 @@ pub fn spawn_subscriber(ws_url: String, ring: RecentRequests) {
 
 pub(super) fn spawn_scoped_subscriber(ws_url: String, ring: RecentRequests) -> SubscriberGuard {
     SubscriberGuard {
-        task: spawn_task(ws_url, ring),
+        task: std::sync::Mutex::new(spawn_task(ws_url, ring)),
     }
 }
 

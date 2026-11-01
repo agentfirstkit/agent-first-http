@@ -166,10 +166,15 @@ fn endpoint(invocation: &ResolvedInvocation) -> Option<String> {
 fn token(invocation: &ResolvedInvocation) -> Result<Option<ValueSource>, Error> {
     match opt_string(invocation, "token_secret") {
         Some(raw) => token_source::parse(&raw).map(Some),
-        None => Ok(std::env::var(TOKEN_ENV)
-            .ok()
-            .filter(|value| !value.is_empty())
-            .map(ValueSource::Literal)),
+        None => {
+            let token = std::env::var(TOKEN_ENV)
+                .ok()
+                .filter(|value| !value.is_empty());
+            if token.is_some() {
+                crate::shared::afdata::note_token_from_env(TOKEN_ENV);
+            }
+            Ok(token.map(ValueSource::Literal))
+        }
     }
 }
 
@@ -228,17 +233,29 @@ fn profile_info_args(invocation: &ResolvedInvocation) -> cmd::profile::InfoArgs 
 }
 
 fn container_common(invocation: &ResolvedInvocation) -> Result<cmd::container::CommonArgs, Error> {
+    let name = string(invocation, "name");
+    cmd::container::validate_container_name(&name)?;
     Ok(cmd::container::CommonArgs {
         runtime: opt_string(invocation, "runtime")
             .map(|value| cmd::container::runtime_from_str(&value))
             .transpose()?,
-        name: string(invocation, "name"),
+        name,
     })
 }
 
+/// A port to publish. Zero asks the runtime for any free port, which would
+/// leave the endpoint and client command naming a port nothing listens on.
 fn container_port(invocation: &ResolvedInvocation) -> Result<u16, Error> {
     let port = unsigned(invocation, "port", "--port", u64::from(u16::MAX))?;
-    Ok(port as u16)
+    u16::try_from(port)
+        .ok()
+        .filter(|port| *port != 0)
+        .ok_or_else(|| {
+            Error::new(
+                ErrorCode::InvalidArgument,
+                format!("--port: expected an integer from 1 to 65535, got {port}"),
+            )
+        })
 }
 
 // ── actions ─────────────────────────────────────────────────────────────────
@@ -552,7 +569,6 @@ fn container_status(invocation: &ResolvedInvocation) -> Projected {
     Ok(Command::Container(cmd::container::Args {
         sub: cmd::container::ContainerSub::Status(cmd::container::StatusArgs {
             common: container_common(invocation)?,
-            port: container_port(invocation)?,
             reveal_token_secret: flag(invocation, "reveal_token_secret"),
         }),
     }))
@@ -677,9 +693,8 @@ mod tests {
             .bind_actions(handlers())
             .expect("handlers must cover every action");
         for raw in [
-            // A file source with no dot path…
-            "file:/etc/afhttp/hosts.json",
-            // …and a scheme this argument does not accept.
+            // A file source needs a path (a whole-file source needs no dot path).
+            "file:", // …and a scheme this argument does not accept.
             "prompt",
         ] {
             let error = app
@@ -701,6 +716,47 @@ mod tests {
             );
             assert_eq!(error.exit_code(), 2, "{raw}");
         }
+    }
+
+    #[test]
+    fn a_container_port_must_be_one_a_listener_can_have() {
+        for port in ["0", "65536"] {
+            let error = project(&["afhttp", "container", "install", "--port", port])
+                .err()
+                .unwrap_or_else(|| panic!("--port {port} must be refused"));
+            assert_eq!(error.error_code, ErrorCode::InvalidArgument, "{port}");
+        }
+        let Ok(Command::Container(args)) =
+            project(&["afhttp", "container", "install", "--port", "65535"])
+        else {
+            panic!("--port 65535 must project");
+        };
+        let cmd::container::ContainerSub::Install(install) = args.sub else {
+            panic!("install must project to install");
+        };
+        assert_eq!(install.port, 65535);
+    }
+
+    /// The name becomes `-v NAME-data:/data` and `--name NAME`, so one that is a
+    /// path or a flag is refused before any runtime sees it.
+    #[test]
+    fn a_container_name_is_checked_at_parse_time() {
+        for name in ["../escape", "/abs", "-x", "a/b"] {
+            // `--name=VALUE`, so a leading `-` reaches the check rather than
+            // being taken for a flag by the parser.
+            let flag = format!("--name={name}");
+            for verb in ["install", "uninstall", "status", "logs"] {
+                let error = project(&["afhttp", "container", verb, &flag])
+                    .err()
+                    .unwrap_or_else(|| panic!("{verb} --name {name} must be refused"));
+                assert_eq!(
+                    error.error_code,
+                    ErrorCode::InvalidArgument,
+                    "{verb} {name}"
+                );
+            }
+        }
+        assert!(project(&["afhttp", "container", "status", "--name", "work.1"]).is_ok());
     }
 
     #[test]

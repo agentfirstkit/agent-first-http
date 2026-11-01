@@ -5,7 +5,6 @@
 //! "error":...}` JSON value followed by a newline.
 
 use serde::Serialize;
-use serde::de::DeserializeOwned;
 use std::io::Write;
 use std::sync::OnceLock;
 
@@ -186,37 +185,9 @@ fn prepare_revealed_takeover_payload<T: Serialize>(
     code: &str,
     payload: &T,
 ) -> Result<serde_json::Value, Error> {
-    let original = prepare_payload(code, payload)?;
-    let mut redacted = agent_first_data::Redactor::new().value(&original);
-    restore_named_field(&original, &mut redacted, "takeover_url_secret");
-    Ok(redacted)
-}
-
-fn restore_named_field(
-    original: &serde_json::Value,
-    redacted: &mut serde_json::Value,
-    field_name: &str,
-) {
-    match (original, redacted) {
-        (serde_json::Value::Object(original), serde_json::Value::Object(redacted)) => {
-            for (key, original_value) in original {
-                let Some(redacted_value) = redacted.get_mut(key) else {
-                    continue;
-                };
-                if key == field_name {
-                    *redacted_value = original_value.clone();
-                } else {
-                    restore_named_field(original_value, redacted_value, field_name);
-                }
-            }
-        }
-        (serde_json::Value::Array(original), serde_json::Value::Array(redacted)) => {
-            for (original, redacted) in original.iter().zip(redacted.iter_mut()) {
-                restore_named_field(original, redacted, field_name);
-            }
-        }
-        _ => {}
-    }
+    Ok(agent_first_data::Redactor::new()
+        .reveal_names(["takeover_url_secret"])
+        .value(&prepare_payload(code, payload)?))
 }
 
 fn wrap_payload(code: &str, value: serde_json::Value) -> Result<serde_json::Value, Error> {
@@ -231,10 +202,37 @@ fn wrap_payload(code: &str, value: serde_json::Value) -> Result<serde_json::Valu
     Ok(serde_json::Value::Object(map))
 }
 
+/// What a host answers to a request whose bearer token it does not accept.
+pub const BEARER_REJECTED: &str = "missing or invalid bearer token";
+
+static TOKEN_FROM_ENV: OnceLock<&'static str> = OnceLock::new();
+
+/// Record that this run's token came from an environment fallback rather than
+/// from argv, so a rejection can say which variable to look at: a stale value
+/// left in the environment is otherwise indistinguishable from a wrong flag.
+pub fn note_token_from_env(name: &'static str) {
+    let _ = TOKEN_FROM_ENV.set(name);
+}
+
+fn explain_rejection<'a>(
+    message: &'a str,
+    token_from_env: Option<&str>,
+) -> std::borrow::Cow<'a, str> {
+    match token_from_env {
+        Some(name) if message.ends_with(BEARER_REJECTED) => format!(
+            "{message} (the token came from {name}, which takes precedence over a \
+             discovered host's own token; unset it or pass --token-secret)"
+        )
+        .into(),
+        _ => message.into(),
+    }
+}
+
 // Every error emitter shares this boundary, including errors built from a raw
 // message rather than an SDK `Error`.
 pub(crate) fn error_builder(code: &str, message: &str) -> agent_first_data::ErrorBuilder {
-    agent_first_data::json_error(code, &crate::shared::redact::redact_urls_in_text(message))
+    let message = explain_rejection(message, TOKEN_FROM_ENV.get().copied());
+    agent_first_data::json_error(code, &crate::shared::redact::redact_urls_in_text(&message))
 }
 
 /// Convenience: emit an SDK-built AFDATA error event.
@@ -420,64 +418,31 @@ pub fn result_value_revealing_takeover(
     };
     let original: serde_json::Value = agent_first_data::json_result(payload).build().into();
     let original = crate::shared::redact::redact_url_fields(&original);
-    let mut redacted = agent_first_data::Redactor::new().value(&original);
-    restore_named_field(&original, &mut redacted, "takeover_url_secret");
-    redacted
-}
-
-pub fn decode_result<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, Error> {
-    let text = std::str::from_utf8(bytes).map_err(|error| {
-        Error::new(
-            crate::shared::error::ErrorCode::InternalError,
-            format!("decode AFDATA event: {error}"),
-        )
-    })?;
-    match agent_first_data::decode_protocol_event(text) {
-        Ok(agent_first_data::DecodedEvent::Result(result)) => serde_json::from_value(result.result)
-            .map_err(|error| {
-                Error::new(
-                    crate::shared::error::ErrorCode::InternalError,
-                    format!("decode AFDATA result payload: {error}"),
-                )
-            }),
-        Ok(_) => Err(Error::new(
-            crate::shared::error::ErrorCode::InternalError,
-            "expected AFDATA result event",
-        )),
-        Err(error) => Err(Error::new(
-            crate::shared::error::ErrorCode::InternalError,
-            format!("invalid AFDATA event: {error}"),
-        )),
-    }
-}
-
-pub fn decode_error(bytes: &[u8]) -> Result<Error, Error> {
-    let text = std::str::from_utf8(bytes).map_err(|error| {
-        Error::new(
-            crate::shared::error::ErrorCode::InternalError,
-            format!("decode AFDATA error event: {error}"),
-        )
-    })?;
-    match agent_first_data::decode_protocol_event(text) {
-        Ok(agent_first_data::DecodedEvent::Error(error)) => {
-            let code = serde_json::from_value(serde_json::Value::String(error.code))
-                .unwrap_or(crate::shared::error::ErrorCode::InternalError);
-            Ok(Error::new(code, error.message).with_retryable(error.retryable))
-        }
-        Ok(_) => Err(Error::new(
-            crate::shared::error::ErrorCode::InternalError,
-            "expected AFDATA error event",
-        )),
-        Err(error) => Err(Error::new(
-            crate::shared::error::ErrorCode::InternalError,
-            format!("invalid AFDATA error event: {error}"),
-        )),
-    }
+    agent_first_data::Redactor::new()
+        .reveal_names(["takeover_url_secret"])
+        .value(&original)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rejected_environment_token_names_its_variable() {
+        let wrapped = format!("GET http://127.0.0.1:1/health: {BEARER_REJECTED}");
+        let explained = explain_rejection(&wrapped, Some("AFHTTP_TOKEN_SECRET"));
+        assert!(explained.starts_with(&wrapped), "{explained}");
+        assert!(
+            explained.contains("came from AFHTTP_TOKEN_SECRET"),
+            "{explained}"
+        );
+        // A token from argv, or any other error, is reported as it was.
+        assert_eq!(explain_rejection(&wrapped, None), wrapped);
+        assert_eq!(
+            explain_rejection("host unreachable", Some("AFHTTP_TOKEN_SECRET")),
+            "host unreachable"
+        );
+    }
 
     #[derive(Serialize)]
     struct HealthPayload {

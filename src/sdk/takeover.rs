@@ -2,7 +2,6 @@
 
 use std::time::Duration;
 
-use agent_first_data::value_source::SecretString;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 
@@ -42,18 +41,78 @@ struct TakeoverUiSessionResponse {
 pub struct TakeoverUiSession {
     client: reqwest::Client,
     maintenance_url: url::Url,
-    handoff_secret: SecretString,
+    handoff_secret: HandoffSecret,
     takeover_url_secret: String,
     keep_alive_every: Duration,
 }
 
 impl Client {
+    // Also protects drivers connected to older hosts that only report backend
+    // connectivity. New hosts independently enforce display/process checks.
+    async fn check_takeover_browser(&self) -> Result<(), Error> {
+        let health = match self.health().await {
+            Ok(health) => health,
+            Err(health_error) => {
+                // Hosts may explicitly disable /health. Probe CDP directly
+                // in that case; the host still gates its display endpoints.
+                let probe = async {
+                    let conn = self.cdp_connection().await?;
+                    conn.send_timeout(
+                        "Target.getTargets",
+                        &serde_json::json!({}),
+                        None,
+                        Duration::from_secs(3),
+                    )
+                    .await?;
+                    Ok::<(), Error>(())
+                };
+                return tokio::time::timeout(Duration::from_secs(5), probe)
+                    .await
+                    .map_err(|_| {
+                        Error::new(
+                            ErrorCode::CdpTimeout,
+                            format!(
+                                "takeover browser probe timed out; health unavailable: {}",
+                                health_error.detail
+                            ),
+                        )
+                    })?
+                    .map_err(|error| {
+                        Error::new(
+                            error.error_code,
+                            format!(
+                                "takeover browser unavailable: {}; health unavailable: {}",
+                                error.detail, health_error.detail
+                            ),
+                        )
+                    });
+            }
+        };
+        if let Some(takeover) = health.takeover {
+            if !takeover.ready {
+                return Err(Error::new(
+                    ErrorCode::CdpUnavailable,
+                    takeover
+                        .reason
+                        .unwrap_or_else(|| "takeover is unavailable".into()),
+                ));
+            }
+        } else if !health.backend.is_some_and(|backend| backend.connected) {
+            return Err(Error::new(
+                ErrorCode::CdpUnavailable,
+                "takeover cannot open: browser CDP is unavailable; a running host/VNC does not imply a live browser; preserve the profile",
+            ));
+        }
+        Ok(())
+    }
+
     /// Mint a short-lived URL capability for `/takeover/*`.
     pub async fn takeover_handoff(
         &self,
         ttl_s: Option<u64>,
         tab_id: Option<&str>,
     ) -> Result<TakeoverHandoffResponse, Error> {
+        self.check_takeover_browser().await?;
         let endpoint = self.effective_endpoint().await?;
         let base = endpoint.http_base();
         let url = format!("{base}/takeover/handoff");
@@ -74,7 +133,7 @@ impl Client {
             )
         })?;
         if !status.is_success() {
-            if let Ok(err) = crate::shared::afdata::decode_error(&bytes) {
+            if let Ok(err) = crate::shared::events::decode_error(&bytes) {
                 return Err(err);
             }
             return Err(Error::new(
@@ -85,11 +144,12 @@ impl Client {
                 ),
             ));
         }
-        crate::shared::afdata::decode_result(&bytes)
+        crate::shared::events::decode_result(&bytes)
     }
 
     /// Mint a process-bound upstream credential for an AFUI delivery.
     pub async fn takeover_ui_session(&self) -> Result<TakeoverUiSession, Error> {
+        self.check_takeover_browser().await?;
         let endpoint = self.effective_endpoint().await?;
         let url = format!("{}/takeover/ui-session", endpoint.http_base());
         let mut request = self.http().post(&url);
@@ -113,9 +173,13 @@ impl TakeoverUiSession {
     pub async fn exchange(takeover_url_secret: &str) -> Result<Self, Error> {
         crate::sdk::client::ensure_rustls_provider();
         let (maintenance_url, handoff_secret) = maintenance_url(takeover_url_secret)?;
+        // Bounded: a renewal stuck on a host that accepted and went quiet
+        // would outlive the lease it was meant to keep, and a revoke on the
+        // way out would hold shutdown.
         let client = reqwest::Client::builder()
             .no_proxy()
             .user_agent(concat!("afhttp/", env!("CARGO_PKG_VERSION")))
+            .timeout(std::time::Duration::from_secs(10))
             .build()
             .map_err(|error| {
                 Error::new(
@@ -228,7 +292,7 @@ impl TakeoverUiSession {
     }
 }
 
-fn maintenance_url(takeover_url_secret: &str) -> Result<(url::Url, SecretString), Error> {
+fn maintenance_url(takeover_url_secret: &str) -> Result<(url::Url, HandoffSecret), Error> {
     let mut url = url::Url::parse(takeover_url_secret).map_err(|error| {
         Error::new(
             ErrorCode::InvalidEndpoint,
@@ -249,11 +313,15 @@ fn maintenance_url(takeover_url_secret: &str) -> Result<(url::Url, SecretString)
     url.set_path("/takeover/ui-session");
     url.set_query(None);
     url.set_fragment(None);
-    Ok((url, SecretString::new(secret)))
+    Ok((url, HandoffSecret(secret)))
 }
 
-fn handoff_authorization(secret: &SecretString) -> String {
-    format!("Handoff {}", secret.expose_secret())
+/// The handoff credential, kept out of `Debug` so a logged session never
+/// carries it.
+struct HandoffSecret(String);
+
+fn handoff_authorization(secret: &HandoffSecret) -> String {
+    format!("Handoff {}", secret.0)
 }
 
 async fn decode_ui_session_response(
@@ -268,7 +336,7 @@ async fn decode_ui_session_response(
         )
     })?;
     if !status.is_success() {
-        if let Ok(error) = crate::shared::afdata::decode_error(&bytes) {
+        if let Ok(error) = crate::shared::events::decode_error(&bytes) {
             return Err(error);
         }
         return Err(Error::new(
@@ -279,13 +347,13 @@ async fn decode_ui_session_response(
             ),
         ));
     }
-    crate::shared::afdata::decode_result(&bytes)
+    crate::shared::events::decode_result(&bytes)
 }
 
 async fn response_error(response: reqwest::Response, operation: &str) -> Error {
     let status = response.status();
     match response.bytes().await {
-        Ok(bytes) => crate::shared::afdata::decode_error(&bytes).unwrap_or_else(|_| {
+        Ok(bytes) => crate::shared::events::decode_error(&bytes).unwrap_or_else(|_| {
             Error::new(
                 ErrorCode::InternalError,
                 format!("{operation}: host returned {status}"),

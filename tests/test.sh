@@ -25,7 +25,7 @@ SPORE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 afdata_args_begin "$0 [MODE]"
 afdata_args_positional test_mode MODE \
-  "Test mode: static, unit, download, integration, takeover, default, all, or release" optional
+  "Test mode: static, unit, download, integration, takeover, default, runtime, refresh, versions, all, or release" optional
 afdata_args_parse "$@"
 MODE="${test_mode:-default}"
 
@@ -43,10 +43,13 @@ run_shellcheck() { afdata_run "$SPORE_DIR/scripts/install-shellcheck.sh" --check
 
 run_static() {
   run_shellcheck
+  afdata_run --quiet python3 "$SCRIPT_DIR/test_container_refresh.py"
+  run "python3 tests/check_container_pins.py"
   run "bash tests/check_container_third_party_versions.sh"
   run "cargo fmt --all --check"
   run "cargo build --all-features"
   run "cargo build --no-default-features --features sdk"
+  run "bash tests/check_sdk_floor.sh"
   run "cargo clippy --all-features --all-targets -- -D warnings"
   run "cargo clippy --no-default-features --features sdk --all-targets -- -D warnings"
 }
@@ -60,6 +63,7 @@ run_unit() {
 run_integration() {
   run "cargo test --all-features \
     --test fetch_http_only \
+    --test browser_request_scope \
     --test health_capabilities \
     --test cdp_proxy \
     --test browser_fetch \
@@ -91,13 +95,31 @@ run_default() {
   run "cargo fmt --all --check"
   run "cargo build --all-features"
   run "cargo build --no-default-features --features sdk"
+  run "bash tests/check_sdk_floor.sh"
   run "cargo clippy --all-features --all-targets -- -D warnings"
   run "cargo test --lib --bins --features sdk,cli"
 }
 
+run_versions() {
+  run "rustc --version && chromium --version && lightpanda version"
+}
+
 case "$MODE" in
+  refresh)
+    run_shellcheck
+    afdata_run --quiet python3 "$SCRIPT_DIR/test_container_refresh.py"
+    AFHTTP_TEST_REFRESH_IMAGE=1 run "true"
+    run_versions
+    ;;
+  versions) run_versions ;;
   static) run_static ;;
   unit) run_unit ;;
+  runtime)
+    run_shellcheck
+    run "cargo fmt --all --check"
+    run "cargo clippy --features sdk,cli --lib -- -D warnings"
+    run "cargo test --features sdk,cli --lib runtime"
+    ;;
   download) run "cargo test --all-features --test browser_fetch browser_navigation_download" ;;
   integration) run_integration ;;
   takeover) run_takeover ;;
@@ -118,7 +140,7 @@ case "$MODE" in
   *)
     afdata_error unknown_test_mode \
       "unknown test mode: $MODE" \
-      "run one of: static, unit, download, integration, takeover, default, all, release" || :
+      "run one of: static, unit, download, integration, takeover, default, runtime, refresh, versions, all, release" || :
     exit 2
     ;;
 esac

@@ -130,7 +130,7 @@ pub(crate) fn persist_set_cookies(
             // A refusal is the jar declining to store something the
             // response was not allowed to set; nothing else changes.
             Ok(c) => {
-                let _accepted = jar.merge(c.into_owned(), request_url);
+                let _accepted = jar.merge_response(c.into_owned(), request_url);
             }
             Err(_) => continue,
         }
@@ -139,11 +139,14 @@ pub(crate) fn persist_set_cookies(
 }
 
 /// Pull cookies the browser holds for `final_url` and merge into the jar.
+/// `injected` is the jar snapshot whose cookies were installed before
+/// navigation; cookies the browser still holds unchanged from it are skipped.
 pub(crate) async fn sync_browser_cookies_to_jar(
     conn: &crate::sdk::cdp::ws_client::Connection,
     session_id: &str,
     final_url: &str,
     jar_path: &std::path::Path,
+    injected: Option<&crate::sdk::profile::cookie_jar::CookieJar>,
 ) -> Result<usize, Error> {
     let final_url_parsed = Url::parse(final_url).map_err(|e| {
         Error::new(
@@ -167,16 +170,45 @@ pub(crate) async fn sync_browser_cookies_to_jar(
         return Ok(0);
     }
     let mut jar = crate::sdk::profile::cookie_jar::CookieJar::load(jar_path)?;
+    let rejected_count = merge_browser_cookies(&mut jar, &cookies, &final_url_parsed, injected);
+    persist_off_runtime(move || jar.persist()).await?;
+    Ok(rejected_count)
+}
+
+/// Run a jar write — an exclusive file lock another fetch may hold, then an
+/// fsync and a rename — on the blocking pool. Inline, a wait for the lock
+/// would happen inside a single poll, where the fetch's deadline cannot end
+/// it; there, an abandoned write still finishes and releases the lock.
+pub(crate) async fn persist_off_runtime(
+    write: impl FnOnce() -> Result<(), Error> + Send + 'static,
+) -> Result<(), Error> {
+    tokio::task::spawn_blocking(write).await.map_err(|e| {
+        Error::new(
+            ErrorCode::InternalError,
+            format!("cookie jar write task failed: {e}"),
+        )
+    })?
+}
+
+fn merge_browser_cookies(
+    jar: &mut crate::sdk::profile::cookie_jar::CookieJar,
+    cookies: &[serde_json::Value],
+    final_url: &Url,
+    injected: Option<&crate::sdk::profile::cookie_jar::CookieJar>,
+) -> usize {
     let mut rejected_count = 0;
     for entry in cookies {
-        if let Some(c) = cdp_cookie_to_set_cookie(&entry)
-            && !jar.merge(c, &final_url_parsed)
-        {
+        let Some(c) = cdp_cookie_to_set_cookie(entry) else {
+            continue;
+        };
+        if injected.is_some_and(|snapshot| snapshot.holds_unchanged(&c, final_url)) {
+            continue;
+        }
+        if !jar.merge(c, final_url) {
             rejected_count += 1;
         }
     }
-    jar.persist()?;
-    Ok(rejected_count)
+    rejected_count
 }
 
 fn cdp_cookie_to_set_cookie(entry: &serde_json::Value) -> Option<cookie::Cookie<'static>> {
@@ -207,6 +239,12 @@ fn cdp_cookie_to_set_cookie(entry: &serde_json::Value) -> Option<cookie::Cookie<
         .unwrap_or(false)
     {
         b = b.http_only(true);
+    }
+    match entry.get("sameSite").and_then(|v| v.as_str()) {
+        Some("Strict") => b = b.same_site(cookie::SameSite::Strict),
+        Some("Lax") => b = b.same_site(cookie::SameSite::Lax),
+        Some("None") => b = b.same_site(cookie::SameSite::None),
+        _ => {}
     }
     if let Some(expires_sec) = entry.get("expires").and_then(|v| v.as_f64())
         && expires_sec > 0.0
@@ -261,6 +299,63 @@ mod tests {
         assert_eq!(cookies.len(), 1);
         assert_eq!(cookies[0].name(), "sid");
         assert_eq!(cookies[0].value(), "abc");
+    }
+
+    #[test]
+    fn browser_sync_skips_injected_cookies_and_keeps_concurrent_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let jar_path = dir.path().join("jar.json");
+        let url = Url::parse("https://example.test/").unwrap();
+        persist_set_cookies(
+            &jar_path,
+            &["sid=old; Path=/; Max-Age=3600; SameSite=Lax".to_string()],
+            &url,
+        )
+        .unwrap();
+        let injected = crate::sdk::profile::cookie_jar::CookieJar::load(&jar_path).unwrap();
+        // What the browser reports for the injected cookie, unchanged.
+        let browser_sid = cdp_cookie_json(&injected.applicable_cookies(&url)[0]);
+        // A concurrent fetch updates the cookie while this one is rendering.
+        persist_set_cookies(&jar_path, &["sid=new; Path=/".to_string()], &url).unwrap();
+
+        let mut jar = crate::sdk::profile::cookie_jar::CookieJar::load(&jar_path).unwrap();
+        let page_set = serde_json::json!({"name": "pref", "value": "dark", "domain": "example.test", "path": "/"});
+        assert_eq!(
+            merge_browser_cookies(&mut jar, &[browser_sid, page_set], &url, Some(&injected)),
+            0
+        );
+        jar.persist().unwrap();
+
+        let jar = crate::sdk::profile::cookie_jar::CookieJar::load(&jar_path).unwrap();
+        let mut cookies: Vec<(String, String)> = jar
+            .applicable_cookies(&url)
+            .iter()
+            .map(|c| (c.name().to_string(), c.value().to_string()))
+            .collect();
+        cookies.sort();
+        assert_eq!(
+            cookies,
+            [
+                ("pref".to_string(), "dark".to_string()),
+                ("sid".to_string(), "new".to_string())
+            ]
+        );
+    }
+
+    /// The `Network.getCookies` shape of a cookie the jar installed.
+    fn cdp_cookie_json(cookie: &cookie::Cookie<'static>) -> serde_json::Value {
+        let expires = match cookie.expires() {
+            Some(cookie::Expiration::DateTime(at)) => at.unix_timestamp() as f64,
+            _ => -1.0,
+        };
+        serde_json::json!({
+            "name": cookie.name(),
+            "value": cookie.value(),
+            "domain": cookie.domain().map_or("example.test".to_string(), |d| format!(".{d}")),
+            "path": cookie.path().unwrap_or("/"),
+            "expires": expires,
+            "sameSite": cookie.same_site().map(|s| s.to_string()),
+        })
     }
 
     #[test]

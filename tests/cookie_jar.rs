@@ -155,3 +155,30 @@ async fn concurrent_jar_persists_do_not_corrupt_file() {
         "jar lost afhttp_marker; got {names:?}",
     );
 }
+
+/// A caller's own `Cookie` header is the whole header on the wire; the jar's
+/// cookies join it. Otherwise the session a login hop stores is missing from
+/// the very page it redirects to.
+#[tokio::test]
+async fn a_caller_cookie_header_still_carries_the_session_a_redirect_hop_set() {
+    let fixture = support::fixture_server::spawn().await;
+    let tmpdir = tempfile::tempdir().expect("tempdir");
+    let jar_path = tmpdir.path().join("session.jar.json");
+
+    let client = Client::connect("ws://localhost:9999").expect("client");
+    let result = client
+        .fetch(format!("{}/login-redirect", fixture.base_url()))
+        .render(RenderMode::None)
+        .header("Cookie", "raw=1")
+        .want([Artifact::Body])
+        .out_dir(tmpdir.path().to_path_buf())
+        .cookie_jar(jar_path)
+        .send()
+        .await
+        .expect("fetch");
+
+    let body_path = result.body_file.as_ref().expect("body_file in response");
+    let body: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(body_path).expect("read body")).expect("json");
+    assert_eq!(body["cookie"], "raw=1; afhttp_login=fresh");
+}

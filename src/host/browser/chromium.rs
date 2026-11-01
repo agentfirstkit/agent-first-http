@@ -79,7 +79,19 @@ pub(super) async fn launch(args: &HostArgs) -> Result<BrowserHandle, Error> {
                 continue;
             }
         };
-        let (browser, mut handler) = match Browser::connect(ws_url.clone()).await {
+        // A browser that accepted the TCP connection but stalls the WebSocket
+        // handshake would otherwise hold launch (and every profile switch)
+        // forever.
+        let connected =
+            tokio::time::timeout(BROWSER_CONNECT_TIMEOUT, Browser::connect(ws_url.clone()))
+                .await
+                .unwrap_or_else(|_| {
+                    Err(chromiumoxide::error::CdpError::msg(format!(
+                        "no CDP handshake within {}s",
+                        BROWSER_CONNECT_TIMEOUT.as_secs()
+                    )))
+                });
+        let (browser, mut handler) = match connected {
             Ok(pair) => pair,
             Err(e) => {
                 let _ = child.start_kill();
@@ -126,7 +138,7 @@ pub(super) async fn launch(args: &HostArgs) -> Result<BrowserHandle, Error> {
             _keepalive: BackendKeepalive::Chromium {
                 _browser: Arc::new(Mutex::new(browser)),
                 handler_task,
-                child,
+                child: tokio::sync::Mutex::new(child),
             },
             stderr_ring,
         });
@@ -483,10 +495,15 @@ struct ChromiumVersion {
     web_socket_debugger_url: String,
 }
 
+const BROWSER_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
 async fn read_chromium_ws_url(port: u16) -> Result<String, Error> {
     let url = format!("http://127.0.0.1:{port}/json/version");
     let http = reqwest::Client::builder()
         .no_proxy()
+        // Each attempt is bounded, so the 5s loop deadline below holds even
+        // when the browser accepts the request and never answers it.
+        .timeout(Duration::from_secs(2))
         .build()
         .map_err(|e| Error::new(ErrorCode::InternalError, format!("reqwest client: {e}")))?;
     let deadline = std::time::Instant::now() + Duration::from_secs(5);

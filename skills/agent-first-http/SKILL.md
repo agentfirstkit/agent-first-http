@@ -73,12 +73,26 @@ raw body looks incomplete, placeholder-like, or contradicted by warnings. Use
 Inspect `observation.json`, `network.json`, and `console.json` only when needed.
 Use `rendered_html` as a debug artifact, not as the authoritative rendered page.
 
-Before answering, sanity-check the artifact you read against stdout warnings. If
-the main facts look incomplete, placeholder-like, or contradicted by
-readiness/network warnings, do not treat the capture as final. Prefer a more
-specific same-site link from `content.json.links` when available, one
-longer-wait or browser-render retry, or clearly state that the page did not
-fully settle.
+Before answering, check `page_kind`, `readiness`, artifact warnings, and the
+actual requested fields. `readiness_timeout` means the requested wait did not
+settle; it does not by itself mean the target content is unavailable. Do not
+infer readiness from HTTP 200 or stable placeholder text.
+
+When you know which region holds the data, render in the browser (`--render always`) and
+wait for that region to be stable (`--wait 'selector-stable:<css>'`), choosing a selector
+that contains every required field, including any iframe that carries them.
+Frames outside the region are ancillary; frames inside it are required whatever
+their origin. Keep `--wait auto` when the whole page must settle.
+
+Use fields only when `readiness.target_content` is `ready`, the wait was
+satisfied without timing out, and the fields are actually present in the
+artifacts. An `incomplete` ancillary region is not a reason to discard verified
+target fields; report the partial-page status with them. For `incomplete`,
+`unknown`, or `blocked` targets, or missing required fields, keep the evidence
+and retry or review within the task's budget; never narrow the selector to
+exclude an unfinished required iframe just to get a green result. A result
+without `readiness` makes no scoped-content claim. To diagnose a stall, read
+`readiness.pending_requests`. A detected wall always takes precedence.
 
 Treat `status: 200` as transport only. If the page is a login, consent gate,
 security check, captcha, or bot wall, do not answer as if the target page was
@@ -150,7 +164,15 @@ afhttp fetch "$URL" --takeover
 ```
 
 After the human finishes, run the returned `next_action.recommended_command` to
-read the same tab before summarizing.
+read the same tab before summarizing. A credentialed URL in that command is
+redacted in CLI output, so put the credential back before rerunning it.
+
+The result may carry no `next_action` at all: the warmed profile reached the
+target, or the capture was verified and the tab recycled. The user still asked
+for the browser, so mint a panel for the host yourself — `afhttp ui takeover`
+(without `--takeover-url-secret`) where a window can open or with a `--mode`
+below, or `afhttp panel` for a bare short-lived URL. Do not tell the user there
+is nothing to open.
 
 When you are running where the user can see a window on this machine, do not
 hand over a URL and guess when they are done — open the panel and wait:
@@ -165,11 +187,13 @@ have finished. Do not poll or re-fetch while it is blocked.
 Where there is no display — a headless container, a remote session — add
 `--mode session`. Nothing opens here; the panel is announced instead, so `afui
 session list` sees it and the person can open it from a machine that has a
-screen. Add `--mode link` instead when the person is on another device on the
-same network and you can hand them a URL directly: it returns AFUI's
-`link_url` on its `progress` event, which is the whole way in — give it to the
+screen. `--mode link` returns AFUI's `link_url` on its `progress` event for a
+person on another device, and that URL is the whole way in — give it to the
 person it is for and nowhere else. The takeover host may remain on loopback;
 AFUI owns the LAN listener and keeps the upstream credential behind its proxy.
+But a link frames the panel on an opaque origin, and the KasmVNC client cannot
+run there (see below), so for KasmVNC prefer `--mode session` with a shared
+page that gives each session its own origin.
 
 The Link expires under AFUI's global idle-plus-grace attention policy. A
 registered Session has no AFUI deadline and ends when you stop the command.
@@ -178,9 +202,12 @@ re-fetching. Do not reach for either when a window can open — and if a machine
 never has a screen, `AFUI_DELIVERY=session` in its environment is better than
 remembering the flag.
 
-The KasmVNC client needs browser storage. A default opaque-origin frame cannot
-provide it; use `afui session open`, or serve sessions with a real
-per-session-origin hostname whose wildcard DNS and TLS are already configured.
+The KasmVNC client needs browser storage. An opaque-origin frame — a `link`,
+or `afui session serve` without `--session-origin-host` — cannot provide it.
+Use `afui session open` on the machine itself, or `afui session serve
+--session-origin-host` with `localhost` when the browser runs on that machine,
+or with a hostname whose wildcard DNS (and TLS, if exposed) is already
+configured when it does not.
 
 `upload --file` passes an absolute path to the browser; it does not transfer
 file bytes. The driver must also be able to read the same file at that path.
@@ -218,8 +245,23 @@ wait. Where a window can open on this machine, `afhttp ui takeover
 --takeover-url-secret` replaces that wait with a real ending: it returns when
 the user closes the panel. Only after the user closes the panel or explicitly
 confirms should you run `next_action.recommended_command` (a re-fetch of the
-same `--tab`). When that re-fetch comes back clean it also closes the takeover
-tab — the loop is self-cleaning, so do not follow up with `afhttp tabs close`.
+same `--tab`); if its URL carried a credential, CLI output redacted it, so put
+it back first. A verified capture recycles the takeover tab. HTTP errors,
+unknown or incomplete content, and failed captures retain it, even when no known
+wall was recognized. Inspect status, artifacts, readiness, and warnings: the
+absence of `next_action` alone never proves valid target content.
+
+A handoff failure preserves `tab_id`, artifacts and the review action, adds a
+warning, and may leave `takeover_url_secret` absent. Do not fabricate/open a
+missing URL or close the tab to clear the warning. Fetch errors can report
+`trace.retained_tab_id` for inspection. Do not automatically retry a challenge.
+
+`container status.running` and `/capabilities.takeover.supported` do not prove
+the browser is alive. Check authenticated `/health.takeover.ready`, with its
+browser process, CDP, and display signals. A dead browser requires host
+diagnosis even if VNC still shows menus; preserve its profile and cookies. An
+error in `afhttp-profile.json` concerns that metadata file only: back it up and
+repair it, and never delete the whole profile as a metadata repair.
 
 A panel dies with the browser it showed. Switching profiles on the host, or
 restarting it, revokes every panel credential — if you did either, mint a fresh

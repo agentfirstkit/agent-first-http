@@ -1,6 +1,6 @@
 //! Deep network capture (`network.json`). Aggregated from CDP `Network.*`
-//! events. Headers and credential-bearing URL components are redacted by
-//! default per [`crate::shared::redact`].
+//! events. Credential-bearing headers are redacted by default per
+//! [`crate::shared::redact`]; request URLs are recorded as the page sent them.
 //! This module defines the on-wire schema and the redaction helper used by tests.
 
 use std::collections::BTreeMap;
@@ -121,17 +121,6 @@ pub fn redact_headers(map: &mut BTreeMap<String, String>, enabled: bool) {
     }
 }
 
-/// Apply the default URL redaction policy used by `network.json`. Pass
-/// `enabled = false` only for the explicit `--no-network-redact` opt-out.
-#[must_use]
-pub fn redact_request_url(url: &str, enabled: bool) -> String {
-    if enabled {
-        redact::redact_url(url)
-    } else {
-        url.to_string()
-    }
-}
-
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -164,15 +153,5 @@ mod tests {
         map.insert("Authorization".to_string(), "Bearer xyz".to_string());
         redact_headers(&mut map, false);
         assert_eq!(map["Authorization"], "Bearer xyz");
-    }
-
-    #[test]
-    fn request_url_redaction_honors_explicit_opt_out() {
-        let url = "https://user:pass@example.test/?token=abc&safe=ok";
-        assert_eq!(
-            redact_request_url(url, true),
-            "https://user:***@example.test/?token=***&safe=ok"
-        );
-        assert_eq!(redact_request_url(url, false), url);
     }
 }

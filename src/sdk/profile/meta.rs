@@ -1,6 +1,8 @@
 //! `afhttp-profile.json` metadata file schema (architecture.md §7).
 
 use std::time::SystemTime;
+#[cfg(any(feature = "host", test))]
+use std::{io, path::Path};
 
 use serde::{Deserialize, Serialize};
 
@@ -42,9 +44,29 @@ pub fn now_rfc3339() -> String {
     humantime::format_rfc3339_seconds(SystemTime::now()).to_string()
 }
 
+/// Publish complete metadata without ever truncating the previous file. The
+/// profile lock must be held by the caller. A failure before rename leaves the
+/// old file untouched; a directory-sync failure after rename leaves a complete
+/// new file, whose crash durability could not be confirmed.
+#[cfg(any(feature = "host", test))]
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    agent_first_data::document::write_atomic(path, bytes).map_err(io::Error::other)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metadata_replacement_is_complete_and_refuses_non_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("metadata.json");
+        write_atomic(&path, b"old").unwrap();
+        write_atomic(&path, b"new complete metadata").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new complete metadata");
+        assert!(write_atomic(dir.path(), b"refused").is_err());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
 
     #[test]
     fn now_rfc3339_is_second_precision_utc() {

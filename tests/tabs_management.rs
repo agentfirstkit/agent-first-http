@@ -128,6 +128,74 @@ async fn target_get_close_round_trip() {
     );
 }
 
+/// A driver that dies mid-fetch leaves its tab behind while other drivers
+/// keep working. The host must not wait for all of them to fall silent before
+/// reclaiming what the dead one left, and must not touch what the live ones
+/// are driving.
+#[tokio::test]
+async fn tabs_orphaned_by_a_closed_connection_are_reaped_while_another_client_stays_connected() {
+    let Some((endpoint, state, _tmp)) = spawn_chromium_host().await else {
+        println!("(skipping: no chromium)");
+        return;
+    };
+    let fixture = support::fixture_server::spawn().await;
+    let page = format!("{}/plain.html", fixture.base_url());
+
+    let dying = Client::connect(&endpoint).expect("client");
+    let orphan_id = dying
+        .cdp("Target.createTarget")
+        .params(serde_json::json!({ "url": page }))
+        .send()
+        .await
+        .expect("Target.createTarget")["targetId"]
+        .as_str()
+        .expect("targetId in createTarget response")
+        .to_string();
+    dying.close().await;
+
+    // This one stays connected for the whole test, which used to be enough
+    // on its own to hold the reaper off every tab in the browser.
+    let bystander = Client::connect(&endpoint).expect("client");
+    let kept_id = bystander
+        .cdp("Target.createTarget")
+        .params(serde_json::json!({ "url": page }))
+        .send()
+        .await
+        .expect("Target.createTarget")["targetId"]
+        .as_str()
+        .expect("targetId in createTarget response")
+        .to_string();
+
+    agent_first_http::host::reaper::spawn_with_interval(
+        state,
+        Duration::from_secs(2),
+        Duration::from_millis(250),
+    );
+    tokio::time::sleep(Duration::from_secs(10)).await;
+
+    let listed = bystander
+        .cdp("Target.getTargets")
+        .send()
+        .await
+        .expect("Target.getTargets");
+    let targets = listed["targetInfos"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let ids: Vec<&str> = targets
+        .iter()
+        .filter_map(|t| t["targetId"].as_str())
+        .collect();
+    assert!(
+        !ids.contains(&orphan_id.as_str()),
+        "orphan {orphan_id} survived while another client was connected; targets: {targets:?}",
+    );
+    assert!(
+        ids.contains(&kept_id.as_str()),
+        "the connected client's own tab {kept_id} was reaped; targets: {targets:?}",
+    );
+}
+
 #[tokio::test]
 async fn idle_unattached_tabs_are_reaped_and_a_window_survives() {
     let Some((endpoint, state, _tmp)) = spawn_chromium_host().await else {

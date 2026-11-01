@@ -21,8 +21,8 @@ FINGERPRINT_CHROMIUM_VERSION="150.0.7871.186"
 CAMOUFOX_RELEASE="v156.0.1-beta.36"
 CAMOUFOX_X86_BUILD="156.0.1-beta.36"
 CAMOUFOX_ARM_BUILD="156.0.1-beta.36"
-GO_VERSION="1.27.2"
-KASMVNC_VERSION="1.5.0"
+GO_VERSION="1.27.3"
+KASMVNC_VERSION="1.5.2"
 
 arch="$(uname -m)"
 
@@ -181,7 +181,7 @@ install_kasmvnc() {
     apt-get update
     apt-get install -y --no-install-recommends matchbox-window-manager
     download /tmp/kasmvnc.deb \
-        "https://github.com/kasmtech/KasmVNC/releases/download/v${KASMVNC_VERSION}/kasmvncserver_trixie_${KASMVNC_VERSION}_${deb_arch}.deb"
+        "https://github.com/kasmtech/KasmVNC/releases/download/v${KASMVNC_VERSION}/kasmvncserver_debian_trixie_${KASMVNC_VERSION}_${deb_arch}.deb"
     apt-get install -y --no-install-recommends /tmp/kasmvnc.deb
     rm -rf /var/lib/apt/lists/* /tmp/kasmvnc.deb
 }

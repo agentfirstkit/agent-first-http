@@ -52,7 +52,7 @@ pub const CONTAINER_COMPONENTS: [&str; 6] = [
 ];
 
 /// Container runtimes `--runtime` accepts. Omitted means auto-detection.
-pub const CONTAINER_RUNTIMES: [&str; 3] = ["docker", "podman", "apple"];
+pub const CONTAINER_RUNTIMES: [&str; 3] = ["apple", "podman", "docker"];
 
 const RENDER_MODES: [&str; 3] = ["none", "auto", "always"];
 /// Render modes that reach a real browser. Human takeover has nothing to take
@@ -177,7 +177,7 @@ pub fn cli_spec() -> Result<BuiltCliSpec, CliSpecError> {
             true,
         ))
         .command(CommandSpec::new(["container"]).about(
-            "Build and run a long-lived host container from the embedded recipe (Docker, Podman, or Apple).",
+            "Build and run a long-lived host container from the embedded recipe (Apple, Podman, or Docker).",
         ))
         .command(container_install_command())
         .command(container_uninstall_command())
@@ -232,13 +232,16 @@ fn backend_arg() -> ArgSpec {
 fn runtime_arg() -> ArgSpec {
     ArgSpec::option_enum("--runtime", CONTAINER_RUNTIMES)
         .value_name("RUNTIME")
-        .about("Container runtime; auto-detected when omitted, then AFHTTP_CONTAINER_RUNTIME")
+        .about(
+            "Container runtime; when omitted, AFHTTP_CONTAINER_RUNTIME, then \
+             AF_CONTAINER_RUNTIME, then auto-detection (apple, podman, docker)",
+        )
 }
 
 fn container_name_arg() -> ArgSpec {
     ArgSpec::option("--name", "NAME")
         .default(DEFAULT_CONTAINER_NAME)
-        .about("Container name")
+        .about("Container name: a letter or digit, then letters, digits, `_`, `.` or `-`")
 }
 
 fn reveal_token_arg() -> ArgSpec {
@@ -276,19 +279,19 @@ fn fetch_command() -> CommandSpec {
         .arg(
             ArgSpec::option("--tab", "new|<id>")
                 .default("new")
-                .about("new allocates a temporary target; a CDP target id reuses and keeps it"),
+                .about("new allocates a temporary target; an ID reuses it; takeover retains unverified content and recycles only after verified capture"),
         )
         .arg(
             ArgSpec::flag("--takeover")
-                .about("Escalate captcha, login, or 2FA walls to human takeover"),
+                .about("Retain challenges, HTTP errors, or unverified content for human review; check live browser/display health before opening takeover"),
         )
         .arg(ArgSpec::option("--profile", "NAME").about(
             "Host profile to switch to for this fetch; defaults to the URL's registrable \
              domain under --takeover",
         ))
         .arg(ArgSpec::option("--wait", "SPEC").default("auto").about(
-            "Readiness signal: auto | load | idle | selector:<css> | \
-                     selector-visible:<css> | ms:<n>",
+            "Readiness signal (auto is strict full-page): auto | load | idle | selector:<css> | \
+                     selector-visible:<css> | selector-stable:<css> | ms:<n>",
         ))
         .arg(
             ArgSpec::option("--header", "NAME:VALUE")
@@ -346,12 +349,12 @@ fn fetch_command() -> CommandSpec {
         .arg(
             ArgSpec::option_i64("--readiness-idle-ms", "MS")
                 .default_i64(800)
-                .about("Network quiet window used by --wait auto"),
+                .about("Network quiet window for auto and selector-stable"),
         )
         .arg(
             ArgSpec::option_i64("--readiness-stable-ms", "MS")
                 .default_i64(500)
-                .about("DOM/text unchanged window used by --wait auto"),
+                .about("DOM/text stable window for auto and selector-stable"),
         )
         .arg(
             ArgSpec::option_i64("--readiness-min-text-bytes", "BYTES")
@@ -359,14 +362,15 @@ fn fetch_command() -> CommandSpec {
                 .about("Low visible-text threshold that only warns about --wait auto quality"),
         )
         .arg(ArgSpec::flag("--no-network-redact").about(
-            "Write raw Authorization/Cookie headers and token query parameters to network.json",
+            "Write raw Authorization/Cookie and token/secret headers to network.json",
         ))
         .arg(
             ArgSpec::option("--out", "DIR")
                 .about("Directory for artifacts; defaults to afhttp-out under the temp directory"),
         )
         .arg(ArgSpec::option("--cookie-jar", "PATH").about(
-            "Override the profile cookie-jar path; must match the host profile. Honors \
+            "The host profile's own cookie jar, named explicitly; any other path is refused, \
+             and so is one when the host cannot confirm its profile's jar. Honors \
              AFHTTP_COOKIE_JAR",
         ))
         .arg(
@@ -608,7 +612,7 @@ fn host_command() -> CommandSpec {
         .arg(
             ArgSpec::option_i64("--tab-idle-timeout-s", "SECONDS")
                 .default_i64(900)
-                .about("Close page tabs after this long with no client connected and no takeover pending; 0 is off"),
+                .about("Close page tabs idle this long: any left behind by a closed connection, or all of them once no client is connected and no takeover is pending; 0 is off"),
         )
         .combination(
             Combination::new("host")
@@ -851,8 +855,17 @@ fn ui_takeover_command() -> CommandSpec {
 pub(crate) const PANEL_DELIVERY: agent_first_ui::cli::UiDeliveryOffer =
     agent_first_ui::cli::UiDeliveryOffer::WithLink;
 
+/// AFUI's summary says each word works; for this panel `link` does not. A link
+/// frames the page on an opaque origin with no browser storage, and the KasmVNC
+/// client cannot run without it, so the help says where to go instead.
 fn delivery_mode_arg() -> ArgSpec {
-    PANEL_DELIVERY.arg("--mode")
+    PANEL_DELIVERY.arg("--mode").about(
+        "How the panel reaches the person: window opens a browser window on this machine; \
+         session registers the session only, for `afui session open` or for \
+         `afui session serve --session-origin-host` to reach from elsewhere; link frames the \
+         panel on an opaque origin with no browser storage, where the KasmVNC client cannot \
+         run, so use session for remote access. Falls back to AFUI_DELIVERY, then window",
+    )
 }
 
 // ── skill ───────────────────────────────────────────────────────────────────
@@ -936,7 +949,7 @@ fn container_install_command() -> CommandSpec {
         .arg(
             ArgSpec::option_i64("--port", "PORT")
                 .default_i64(i64::from(DEFAULT_CONTAINER_PORT))
-                .about("Host CDP port, published on 127.0.0.1"),
+                .about("Host CDP port from 1 to 65535, published on 127.0.0.1"),
         )
         .arg(
             ArgSpec::option("--profile", "NAME")
@@ -1009,16 +1022,11 @@ fn container_status_command() -> CommandSpec {
         .about("Report whether the host is running, with its endpoint and client command.")
         .arg(runtime_arg())
         .arg(container_name_arg())
-        .arg(
-            ArgSpec::option_i64("--port", "PORT")
-                .default_i64(i64::from(DEFAULT_CONTAINER_PORT))
-                .about("Published host port, used to format the endpoint and client command"),
-        )
         .arg(reveal_token_arg())
         .combination(
             Combination::new("container-status")
                 .action("container_status")
-                .optional(["runtime", "name", "port", "reveal_token_secret"])
+                .optional(["runtime", "name", "reveal_token_secret"])
                 .output(protocol_output()),
         )
 }

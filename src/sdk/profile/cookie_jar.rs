@@ -13,6 +13,7 @@
 //! Set-Cookie responses back. Atomic via tempfile + rename; concurrent
 //! pipeline runs serialize on an fs2 advisory lock on a `.lock` sibling.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -75,6 +76,7 @@ pub struct RedactedCookie {
 pub struct CookieJar {
     path: PathBuf,
     entries: Vec<JarEntry>,
+    updated: BTreeSet<usize>,
 }
 
 impl CookieJar {
@@ -98,7 +100,11 @@ impl CookieJar {
                 ));
             }
         };
-        Ok(Self { path, entries })
+        Ok(Self {
+            path,
+            entries,
+            updated: BTreeSet::new(),
+        })
     }
 
     pub fn path(&self) -> &Path {
@@ -148,10 +154,44 @@ impl CookieJar {
         if let Some(idx) = self.entries.iter().position(|e| e.same_identity(&entry)) {
             // Replace in place.
             self.entries[idx] = entry;
+            self.updated.insert(idx);
         } else {
+            self.updated.insert(self.entries.len());
             self.entries.push(entry);
         }
         true
+    }
+
+    /// [`Self::merge`] for a `Set-Cookie` an HTTP response sent, with the
+    /// rules a browser applies to plaintext responses (RFC 6265bis §5.6): a
+    /// response not received over https may neither set a `Secure` cookie nor
+    /// replace one, so an on-path writer cannot fix the session a later https
+    /// fetch will send. Cookies read back from the browser have already been
+    /// through those rules and go to `merge` directly.
+    pub fn merge_response(&mut self, set_cookie: Cookie<'static>, request_url: &Url) -> bool {
+        if request_url.scheme() != "https" {
+            if set_cookie.secure() == Some(true) {
+                return false;
+            }
+            let entry = JarEntry::from_set_cookie(set_cookie.clone(), request_url);
+            let shadows_secure = self
+                .entries
+                .iter()
+                .any(|existing| existing.secure && existing.same_identity(&entry));
+            if shadows_secure {
+                return false;
+            }
+        }
+        self.merge(set_cookie, request_url)
+    }
+
+    /// Whether this jar already holds `cookie` exactly as `request_url` would
+    /// store it. A browser reports every cookie it holds, including the ones
+    /// this jar injected at the start of the fetch; those are not changes, and
+    /// merging them would overwrite whatever a concurrent fetch persisted since.
+    pub fn holds_unchanged(&self, cookie: &Cookie<'static>, request_url: &Url) -> bool {
+        let entry = JarEntry::from_set_cookie(cookie.clone(), request_url);
+        self.entries.iter().any(|e| e.same_content(&entry))
     }
 
     /// Drop expired entries; called automatically by [`Self::persist`] so
@@ -220,10 +260,14 @@ impl CookieJar {
 
         // While we hold the lock, re-read the on-disk jar so a sibling
         // process's writes aren't clobbered. Then merge our in-memory
-        // entries on top (newer wins by identity).
+        // changed entries on top. Loaded entries are only a snapshot: replaying
+        // them would overwrite a sibling's newer updates or revive deletions.
         let on_disk = Self::load(&self.path)?;
         let mut merged = on_disk.entries;
-        for entry in self.entries.drain(..) {
+        for (index, entry) in self.entries.drain(..).enumerate() {
+            if !self.updated.contains(&index) {
+                continue;
+            }
             if let Some(idx) = merged.iter().position(|e| e.same_identity(&entry)) {
                 merged[idx] = entry;
             } else {
@@ -297,7 +341,7 @@ fn domain_matches(cookie_domain: Option<&str>, host_only: bool, host: &str) -> b
 }
 
 /// RFC 6265 §5.1.4 path matching.
-fn path_matches(cookie_path: Option<&str>, request_path: &str) -> bool {
+pub(crate) fn path_matches(cookie_path: Option<&str>, request_path: &str) -> bool {
     let cp = cookie_path.unwrap_or("/");
     if cp == request_path {
         return true;
@@ -317,7 +361,11 @@ impl JarEntry {
     /// as `""`/`"/"` so jar entries and freshly-merged ones line up.
     fn same_identity(&self, other: &JarEntry) -> bool {
         self.name == other.name
-            && self.domain.as_deref().unwrap_or("") == other.domain.as_deref().unwrap_or("")
+            && self
+                .domain
+                .as_deref()
+                .unwrap_or("")
+                .eq_ignore_ascii_case(other.domain.as_deref().unwrap_or(""))
             && self.path.as_deref().unwrap_or("/") == other.path.as_deref().unwrap_or("/")
     }
 
@@ -332,10 +380,11 @@ impl JarEntry {
         let host_only = c.domain().is_none();
         let domain = c
             .domain()
-            .map(|d| d.trim_start_matches('.').to_string())
+            .map(|d| d.trim_start_matches('.').to_ascii_lowercase())
             .or_else(|| request_url.host_str().map(str::to_string));
         let path = c
             .path()
+            .filter(|path| path.starts_with('/'))
             .map(str::to_string)
             .or_else(|| Some(default_path(request_url)));
         // Max-Age takes precedence over Expires, including deletion.
@@ -365,9 +414,16 @@ impl JarEntry {
         }
     }
 
+    /// Rebuild the cookie with every attribute the jar stored. A host-only
+    /// entry carries no `Domain`: replaying it with one would widen it to
+    /// every subdomain once the browser stores it. Expiry and SameSite survive
+    /// too, so a browser round trip cannot turn a persistent cookie into a
+    /// session one that never leaves the jar.
     fn to_cookie(&self) -> Cookie<'static> {
         let mut b = Cookie::build((self.name.clone(), self.value.clone()));
-        if let Some(d) = &self.domain {
+        if let Some(d) = &self.domain
+            && !self.host_only
+        {
             b = b.domain(d.clone());
         }
         if let Some(p) = &self.path {
@@ -379,7 +435,29 @@ impl JarEntry {
         if self.http_only {
             b = b.http_only(true);
         }
+        if let Some(expires) = self.expires_epoch_s
+            && let Ok(at) = cookie::time::OffsetDateTime::from_unix_timestamp(expires)
+        {
+            b = b.expires(Expiration::DateTime(at));
+        }
+        match self.same_site.as_deref() {
+            Some("Strict") => b = b.same_site(SameSite::Strict),
+            Some("Lax") => b = b.same_site(SameSite::Lax),
+            Some("None") => b = b.same_site(SameSite::None),
+            _ => {}
+        }
         b.build()
+    }
+
+    /// Whether `other` carries exactly what this entry already holds, so
+    /// writing it back would only replay a snapshot.
+    fn same_content(&self, other: &JarEntry) -> bool {
+        self.same_identity(other)
+            && self.value == other.value
+            && self.host_only == other.host_only
+            && self.expires_epoch_s == other.expires_epoch_s
+            && self.secure == other.secure
+            && self.http_only == other.http_only
     }
 }
 
@@ -389,26 +467,31 @@ impl JarEntry {
 /// domain-matches it — a site may broaden a cookie to its own parent domain and
 /// no further. Omitting `Domain` is host-only and always permitted.
 ///
-/// The bare-label rule below stands in for a public suffix list. Without one,
-/// `Domain=co.uk` from `shop.co.uk` passes the domain-match test and would be
-/// sent to every other `.co.uk` site in the jar. A full list is a dependency
-/// with its own update cadence; refusing a single-label domain blocks the `com`
-/// / `net` case, and the multi-label suffixes remain a narrower gap than the
-/// one this closes.
+/// RFC 6265 §5.3 step 5: a `Domain` that is a public suffix is refused too.
+/// `Domain=co.uk` from `shop.co.uk`, or `Domain=github.io` from
+/// `alice.github.io`, passes the domain-match test, and would otherwise be
+/// replayed to every other site under that suffix. The list includes the
+/// private section (`github.io`, `herokuapp.com`), whose subdomains belong to
+/// unrelated owners exactly as `.co.uk`'s do. A response from the suffix host
+/// itself naming its own suffix is refused rather than downgraded to
+/// host-only; the cookie can be set again without `Domain`.
 fn may_set_domain(cookie_domain: Option<&str>, host: &str) -> bool {
     let Some(domain) = cookie_domain else {
         return true;
     };
     let domain = domain.trim_start_matches('.').to_ascii_lowercase();
     let host = host.trim_start_matches('.').to_ascii_lowercase();
-    if domain.is_empty() {
+    // A trailing dot hides the suffix from the public-suffix list
+    // (`psl::suffix_str("com.")` answers `com`), so `Domain=com.` would pass
+    // as an ordinary domain and be replayed to every `*.com.` host.
+    if domain.is_empty() || domain.ends_with('.') {
         return false;
     }
     // An address is only ever host-only; `Domain` on one is not meaningful.
     if host.parse::<std::net::IpAddr>().is_ok() {
         return false;
     }
-    if !domain.contains('.') {
+    if !domain.contains('.') || psl::suffix_str(&domain) == Some(domain.as_str()) {
         return false;
     }
     host == domain || host.ends_with(&format!(".{domain}"))
@@ -434,6 +517,60 @@ fn default_path(url: &Url) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_public_suffix_is_never_a_cookie_domain() {
+        for (domain, host) in [
+            ("github.io", "alice.github.io"),
+            (".github.io", "alice.github.io"),
+            ("co.uk", "shop.co.uk"),
+            ("herokuapp.com", "app.herokuapp.com"),
+            ("com", "example.com"),
+            // The trailing dot hides the suffix from the list.
+            ("com.", "example.com."),
+            ("co.uk.", "shop.co.uk."),
+        ] {
+            assert!(!may_set_domain(Some(domain), host), "{domain} from {host}");
+        }
+        assert!(may_set_domain(Some("example.com"), "www.example.com"));
+        assert!(may_set_domain(Some("example.com"), "example.com"));
+        assert!(may_set_domain(Some("alice.github.io"), "alice.github.io"));
+        assert!(may_set_domain(Some("shop.co.uk"), "www.shop.co.uk"));
+        assert!(may_set_domain(None, "alice.github.io"));
+    }
+
+    /// End to end through the jar: a refused `Domain` stores nothing, so a
+    /// neighbour under the same suffix is never sent it.
+    #[test]
+    fn a_public_suffix_cookie_is_not_replayed_to_a_neighbour() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut jar = CookieJar::load(dir.path().join("jar.json")).unwrap();
+        let alice = make_url("https://alice.github.io/");
+        let bob = make_url("https://bob.github.io/");
+        let cookie = Cookie::parse("sid=abc; Domain=github.io; Path=/")
+            .unwrap()
+            .into_owned();
+        assert!(!jar.merge(cookie, &alice));
+        assert!(jar.applicable_cookies(&bob).is_empty());
+        assert!(jar.applicable_cookies(&alice).is_empty());
+    }
+
+    #[test]
+    fn a_plaintext_response_neither_sets_nor_replaces_a_secure_cookie() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut jar = CookieJar::load(dir.path().join("jar.json")).unwrap();
+        let https = make_url("https://example.test/");
+        let http = make_url("http://example.test/");
+        let parse = |line: &str| Cookie::parse(line.to_string()).unwrap().into_owned();
+        assert!(!jar.merge_response(parse("a=1; Secure; Path=/"), &http));
+        assert!(jar.merge_response(parse("sid=real; Secure; Path=/"), &https));
+        assert!(!jar.merge_response(parse("sid=forged; Path=/"), &http));
+        let sent = jar.applicable_cookies(&https);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].value(), "real");
+        // An ordinary cookie over http is still stored.
+        assert!(jar.merge_response(parse("pref=dark; Path=/"), &http));
+    }
 
     fn make_url(s: &str) -> Url {
         Url::parse(s).unwrap()
@@ -475,6 +612,121 @@ mod tests {
             &url,
         );
         assert!((before + 60..=unix_now() + 60).contains(&entry.expires_epoch_s.unwrap()));
+    }
+
+    #[test]
+    fn stale_jar_snapshots_cannot_overwrite_updates_or_resurrect_deletions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jar.json");
+        let url = make_url("https://example.com/");
+        let mut initial = CookieJar::load(&path).unwrap();
+        initial.merge(Cookie::parse("sid=old; Path=/").unwrap().into_owned(), &url);
+        initial.persist().unwrap();
+        for update in ["sid=new; Path=/", "sid=; Path=/; Max-Age=0"] {
+            let mut stale = CookieJar::load(&path).unwrap();
+            let untouched = CookieJar::load(&path).unwrap();
+            let mut fresh = CookieJar::load(&path).unwrap();
+            fresh.merge(Cookie::parse(update).unwrap().into_owned(), &url);
+            fresh.persist().unwrap();
+            stale.merge(
+                Cookie::parse("other=value; Path=/").unwrap().into_owned(),
+                &url,
+            );
+            stale.persist().unwrap();
+            untouched.persist().unwrap();
+            let jar = CookieJar::load(&path).unwrap();
+            let cookies = jar.applicable_cookies(&url);
+            let sid = cookies.iter().find(|cookie| cookie.name() == "sid");
+            assert_eq!(
+                sid.map(|cookie| cookie.value()),
+                if update.contains("Max-Age") {
+                    None
+                } else {
+                    Some("new")
+                }
+            );
+            assert!(cookies.iter().any(|cookie| cookie.name() == "other"));
+        }
+    }
+
+    #[test]
+    fn replayed_cookies_keep_host_only_scope_expiry_and_same_site() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = make_url("https://example.com/");
+        let mut jar = CookieJar::load(dir.path().join("jar.json")).unwrap();
+        for line in [
+            "host=1; Path=/; Max-Age=3600; SameSite=Strict",
+            "wide=1; Domain=example.com; Path=/",
+        ] {
+            assert!(jar.merge(Cookie::parse(line).unwrap().into_owned(), &url));
+        }
+        let cookies = jar.applicable_cookies(&url);
+        let host = cookies.iter().find(|c| c.name() == "host").unwrap();
+        assert_eq!(host.domain(), None);
+        assert_eq!(host.same_site(), Some(SameSite::Strict));
+        assert!(matches!(host.expires(), Some(Expiration::DateTime(_))));
+        assert!(jar.holds_unchanged(host, &url));
+        let wide = cookies.iter().find(|c| c.name() == "wide").unwrap();
+        assert_eq!(wide.domain(), Some("example.com"));
+        assert_eq!(wide.expires(), None);
+    }
+
+    #[test]
+    fn domain_case_does_not_create_a_second_cookie_identity_including_legacy_jars() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jar.json");
+        std::fs::write(
+            &path,
+            br#"[{"name":"sid","value":"legacy","domain":"EXAMPLE.COM","path":"/"}]"#,
+        )
+        .unwrap();
+        let url = make_url("https://example.com/");
+        let mut jar = CookieJar::load(&path).unwrap();
+        for value in [
+            "sid=new; Domain=example.com; Path=/",
+            "sid=latest; Domain=EXAMPLE.COM; Path=/",
+        ] {
+            assert!(jar.merge(Cookie::parse(value).unwrap().into_owned(), &url));
+        }
+        jar.persist().unwrap();
+        let jar = CookieJar::load(&path).unwrap();
+        let cookies = jar.applicable_cookies(&url);
+        assert_eq!(cookies.len(), 1);
+        assert_eq!(cookies[0].value(), "latest");
+        assert_eq!(cookies[0].domain(), Some("example.com"));
+    }
+
+    #[test]
+    fn invalid_cookie_paths_use_the_request_directory_and_stay_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = make_url("https://example.com/account/login");
+        for (index, attribute) in ["Path=relative", "Path="].into_iter().enumerate() {
+            let mut jar = CookieJar::load(dir.path().join(format!("jar-{index}.json"))).unwrap();
+            assert!(
+                jar.merge(
+                    Cookie::parse(format!("sid=value; {attribute}"))
+                        .unwrap()
+                        .into_owned(),
+                    &url
+                )
+            );
+            jar.persist().unwrap();
+            let jar = CookieJar::load(dir.path().join(format!("jar-{index}.json"))).unwrap();
+            assert_eq!(jar.applicable_cookies(&url)[0].path(), Some("/account"));
+            assert!(
+                jar.applicable_cookies(&make_url("https://example.com/account/home"))
+                    .len()
+                    == 1
+            );
+            assert!(
+                jar.applicable_cookies(&make_url("https://example.com/other"))
+                    .is_empty()
+            );
+            assert!(
+                jar.applicable_cookies(&make_url("https://example.com/accounting"))
+                    .is_empty()
+            );
+        }
     }
 
     #[test]

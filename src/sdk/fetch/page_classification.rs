@@ -11,42 +11,63 @@ pub(crate) struct PageClassification {
     pub(crate) detail: String,
 }
 
+struct DocumentCopy {
+    title: String,
+    text: String,
+}
+
 /// Classify well-known security challenge / bot-wall HTML. The detector is
-/// intentionally conservative: it looks for provider-specific markers or
-/// several generic challenge terms before labelling content unverifiable.
+/// intentionally conservative: provider markers need page-level challenge
+/// copy before labelling content unverifiable.
 pub(crate) fn classify(
     html: Option<&str>,
     text: Option<&str>,
     title: Option<&str>,
 ) -> Option<PageClassification> {
-    let mut haystack = String::new();
-    if let Some(title) = title {
-        haystack.push_str(title);
-        haystack.push('\n');
-    }
-    if let Some(text) = text {
-        haystack.push_str(text);
-        haystack.push('\n');
-    }
-    if let Some(html) = html {
-        haystack.push_str(html);
-    }
-    classify_text(&haystack)
-}
-
-fn classify_text(raw: &str) -> Option<PageClassification> {
-    let lower = raw.to_ascii_lowercase();
-    let cloudflare_marker = lower.contains("cloudflare")
-        || lower.contains("_cf_chl")
-        || lower.contains("cf-chl")
-        || lower.contains("challenges.cloudflare.com");
-    let turnstile_marker =
-        lower.contains("cf-turnstile") || (lower.contains("turnstile") && cloudflare_marker);
-    let checking_browser = lower.contains("checking your browser")
-        || lower.contains("just a moment")
-        || lower.contains("verify you are human")
-        || lower.contains("review the security of your connection");
-    if turnstile_marker || (cloudflare_marker && checking_browser) {
+    let html = html.unwrap_or_default().to_ascii_lowercase();
+    // Provider code can belong to a form or chat widget. Only document copy
+    // (never script bodies or attributes) is evidence that it blocks the page.
+    let document = (text.is_none() || title.is_none()).then(|| html_copy(&html));
+    let copy = text
+        .unwrap_or_else(|| document.as_ref().map_or("", |document| &document.text))
+        .to_ascii_lowercase();
+    let title = title
+        .unwrap_or_else(|| document.as_ref().map_or("", |document| &document.title))
+        .to_ascii_lowercase();
+    let cloudflare_marker = html.contains("cloudflare")
+        || html.contains("_cf_chl")
+        || html.contains("cf-chl")
+        || html.contains("cf-turnstile");
+    let challenge_phrases = [
+        "checking your browser",
+        "just a moment",
+        "verify you are human",
+        "verifying you are human",
+        "review the security of your connection",
+    ];
+    let challenge_copy = |value: &str| {
+        challenge_phrases
+            .iter()
+            .any(|phrase| value.contains(phrase))
+    };
+    let challenge_document = copy.chars().count() <= 1200
+        && challenge_copy(&copy)
+        && (challenge_phrases
+            .iter()
+            .any(|phrase| copy.trim_start().starts_with(phrase))
+            || html.contains("_cf_chl")
+            || html.contains("cf-chl"));
+    // Some providers omit vendor markers entirely. Require the distinctive
+    // short document introduction, rather than matching embedded widget copy.
+    let browser_check_document = copy.chars().count() <= 1200
+        && copy.trim_start().starts_with("hang tight")
+        && copy.contains("we are checking your browser");
+    // A document title or short challenge document supplies page-level
+    // evidence. A verification prompt embedded in substantial target content
+    // does not make the whole document a challenge.
+    if browser_check_document
+        || (cloudflare_marker && (challenge_copy(&title) || challenge_document))
+    {
         return Some(PageClassification {
             kind: PageKind::BotWallDetected,
             code: ErrorCode::BotWallDetected,
@@ -54,12 +75,13 @@ fn classify_text(raw: &str) -> Option<PageClassification> {
         });
     }
 
+    let lower = format!("{title}\n{copy}");
     let access_denied = lower.contains("access denied")
         || lower.contains("request blocked")
         || lower.contains("you have been blocked")
         || lower.contains("unusual traffic");
     let challenge_marker = lower.contains("captcha")
-        || lower.contains("challenge-platform")
+        || html.contains("challenge-platform")
         || lower.contains("security check")
         || lower.contains("verify that you are not a robot");
     if access_denied && (challenge_marker || lower.contains("reference #")) {
@@ -71,6 +93,40 @@ fn classify_text(raw: &str) -> Option<PageClassification> {
     }
 
     None
+}
+
+/// HTTP-path copy without script bodies, attributes, comments, or explicitly
+/// hidden subtrees. Browser classification uses rendered innerText instead.
+fn html_copy(html: &str) -> DocumentCopy {
+    let document = scraper::Html::parse_document(html);
+    let mut title = String::new();
+    let mut copy = String::new();
+    for node in document.tree.nodes() {
+        let Some(text) = node.value().as_text() else {
+            continue;
+        };
+        let mut in_title = false;
+        let hidden = node.ancestors().any(|ancestor| {
+            let Some(element) = ancestor.value().as_element() else {
+                return false;
+            };
+            in_title |= element.name() == "title";
+            matches!(element.name(), "script" | "style" | "template" | "noscript")
+                || element.attr("hidden").is_some()
+                || element.attr("aria-hidden") == Some("true")
+        });
+        if hidden {
+            continue;
+        }
+        let target = if in_title { &mut title } else { &mut copy };
+        target.push_str(text);
+        target.push(' ');
+    }
+    let normalize = |value: String| value.split_whitespace().collect::<Vec<_>>().join(" ");
+    DocumentCopy {
+        title: normalize(title),
+        text: normalize(copy),
+    }
 }
 
 fn challenge_detail(label: &str) -> String {
@@ -86,6 +142,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn detects_short_browser_check_without_vendor_markers() {
+        let html =
+            "<title>Hang tight!</title><h1>Hang tight!</h1><p>We are checking your browser</p>";
+        assert_eq!(
+            classify(Some(html), None, None).unwrap().kind,
+            PageKind::BotWallDetected
+        );
+        assert!(
+            classify(
+                Some(
+                    "<h1>Hosting prices</h1><aside>Hang tight! We are checking your browser</aside>"
+                ),
+                None,
+                None
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn detects_cloudflare_turnstile() {
         let html = r#"<!doctype html><title>Just a moment...</title>
           <div class="cf-turnstile" data-sitekey="x"></div>
@@ -93,6 +169,44 @@ mod tests {
         let class = classify(Some(html), None, None).expect("classify");
         assert_eq!(class.kind, PageKind::BotWallDetected);
         assert_eq!(class.code, ErrorCode::BotWallDetected);
+    }
+
+    #[test]
+    fn embedded_turnstile_is_not_a_document_wall() {
+        let html = r#"<title>Hosting plans</title><main><h1>Plans from €4/month</h1></main>
+            <aside>Contact support: verify you are human <div class="cf-turnstile"></div></aside>
+            <script src="https://challenges.cloudflare.com/turnstile/v0/api.js"></script>
+            <script>const message = "just a moment: checking your browser";</script>"#;
+        assert!(classify(Some(html), None, None).is_none());
+        assert!(
+            classify(
+                Some(html),
+                Some("Plans from €4/month Contact support: verify you are human"),
+                Some("Hosting plans")
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn provider_assets_and_script_copy_alone_are_not_a_wall() {
+        let html = r#"<script src="https://challenges.cloudflare.com/turnstile/v0/api.js"></script>
+            <script>const message = "just a moment: checking your browser";</script>
+            <!-- verify you are human --><h1 data-message="verify you are human">Plans</h1>"#;
+        assert!(classify(Some(html), None, None).is_none());
+    }
+
+    #[test]
+    fn detects_challenge_copy_without_a_turnstile_widget() {
+        let html =
+            "<script src='/cdn-cgi/challenge-platform/scripts/jsd/main.js'></script>Cloudflare";
+        let class = classify(
+            Some(html),
+            Some("Verifying you are human. This may take a few seconds."),
+            Some("Security check"),
+        )
+        .expect("classify");
+        assert_eq!(class.kind, PageKind::BotWallDetected);
     }
 
     #[test]

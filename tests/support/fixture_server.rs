@@ -85,6 +85,26 @@ pub const CLOUDFLARE_TURNSTILE_HTML: &str = "<!doctype html><html><head>\
      <script src=\"https://challenges.cloudflare.com/turnstile/v0/api.js\"></script>\
      </body></html>";
 
+// Stable content with an embedded verification widget and continuous visual
+// churn. No external script load is needed to exercise provider markers.
+pub const EMBEDDED_TURNSTILE_HTML: &str = r##"<!doctype html><html><head>
+  <title>Hosting plans</title><style id="animated-style"></style></head><body>
+  <main><h1>Plans from €4/month</h1><a href="/plain.html">Plan details</a></main>
+  <aside>Contact support: verify you are human <div class="cf-turnstile"></div></aside>
+  <form action="/submit"><input name="action"><button>Send message</button></form>
+  <svg xmlns="http://www.w3.org/2000/svg"><a href="/plain.html" role="link"><text y="20">Vector Docs</text></a>
+    <use href="#symbol" style="cursor:pointer"></use></svg>
+  <script>
+    const provider = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
+    const prompt = 'just a moment: checking your browser';
+    let tick = 0;
+    setInterval(() => {
+      document.querySelector('main').style.transform = `translateX(${++tick % 2}px)`;
+      document.querySelector('main').className = `slide-${tick}`;
+      document.querySelector('#animated-style').textContent = `main {opacity: ${tick % 2 ? 1 : 0.99}}`;
+    }, 40);
+  </script></body></html>"##;
+
 pub const INTERACTIVE_HTML: &str = "<!doctype html><html><body>\
      <a id=\"docs\" href=\"/plain.html\">Docs</a>\
      <form action=\"/submit\"><label for=\"q\">Query</label><input id=\"q\" name=\"q\" value=\"secret\">\
@@ -215,6 +235,7 @@ impl Fixture {
 ///   - `/observation-truncated.html` → large observation cap fixture
 ///   - `/404` → 404 with body "missing"
 ///   - `/redirect` → 302 to `/plain.html`
+///   - `/login-redirect` → 302 to `/echo-cookie`, setting `afhttp_login`
 ///   - `/sse` → text/event-stream with two events
 ///   - `/download.bin` → attachment response for browser download capture
 pub async fn spawn() -> Fixture {
@@ -230,8 +251,33 @@ pub async fn spawn() -> Fixture {
         .route("/xhr.html", get(xhr_html))
         .route("/delayed-xhr.html", get(delayed_xhr_html))
         .route("/never-xhr.html", get(never_xhr_html))
+        .route("/never-frame.html", get(|| async {
+            ([(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+             "<!doctype html><html><body><h1>Ready content with a pending subframe</h1><iframe src='/never.json'></iframe></body></html>")
+        }))
         .route("/empty.html", get(empty_html))
         .route("/cloudflare-turnstile.html", get(cloudflare_turnstile_html))
+        .route("/browser-check-403.html", get(|| async {
+            (StatusCode::FORBIDDEN, [(header::CONTENT_TYPE, "text/html")],
+             "<!doctype html><title>Hang tight!</title><h1>Hang tight!</h1><p>We are checking your browser</p>")
+        }))
+        .route("/unknown-403.html", get(|| async {
+            (StatusCode::FORBIDDEN, [(header::CONTENT_TYPE, "text/html")],
+             "<!doctype html><title>Unavailable</title><h1>Please return later</h1>")
+        }))
+        .route("/unknown-content.html", get(|| async {
+            ([(header::CONTENT_TYPE, "text/html")],
+             "<!doctype html><title>Loading</title><body><main id='loading'></main></body>")
+        }))
+        .route(
+            "/embedded-turnstile.html",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                    EMBEDDED_TURNSTILE_HTML,
+                )
+            }),
+        )
         .route("/identity.html", get(identity_html))
         .route("/headers.json", get(headers_json))
         .route("/interactive.html", get(interactive_html))
@@ -248,8 +294,41 @@ pub async fn spawn() -> Fixture {
         .route("/delayed-data.json", get(delayed_data_json))
         .route("/slow.html", get(slow_html))
         .route("/never.json", get(never_json))
+        .route("/rating-pending.html", get(|| async {
+            ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], "<!doctype html><html><body><main id='prices'><h1>Plans</h1><p>€4/month</p></main><aside><iframe src='/never.json?token_secret=diagnostic-canary&amp;safe=ok'></iframe></aside></body></html>")
+        }))
+        .route("/price-pending.html", get(|| async {
+            ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], "<!doctype html><html><body><main id='prices'>Loading prices</main><script>fetch('/never.json');</script></body></html>")
+        }))
+        .route("/price-frame-pending.html", get(|| async {
+            ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], "<!doctype html><html><body><main id='prices'><h1>Plans</h1><iframe src='/never.json'></iframe></main></body></html>")
+        }))
+        .route("/price-shadow-frame-pending.html", get(|| async {
+            ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], "<!doctype html><html><body><main id='prices'><h1>Plans</h1><div id='host'></div></main><script>document.querySelector('#host').attachShadow({mode:'open'}).innerHTML=\"<iframe src='/never.json'></iframe>\";</script></body></html>")
+        }))
+        .route("/price-frame.html", get(|| async {
+            ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], "<!doctype html><html><body><main id='prices'><iframe src='/price-inner.html'></iframe></main><script>const cross=new URL(location.href).searchParams.get('cross');if(cross)document.querySelector('iframe').src=cross;</script></body></html>")
+        }))
+        .route("/price-inner.html", get(|| async {
+            ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], "<!doctype html><html><body><p>€4/month in frame</p></body></html>")
+        }))
+        .route("/price-stream.html", get(|| async {
+            use futures::StreamExt;
+            let prefix = futures::stream::once(async {
+                Ok::<_, std::convert::Infallible>("<!doctype html><html><body><p>€4/month before document completion</p>")
+            });
+            let stream = prefix.chain(futures::stream::pending());
+            ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], axum::body::Body::from_stream(stream))
+        }))
+        .route("/price-changing.html", get(|| async {
+            ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], "<!doctype html><html><body><main id='prices'>€4/month</main><script>let tick=0;setInterval(()=>document.querySelector('main').textContent='€'+(++tick)+'/month',40);</script></body></html>")
+        }))
+        .route("/price-delayed.html", get(|| async {
+            ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], "<!doctype html><html><body><main id='prices' aria-busy='true'>Loading prices</main><script>fetch('/delayed-data.json').then(r=>r.json()).then(()=>{const el=document.querySelector('main');el.textContent='€4/month ready';el.removeAttribute('aria-busy');});</script></body></html>")
+        }))
         .route("/404", get(four_oh_four))
         .route("/redirect", get(redirect))
+        .route("/login-redirect", get(login_redirect))
         .route("/download.bin", get(download_bin))
         .route("/unfinished-download.bin", get(unfinished_download_bin))
         .route("/sse", get(sse));
@@ -536,6 +615,18 @@ async fn redirect() -> Response {
     (
         StatusCode::FOUND,
         [(header::LOCATION, "/plain.html")],
+        "redirecting",
+    )
+        .into_response()
+}
+
+async fn login_redirect() -> Response {
+    (
+        StatusCode::FOUND,
+        [
+            (header::LOCATION, "/echo-cookie"),
+            (header::SET_COOKIE, "afhttp_login=fresh; Path=/"),
+        ],
         "redirecting",
     )
         .into_response()

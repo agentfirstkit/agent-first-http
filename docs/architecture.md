@@ -45,12 +45,12 @@ The agent decides what a page means and what to do next. Mechanical, well-define
 
 ## 3. Roles
 
-The networked runtime has two roles. Every command that talks to a running browser-host is one of these roles.
+Every command that talks to a running browser-host plays one of these roles.
 
 | Role | Responsibility |
 | --- | --- |
 | **browser-host** | Runs Chromium (or compatible). Holds an on-disk profile. Exposes a CDP endpoint. Optionally serves real-display takeover. |
-| **agent-driver** | A CDP client. Issues commands to a browser-host endpoint. Writes artifacts to its own local disk. Comes in two flavors: programmatic (`afhttp fetch`, `afhttp cdp`, or the SDK from Rust code) and interactive (real-display takeover served by the host, opened in any browser). |
+| **agent-driver** | A CDP client. Issues commands to a browser-host endpoint. Writes artifacts to its own local disk. It is either programmatic (`afhttp fetch`, `afhttp cdp`, or the SDK from Rust code) or interactive (real-display takeover served by the host, opened in any browser). |
 
 There is no third "operator UI" role. Interactive operation is a CDP client served by the browser-host, opened by a human in a normal browser. The host does not know who its CDP clients are; that is not its concern.
 
@@ -62,13 +62,11 @@ Connectivity is not `afhttp`'s problem. The tool assumes any two `afhttp` instan
 
 Process lifecycle is also not `afhttp`'s problem. `afhttp host` is a long-running foreground process. The user starts it however suits them and stops it with a normal signal; `afhttp` does not fork, does not write pidfiles, and does not maintain a registry of running hosts. That said, because the host runs a real browser and holds live sessions, the **recommended environment for the host is a container** — the container is the isolation boundary, where the image disables Chromium's own sandbox via `AFHTTP_NO_SANDBOX` (afhttp keeps the sandbox on when run natively). This spore ships one at `container/docker/`. See [deployment.md](deployment.md). The driver commands stay a thin client and run anywhere.
 
-These two non-concerns mean `afhttp` only ever sees endpoint URLs. The CLI and SDK take an endpoint and speak CDP. Whether the endpoint is `unix:/run/afhttp/work.sock`, `ws://localhost:9222`, or `ws://browser.mesh.internal:9222` does not affect the protocol layer.
+These non-concerns mean `afhttp` only ever sees endpoint URLs. The CLI and SDK take an endpoint and speak CDP. Whether the endpoint is `unix:/run/afhttp/work.sock`, `ws://localhost:9222`, or `ws://browser.mesh.internal:9222` does not affect the protocol layer.
 
 ## 5. CLI Surface
 
-The CLI has 12 commands and no stdin protocol. The command set is: `host`,
-`fetch`, `upload`, `cdp`, `panel`, `ui`, `health`, `capabilities`, `profile`,
-`tabs`, `skill`, and `container`.
+The CLI has no stdin protocol. Its commands are:
 
 | Command | Role | Purpose |
 | --- | --- | --- |
@@ -121,7 +119,9 @@ These hold across every command (the per-flag reference is generated into
   lives in a named volume no path on this machine addresses.
   Driver commands fall back to `AFHTTP_TOKEN_SECRET`, then to the discovered
   host's own token; an explicit source always wins, including over a discovered
-  host. `afhttp host` takes the same sources for the token it will *require*,
+  host. A host's rejection of a token taken from `AFHTTP_TOKEN_SECRET` names
+  that variable, so a stale value left in the environment is visible as such.
+  `afhttp host` takes the same sources for the token it will *require*,
   with no fallback. A resolved token is an AFDATA `SecretString`: it reaches the
   `Authorization` header through `expose_secret` and renders as `***`
   everywhere else, including a `{:?}` on whatever holds it. Human takeover URLs
@@ -135,10 +135,10 @@ These hold across every command (the per-flag reference is generated into
   host` is the one command whose output is a stream rather than a single
   terminal event, so it defaults to `--output-to stdout`.
 - The CLI is compiled from a closed `cli-spec-v1` registry. An invocation runs
-  only when it matches exactly one registered shape, so mixes that used to fail
-  at runtime — `--takeover` with `--render none`, `--data` with `--form`,
-  `container logs --follow` without `--raw`, `--takeover-provider kasmvnc` with
-  `--display headless` — are now rejected by the parser with
+  only when it matches exactly one registered shape, so mixes such as
+  `--takeover` with `--render none`, `--data` with `--form`,
+  `container logs --follow` without `--raw`, or `--takeover-provider kasmvnc`
+  with `--display headless` are rejected by the parser with
   `cli_unregistered_combination` before any work starts.
 
 ### `afhttp host`
@@ -154,7 +154,7 @@ afhttp host
   --takeover-quality-percent <0-100>
   --browser auto|chromium|chrome|fingerprint-chromium|edge|brave|lightpanda|camoufox
   --browser-bin <path>
-  --token-secret <string>
+  --token-secret <source>         # env:NAME, file:PATH#DOT_PATH, container:NAME, literal:TOKEN
   --no-health
   --health-public off|minimal
   --proxy-url <url>
@@ -166,54 +166,30 @@ afhttp host
 
 Lifecycle: when `--takeover-provider <provider>` (e.g. `--takeover-provider kasmvnc`) is set, starts that display provider first, waits for the X display and localhost web client, launches the browser headful on that display, then opens the listener and serves CDP plus host HTTP routes (`/takeover/panel`, `/health`, `/capabilities`). With `--takeover-provider off` (the default for the raw `host` binary), starts the browser directly and serves no takeover surface. On exit, terminates browser/display subprocesses, removes the profile dir if ephemeral, releases the listener.
 
-Idle-tab reclamation: drivers close the targets they open, but a driver killed mid-fetch or an agent that walks away leaves tabs behind — and the host launches its browser with background throttling disabled (a live fetch needs that), so a leaked tab keeps burning CPU. The host is the only party that sees every target, so it sweeps them: once the host has been idle for `--tab-idle-timeout-s` (default 900, `0` disables) — no `/cdp` proxy client connected, no takeover credential live — leftover `http(s)` page targets are closed and a `tab_reaped` process event is emitted per tab. The connection count covers every driver (all CDP traffic flows through the proxy); credential liveness covers the human on the real display, who drives the browser without a CDP connection. Any connection or credential resets every tab's idle clock, so activity grants the whole browser a fresh timeout. The backend's per-target `attached` flag is deliberately not the signal: a chromium-family host's own launcher keeps every page attached, so it says nothing about drivers. `about:blank` and browser-internal pages are never reaped, and a sweep always leaves at least one page target so a headful browser keeps its window. A driver that finds its long-lived `--tab` gone after sitting idle past the timeout should treat that as the host reclaiming an unowned tab, not a crash.
+Idle-tab reclamation: drivers close the targets they open, but a driver killed mid-fetch or an agent that walks away leaves tabs behind — and the host launches its browser with background throttling disabled (a live fetch needs that), so a leaked tab keeps burning CPU. The host is the only party that sees every target, so it sweeps them: once the host has been idle for `--tab-idle-timeout-s` (default 900, `0` disables) — no `/cdp` proxy client connected, no takeover credential live — leftover `http(s)` page targets are closed and a `tab_reaped` process event is emitted per tab. The connection count covers every driver (all CDP traffic flows through the proxy); credential liveness covers the human on the real display, who drives the browser without a CDP connection. A live credential resets every tab's idle clock, and a connected driver resets the clock of every tab the host cannot attribute, so activity grants a fresh timeout to whatever it might be touching. The exception is a tab the proxy watched one connection create and never close: once that connection has ended the tab is an orphan — a killed fetch, a driver that crashed — and no driver will ever close it, so its clock keeps running while other drivers work (only a live credential still holds it, since a human may be on their way to exactly that tab). A connection that attaches to an orphan adopts it. The backend's per-target `attached` flag is deliberately not the signal: a chromium-family host's own launcher keeps every page attached, so it says nothing about drivers. `about:blank` and browser-internal pages are never reaped, and a sweep always leaves at least one page target so a headful browser keeps its window. A driver that finds its long-lived `--tab` gone after sitting idle past the timeout should treat that as the host reclaiming an unowned tab, not a crash.
 
 ### `afhttp fetch`
 
 One-shot URL acquisition. With `--endpoint-url`, it drives an existing host. Without `--endpoint-url`, `--render none` uses a lightweight reqwest HTTP client and never starts a browser; `--render auto` tries that HTTP path first and lazily starts an inline ephemeral host only when escalation is needed; `--render always` starts the inline host immediately.
 
-```text
-afhttp fetch <url>
-  --endpoint-url <url>
-  --token-secret <string>
-  --render none|auto|always
-  --tab new|<id>
-  --takeover                 # prepare the tab for human takeover (see below)
-  --wait auto|load|idle|selector:<css>|selector-visible:<css>|ms:<n>
-  --method GET|POST|PUT|PATCH|DELETE|...
-  --data <string|@file>
-  --form name=value
-  --header NAME:VALUE
-  --cookie 'name=value[; Path=/; Domain=...; Secure; HttpOnly; SameSite=Lax]'
-  --user-agent <string>
-  --evaluate-after-wait <js>
-  --want body|rendered_html|text|content|content_json|screenshot|network|console|observation|storage   (repeatable)
-  --network-bodies off|xhr|all
-  --network-body-max-bytes <n>
-  --readiness-idle-ms <n>
-  --readiness-stable-ms <n>
-  --readiness-min-text-bytes <n>
-  --no-network-redact
-  --capture-ws
-  --capture-sse
-  --out <dir>
-  --cookie-jar <path>
-  --no-cookie-jar
-  --retry <N>
-  --backoff-ms <ms>
-  --proxy-url <url>
-  --ca-cert <path>
-  --tls-insecure
-  --timeout-ms <ms>
-```
+The flags that shape the architecture are `--endpoint-url` (which host, or none
+for inline), `--token-secret` (a token *source*, as above), `--render
+none|auto|always`, `--tab new|<id>`, `--takeover`, `--wait`, and the repeatable
+`--want <artifact>`. The full flag list is generated into [cli.md](cli.md) and
+printed by `afhttp fetch --help`.
+
+Browser `auto` and `selector-stable` results also carry optional `readiness`,
+separating root-document transport, caller-scoped target stability, and ancillary
+frame completion. Raw full-page signals remain in `trace`. See
+[readiness](readiness.md) for the complete contract.
 
 Output: one JSON event on the selected output stream. Successful fetches include `status`, `final_url`, `tab_id`, top-level `*_file` artifact paths, `trace` (render decision, escalation reason, wait/readiness signals, phase timings, cookie-jar path/warnings, sensitive-capture flags), and `warnings` (for non-fatal artifact failures). Fetch execution failures use the standard error envelope plus the same `trace` shape. `--no-network-redact`, `--capture-ws`, and `--capture-sse` can expose tokens or PII in artifacts and are reflected in `trace.sensitive_capture`.
 
-Custom request options are applied before acquisition, not silently ignored. On the HTTP fast path, headers, user-agent, and applicable cookies are attached to the per-request `reqwest` request. Secure cookies are skipped for `http://` URLs rather than failing the fetch, and host-only cookies match only the exact origin host. On the browser path, ordinary headers use `Network.setExtraHTTPHeaders`, user-agent uses `Network.setUserAgentOverride`, and cookies are installed through CDP before `Page.navigate`.
+Custom request options are applied before acquisition, not silently ignored. On the HTTP fast path, headers, user-agent, and applicable cookies are attached to the per-request `reqwest` request. Secure cookies are skipped for `http://` URLs rather than failing the fetch, and host-only cookies match only the exact origin host. Redirects carry no `Referer`, so a credential in the query of one hop never reaches the origin the next hop names, and a caller's own `Cookie` header goes out with the jar's applicable cookies added to it, the caller's value winning on a shared name. On the browser path, ordinary headers use `Network.setExtraHTTPHeaders`, user-agent uses `Network.setUserAgentOverride`, and cookies are installed through CDP before `Page.navigate`.
 
 `--evaluate-after-wait` executes JavaScript after the configured wait condition and before artifact capture. It only works when the final path is browser-backed; it does not by itself trigger `--render auto` escalation.
 
-`--takeover` is the human-takeover entry point. It requires a running takeover-ready host and a browser render (`--render auto` or `always`, never `none`). When `--endpoint-url` / `AFHTTP_ENDPOINT_URL` is omitted, the driver auto-discovers the standard local `afhttp-host` container and reads its token; it does not auto-create containers. It opens or reuses a persistent tab (`--tab`) and navigates it. If `--profile` is omitted, it switches the host to the URL's registrable-domain profile (e.g. `contabo.com`) before opening the tab. If the warmed profile already reaches the target, it returns the captured content with no `next_action` — and closes the tab it opened, because no human is coming to it. Only a detected wall holds the tab: the fetch then returns `next_action` with `kind: "human_takeover"`, a complete short-lived `takeover_url_secret` (the real-display capability URL a human opens to clear a login/captcha/2FA wall), its expiry metadata, and a `recommended_command` that re-fetches the same `--tab` once the human is past the wall. When that re-fetch comes back clean, it closes the tab, completing the loop; if it still hits the wall, the tab stays for another round. A takeover tab therefore lives exactly as long as a human is expected at it, and `tab_id` on a fetch result always names a tab that is still open.
+`--takeover` is the human-takeover entry point. It requires a running takeover-ready host (auto-discovered for the standard local container), and, without `--profile`, switches it to a persistent profile named after the URL's registrable domain. Reclaiming a takeover tab requires affirmative capture evidence; absence of a detected wall is insufficient. HTTP errors, unknown/incomplete content and fetch failures retain the tab for review. A review action carries a short-lived `takeover_url_secret` when live takeover is available, plus a command to re-fetch the same `--tab`. A failed handoff keeps the captured result with a warning and no panel URL. Completed takeover capture reclaims the work tab while protecting the host's final browser window. See [takeover reliability](takeover-reliability.md) for exact conditions and health/status fields.
 
 ### Other endpoint commands
 
@@ -251,6 +227,21 @@ it may return only `{ "status": "ok" }` / `{ "status": "starting" }` /
 `{ "status": "degraded" }` and never exposes profile names, browser versions,
 paths, tabs, or network policy.
 
+A host without a token binds only to loopback or a `unix:` socket, but every web
+page open on the same machine can reach loopback too, and browsers apply no
+same-origin rule to a WebSocket. So a token-less TCP host refuses any request
+whose `Origin` header names a different origin, and any request whose `Host`
+header is not a loopback name (which is how a DNS-rebound name arrives). A page
+can still send a request without an `Origin` — a navigation, an iframe, a no-cors
+subresource — so the host also refuses a request whose `Sec-Fetch-Site` names
+another site unless its `Sec-Fetch-Dest` is a top-level `document`; that is what
+stops a page from framing a takeover panel, while an AFUI window opened from its
+`file://` launch page, or a followed link, still reaches it. A page on this machine therefore cannot open
+`/cdp` or call any other route of a token-less host. afhttp's own CLI and SDK
+send neither header, and a takeover panel talking to its own origin is allowed.
+The loopback rule is enforced by the listener itself, not only by the CLI. Requests over a `unix:` socket are exempt,
+since no web page can reach one.
+
 `/health` response shape:
 
 ```json
@@ -281,7 +272,7 @@ paths, tabs, or network policy.
     "console": {"supported": true},
     "observation": {"supported": true, "source": "accessibility+dom"}
   },
-  "wait_modes": ["auto", "load", "idle", "selector", "ms"],
+  "wait_modes": ["auto", "load", "idle", "selector", "selector_visible", "selector_stable", "ms"],
   "takeover": {
     "backend_capable": true,
     "supported": true,
@@ -351,7 +342,7 @@ Profile lifecycle commands:
 
 ## 8. Artifacts
 
-Ten artifact tokens are identified by stable names. With no explicit `--want`,
+Artifact tokens have stable names. With no explicit `--want`,
 the HTTP fast path captures `body`; when a browser render is actually used,
 afhttp expands to the browser default set (`body`, `rendered_html`, `text`,
 `content`, `content_json`, `screenshot`, `network`, `console`, `observation`).
@@ -447,19 +438,17 @@ all activity when capture is incomplete.
 events and `truncated` when a capture limit is reached. Zero/false values are
 omitted and default to zero/false when reading older artifacts. Collectors
 continue after event loss and stop when their fetch scope is dropped. Readiness
-samples taken after network event loss or a metadata or stream capture limit
-fall back to the idle window: every Network.* event still stamps activity even
-when its request was not retained, so `network_quiet` means "no network event
-for the idle window" rather than "no pending request", and the normal deadline
-still bounds the wait. The trace
-retains the last readiness sample before artifact capture. Loss or truncation
-discovered later appears in warnings and the final summary without rewriting
-that sample. Skipping or truncating response bodies does not change readiness.
-Network warnings also expose incomplete capture when only stream payloads
-were requested.
+samples retain the raw network idle signal after event loss, but the content
+readiness assessment becomes unknown and cannot satisfy a content wait. The
+trace retains the last completed sample before artifact capture. Loss or
+truncation discovered later appears in warnings and the final summary without
+rewriting that sample. Skipping or truncating response bodies does not change
+readiness. Network warnings also expose incomplete capture when no network
+artifact was requested.
 
 Before requesting a network response body, afhttp checks known
-`encodedDataLength` and case-insensitive `Content-Length`. A known size above
+`encodedDataLength`, less the header bytes the response event already counted,
+and case-insensitive `Content-Length`. A known size above
 `--network-body-max-bytes` skips the body request and emits
 `network_body_truncated`. Unknown sizes still use the existing decoded-prefix
 limit. CDP returns a complete JSON response, and a compressed size can be
@@ -482,13 +471,13 @@ The driver-side entry point is `afhttp fetch <url> --takeover` against such a ho
 
 **Knowing when the human is done.** `afhttp panel` and `fetch --takeover` hand back a `takeover_url_secret` and exit; whether anyone opened it, and whether they are finished, is left for the agent to guess. `afhttp ui takeover` is the other half: it holds the session open and returns when it ends. That is a *watch*-shaped session: a VNC canvas has no submit control, so there is nothing to confirm and no typed result to collect. It also accepts `--takeover-url-secret` so it can open a panel an earlier `fetch --takeover` already minted.
 
-There are three deliveries of that one session, because the person is not always at this machine, and the way to them is not always this machine's screen. They are `agent-first-ui`'s three, named with its three words: `--mode window|link|session`. The flag has no default of its own, so an absent one is resolved against `AFUI_DELIVERY` and then a window — which is how a runner that never has a screen says so once, for everything under it, instead of every call site guessing.
+That one session has more than one delivery, because the person is not always at this machine, and the way to them is not always this machine's screen. The deliveries are `agent-first-ui`'s, named with its words: `--mode window|link|session`. The flag has no default of its own, so an absent one is resolved against `AFUI_DELIVERY` and then a window — which is how a runner that never has a screen says so once, for everything under it, instead of every call site guessing.
 
 - **A window here (`--mode window`).** An isolated, disposable-profile window (`agent-first-ui`'s `UiWindow` — never an afhttp-managed profile, so the isolation invariant holds). Closing it is the ending. It needs a display, so it is for an agent running where a person can see a window.
-- **A URL for another device (`--mode link`).** No window opens. AFUI binds the LAN listener and returns its own `link_url`, containing exactly this takeover session behind the standard AFUI shell and proxy. The takeover credential never leaves the process, and the host may stay on loopback. The global AFUI attention policy supplies the idle warning, grace period and expiry; afhttp supplies no second clock.
-- **A listing (`--mode session`).** No window and no address advertised; the panel is announced to `agent-first-ui`'s cross-process session registry, so `afui session list` sees it and `afui session open` or `afui session serve` can reach it later. The registered session has no AFUI deadline and ends when the command is stopped or the upstream host itself goes away.
+- **A URL for another device (`--mode link`).** No window opens. AFUI binds the LAN listener and returns its own `link_url`, containing exactly this takeover session behind the standard AFUI shell and proxy. The takeover credential never leaves the process, and the host may stay on loopback. The global AFUI attention policy supplies the idle warning, grace period and expiry; afhttp supplies no second clock. A link, however, frames the panel on an opaque origin with no browser storage, so the KasmVNC client — the only takeover provider — cannot run there. Use `--mode session` instead, then `afui session serve --session-origin-host` for a person on another device, or `afui session open` on the machine itself.
+- **A listing (`--mode session`).** No window and no address advertised; the panel is announced to `agent-first-ui`'s cross-process session registry, so `afui session list` sees it and `afui session open`, or `afui session serve --session-origin-host` (which gives the panel a real origin the KasmVNC client can run on), can reach it later. The registered session has no AFUI deadline and ends when the command is stopped or the upstream host itself goes away.
 
-All three are executed by `UiDeliveryPlan::start_upstream`, not by afhttp branches that reinterpret AFUI's mode names. The panel is announced in all three — best effort for an already-working window or Link, strict for registered-only Session. Ending the command withdraws the entry, revokes the internal source lease, and a registry reader prunes the entry if the command dies first.
+Every delivery is executed by `UiDeliveryPlan::start_upstream`, not by afhttp branches that reinterpret AFUI's mode names. The panel is announced in every delivery — best effort for an already-working window or Link, strict for registered-only Session. Ending the command withdraws the entry, revokes the internal source lease, and a registry reader prunes the entry if the command dies first.
 
 **Where the panel is served from is the browser's answer, not the listener's.** The display client builds its WebSocket URL from the origin root plus a `path` setting, ignoring the path of the page it is on — so `path` has to name the panel's public prefix. Behind a reverse proxy that prefix is not `/takeover/panel/`, and nothing in the request says what it is (a proxy worth trusting forwards no `Origin`, no `Referer` and no forwarded-prefix header). So the landing page computes it in the browser from `location.pathname`. Delivered directly that produces the same value it always did; delivered under any prefix at all, it produces that prefix.
 
@@ -524,10 +513,10 @@ Sites that specifically block all Chromium-family browsers (rare but real) requi
 
 All error events carry `error.code` (stable enum), `error.message` (human-readable detail), and `error.retryable` (bool). Agents match on `error.code` only — the message is for human logs and may change between versions.
 
-Three categories:
+The codes fall into these categories:
 
-- **Transport / navigation** — `navigation_timeout`, `host_unreachable`, `dns_resolution_failed`, `target_unreachable`, `tls_error`, `tab_crashed`, `browser_launch_failed`. Most are retryable; `tls_error` is not.
-- **Per-artifact/readiness/classification warnings** — `backend_unsupported`, `artifact_capture_failed`, `artifact_capture_timeout`, `network_body_truncated`, `network_not_idle`, `pending_xhr_at_capture`, `artifact_empty`, `artifact_tiny`, `bot_wall_detected`, `security_challenge_detected`, `observation_empty`, `readiness_timeout`. These populate `warnings[]` on an otherwise-successful response; the fetch itself does not fail. Challenge classifications also set `page_kind` and `next_action` so agents do not treat the transport response as verified target content.
+- **Transport / navigation** — `navigation_timeout`, `host_unreachable`, `dns_resolution_failed`, `target_unreachable`, `tls_error`, `browser_launch_failed`, `navigation_stale`. Most are retryable; `tls_error` is not, and neither by default is `navigation_stale` (the navigation never committed, so the capture would show the previous or a blank page).
+- **Per-artifact/readiness/classification warnings** — `backend_unsupported`, `artifact_capture_failed`, `artifact_capture_timeout`, `network_body_truncated`, `network_not_idle`, `pending_xhr_at_capture`, `artifact_empty`, `artifact_tiny`, `bot_wall_detected`, `security_challenge_detected`, `observation_empty`, `readiness_timeout`, `takeover_content_unverified`, `cookie_rejected` (the cookie jar refused a cookie by policy, such as a public-suffix `Domain`). These populate `warnings[]` on an otherwise-successful response; the fetch itself does not fail. Challenge classifications also set `page_kind` and `next_action` so agents do not treat the transport response as verified target content.
 - **Configuration / profile** — `invalid_argument`, `invalid_endpoint`, `render_unavailable`, `profile_*`, `io_error`. Not retryable without fixing the configuration.
 
 The full enum with example `error` strings and per-code agent guidance lives in [reference.md §Error Codes](reference.md#error-codes).
@@ -547,8 +536,10 @@ There is no "lease," "lock," or "active driver" in the protocol. Both clients ca
 The Rust library exposes the same surface as the CLI, in-process. It is **not** an embedded browser engine; it is an SDK that talks to a `browser-host` over CDP/HTTP. Everything that physically requires a Chromium process — launching, active profile locking, and display takeover — stays in `afhttp host`. Local profile lifecycle helpers operate on disk and do not pull browser-launch dependencies into SDK-only consumers.
 
 ```rust
-use afhttp::{Client, RenderMode, Wait, Artifact};
-use afhttp::sdk::{FetchCookie, FetchCookieSameSite};
+use afhttp::Client;
+use afhttp::sdk::fetch::NetworkBodies;
+use afhttp::sdk::{FetchCookie, FetchCookieSameSite, RenderMode, Wait};
+use afhttp::shared::artifacts::Artifact;
 
 let client = Client::connect("ws://chromium-host:9222")?;
 
@@ -602,7 +593,7 @@ let local = Client::inline_ephemeral().await?;
 default  = ["sdk", "cli"]
 sdk      = []                                   # client-side; what library consumers want
 host     = ["dep:chromiumoxide", ...]           # browser-launch deps; only in the bin
-cli      = ["sdk", "host", "dep:psl",
+cli      = ["sdk", "host",
             "agent-first-data/skill-admin",
             "agent-first-data/stream-redirect"] # the afhttp binary
 ```

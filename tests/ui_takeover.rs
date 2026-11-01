@@ -6,9 +6,9 @@
 //! authorizes, that the run ended when that process exited, and that both
 //! emitted events are protocol-valid and carry no credential.
 //!
-//! `AFUI_BROWSER_BINARY` stands in for the browser. The stub records the
-//! `--app=<url>` it was launched with, curls it, records the status, and exits
-//! — which is a person closing the window.
+//! `AFUI_BROWSER_BINARY` stands in for the browser. The stub records the URL
+//! its `--app=file://…` launch page forwards to, curls it, records the status,
+//! and exits — which is a person closing the window.
 
 #![cfg(feature = "cli")]
 #![allow(
@@ -37,14 +37,17 @@ const HOST_TOKEN: &str = "secret";
 /// open, proves the URL is reachable with the credential baked into it, then
 /// exits — the stand-in for the person closing the window.
 ///
-/// `--app=<url>` is how `UiWindow` opens a window rather than a browser, so
+/// `--app=<page>` is how `UiWindow` opens a window rather than a browser, so
 /// reading that argument is also an assertion that a *window* was requested.
+/// The page is a private local file that forwards to the panel URL; the URL
+/// itself must never be an argument, because arguments are world-readable.
 const STUB_BROWSER: &str = r#"#!/bin/sh
 set -eu
 url=""
 for arg in "$@"; do
   case "$arg" in
-    --app=*) url="${arg#--app=}" ;;
+    --app=file://*) url="$(sed -n 's/.*location\.replace("\(.*\)");.*/\1/p' "${arg#--app=file://}")" ;;
+    --app=*) printf 'credential in arguments' > "$AFHTTP_STUB_DIR/url"; exit 1 ;;
   esac
 done
 printf '%s' "$url" > "$AFHTTP_STUB_DIR/url"
@@ -85,8 +88,8 @@ fn drive(args: &[&str], stub_dir: &Path) -> (Vec<Value>, String, String) {
         .env_remove("AFHTTP_TOKEN_SECRET")
         .output()
         .expect("run afhttp ui takeover");
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stdout = String::from_utf8_lossy_owned(output.stdout);
+    let stderr = String::from_utf8_lossy_owned(output.stderr);
     assert!(
         output.status.success(),
         "afhttp ui takeover failed: {stdout}{stderr}"
@@ -402,7 +405,7 @@ async fn a_window_still_opens_when_the_panel_cannot_be_announced() {
         .env_remove("AFHTTP_TOKEN_SECRET")
         .output()
         .expect("run afhttp ui takeover");
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stdout = String::from_utf8_lossy_owned(output.stdout);
     assert!(output.status.success(), "{stdout}");
 
     let events: Vec<Value> = stdout

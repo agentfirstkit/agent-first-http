@@ -3,10 +3,12 @@
 
 use std::time::{Duration, Instant};
 
-use serde_json::Value;
+use super::readiness::Sampler;
+use crate::sdk::fetch::readiness::{Readiness, ReadinessState};
+use serde::Deserialize;
 
 use crate::sdk::cdp::ws_client::Connection;
-use crate::sdk::fetch::artifacts::collectors::{NetworkCollector, NetworkQuietSnapshot};
+use crate::sdk::fetch::artifacts::collectors::NetworkCollector;
 use crate::sdk::fetch::deadline::FetchDeadline;
 use crate::sdk::fetch::wait::Wait;
 use crate::shared::error::{Error, ErrorCode};
@@ -22,6 +24,7 @@ pub(super) struct WaitOutcome {
     pub(super) text_stable: Option<bool>,
     pub(super) capture_reason: String,
     pub(super) readiness_timed_out: bool,
+    pub(super) readiness: Option<Readiness>,
 }
 
 impl WaitOutcome {
@@ -34,22 +37,24 @@ impl WaitOutcome {
             text_stable: None,
             capture_reason: "wait_satisfied".into(),
             readiness_timed_out: false,
+            readiness: None,
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PageMetrics {
-    text_len: usize,
-    text_hash: u32,
-    node_count: usize,
-    html_hash: u32,
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(super) struct PageMetrics {
+    pub(super) text_len: usize,
+    pub(super) text_hash: u32,
+    pub(super) node_count: usize,
+    pub(super) dom_hash: u32,
 }
 
 #[derive(Debug, Clone)]
 struct StabilityTracker {
     last: Option<PageMetrics>,
-    unchanged_since: Instant,
+    dom_unchanged_since: Instant,
+    text_unchanged_since: Instant,
     dom_stable: bool,
     text_stable: bool,
 }
@@ -58,7 +63,8 @@ impl StabilityTracker {
     fn new(now: Instant) -> Self {
         Self {
             last: None,
-            unchanged_since: now,
+            dom_unchanged_since: now,
+            text_unchanged_since: now,
             dom_stable: false,
             text_stable: false,
         }
@@ -66,19 +72,21 @@ impl StabilityTracker {
 
     fn observe(&mut self, metrics: PageMetrics, stable_for: Duration, now: Instant) {
         let same_dom = self.last.as_ref().is_some_and(|last| {
-            last.node_count == metrics.node_count && last.html_hash == metrics.html_hash
+            last.node_count == metrics.node_count && last.dom_hash == metrics.dom_hash
         });
         let same_text = self.last.as_ref().is_some_and(|last| {
             last.text_len == metrics.text_len && last.text_hash == metrics.text_hash
         });
-        if !same_dom || !same_text {
-            self.unchanged_since = now;
-            self.dom_stable = false;
-            self.text_stable = false;
-        } else if now.saturating_duration_since(self.unchanged_since) >= stable_for {
-            self.dom_stable = true;
-            self.text_stable = true;
+        if !same_dom {
+            self.dom_unchanged_since = now;
         }
+        if !same_text {
+            self.text_unchanged_since = now;
+        }
+        self.dom_stable =
+            same_dom && now.saturating_duration_since(self.dom_unchanged_since) >= stable_for;
+        self.text_stable =
+            same_text && now.saturating_duration_since(self.text_unchanged_since) >= stable_for;
         self.last = Some(metrics);
     }
 }
@@ -106,18 +114,7 @@ pub(super) async fn wait_for_condition(
     let deadline = ctx.deadline;
     let sid = session_id.to_string();
     match wait {
-        Wait::Auto => {
-            wait_for_auto_readiness(
-                conn,
-                session_id,
-                ctx.collector,
-                Duration::from_millis(tuning.readiness_idle_ms),
-                Duration::from_millis(tuning.readiness_stable_ms),
-                tuning.timeout,
-                deadline,
-            )
-            .await
-        }
+        Wait::Auto | Wait::SelectorStable(_) => wait_for_readiness(ctx, wait, tuning).await,
         Wait::Load => {
             wait_for_load(
                 conn,
@@ -130,24 +127,7 @@ pub(super) async fn wait_for_condition(
             Ok(WaitOutcome::satisfied(wait, "load"))
         }
         Wait::Idle => {
-            let _ = cdp_send(
-                conn,
-                session_id,
-                "Page.setLifecycleEventsEnabled",
-                &serde_json::json!({"enabled": true}),
-                "wait_readiness",
-                deadline,
-            )
-            .await;
-            conn.wait_event(
-                explicit_wait_budget(deadline.remaining("wait_readiness")?, tuning.timeout),
-                |ev| {
-                    ev.method == "Page.lifecycleEvent"
-                        && ev.params["name"].as_str() == Some("networkIdle")
-                        && ev.session_id.as_deref() == Some(&sid)
-                },
-            )
-            .await?;
+            wait_for_network_idle(conn, session_id, tuning.timeout, deadline).await?;
             Ok(WaitOutcome::satisfied(wait, "network_idle_event"))
         }
         Wait::Selector(sel) => {
@@ -232,6 +212,41 @@ pub(super) async fn wait_for_condition(
     }
 }
 
+/// Wait for the page's `networkIdle` lifecycle event.
+///
+/// The subscription must exist before lifecycle events are enabled: enabling
+/// them makes the browser replay the lifecycle events the page has already
+/// reached, `networkIdle` included, ahead of the command's response. A page
+/// that went idle before this wait began is only ever reported by that replay.
+async fn wait_for_network_idle(
+    conn: &Connection,
+    session_id: &str,
+    requested: Duration,
+    deadline: &FetchDeadline,
+) -> Result<(), Error> {
+    let events = conn.subscribe();
+    let _ = cdp_send(
+        conn,
+        session_id,
+        "Page.setLifecycleEventsEnabled",
+        &serde_json::json!({"enabled": true}),
+        "wait_readiness",
+        deadline,
+    )
+    .await;
+    Connection::wait_event_on(
+        events,
+        explicit_wait_budget(deadline.remaining("wait_readiness")?, requested),
+        |ev| {
+            ev.method == "Page.lifecycleEvent"
+                && ev.params["name"].as_str() == Some("networkIdle")
+                && ev.session_id.as_deref() == Some(session_id)
+        },
+    )
+    .await?;
+    Ok(())
+}
+
 fn explicit_wait_budget(remaining: Duration, requested: Duration) -> Duration {
     remaining
         .min(requested)
@@ -239,56 +254,111 @@ fn explicit_wait_budget(remaining: Duration, requested: Duration) -> Duration {
         .unwrap_or_else(|| remaining.min(requested))
 }
 
-async fn wait_for_auto_readiness(
-    conn: &Connection,
-    session_id: &str,
-    collector: &NetworkCollector,
-    idle_for: Duration,
-    stable_for: Duration,
-    timeout: Duration,
-    deadline: &FetchDeadline,
+async fn wait_for_readiness(
+    ctx: WaitContext<'_>,
+    wait: &Wait,
+    tuning: WaitTuning,
 ) -> Result<WaitOutcome, Error> {
-    let sid = session_id.to_string();
-    let wait_budget = auto_readiness_budget(deadline.remaining("wait_readiness")?, timeout);
-    let wait_deadline = Instant::now() + wait_budget;
-    let _ = wait_for_load(conn, session_id, &sid, wait_budget, deadline).await;
-
-    let mut tracker = StabilityTracker::new(Instant::now());
-    let mut last_network = NetworkQuietSnapshot {
-        quiet: false,
-        idle_for: Duration::ZERO,
-        inflight_total: 0,
-        pending_by_resource_type: Default::default(),
+    let strict = matches!(wait, Wait::Auto);
+    let selector = match wait {
+        Wait::SelectorStable(selector) => selector.as_str(),
+        _ => "body",
     };
-
+    let idle_for = Duration::from_millis(tuning.readiness_idle_ms);
+    let stable_for = Duration::from_millis(tuning.readiness_stable_ms);
+    let wait_deadline = Instant::now()
+        + auto_readiness_budget(ctx.deadline.remaining("wait_readiness")?, tuning.timeout);
+    let mut sampler = Sampler::new(ctx.conn, ctx.session_id, ctx.deadline, selector, strict);
+    let mut body_tracker = StabilityTracker::new(Instant::now());
+    let mut target_tracker = StabilityTracker::new(Instant::now());
+    let mut outcome = WaitOutcome {
+        wait_mode: wait.mode_name().to_string(),
+        wait_satisfied_by: None,
+        network_quiet: Some(false),
+        dom_stable: Some(false),
+        text_stable: Some(false),
+        capture_reason: "readiness_timeout".into(),
+        readiness_timed_out: true,
+        readiness: None,
+    };
     loop {
         let now = Instant::now();
         if now >= wait_deadline {
-            return Ok(WaitOutcome {
-                wait_mode: "auto".into(),
-                wait_satisfied_by: None,
-                network_quiet: Some(last_network.quiet),
-                dom_stable: Some(tracker.dom_stable),
-                text_stable: Some(tracker.text_stable),
-                capture_reason: "readiness_timeout".into(),
-                readiness_timed_out: true,
-            });
+            if outcome.readiness.is_none() {
+                outcome.readiness =
+                    Some(super::readiness::unknown_readiness(ctx.collector, selector).await);
+            }
+            if let Some(readiness) = outcome.readiness.as_mut() {
+                readiness.timed_out = true;
+            }
+            return Ok(outcome);
         }
-
-        last_network = collector.quiet_snapshot(idle_for).await;
-        if let Ok(metrics) = capture_page_metrics(conn, session_id, deadline).await {
-            tracker.observe(metrics, stable_for, now);
-        }
-        if last_network.quiet && tracker.dom_stable && tracker.text_stable {
-            return Ok(WaitOutcome {
-                wait_mode: "auto".into(),
-                wait_satisfied_by: Some("network_quiet_dom_text_stable".into()),
-                network_quiet: Some(true),
-                dom_stable: Some(true),
-                text_stable: Some(true),
-                capture_reason: "wait_satisfied".into(),
-                readiness_timed_out: false,
-            });
+        let budget = wait_deadline
+            .saturating_duration_since(now)
+            .min(Duration::from_millis(500));
+        match tokio::time::timeout(budget, sampler.sample(ctx.collector, idle_for)).await {
+            Ok(Ok(mut sample)) => {
+                body_tracker.observe(sample.body, stable_for, now);
+                if sample.target_eligible {
+                    target_tracker.observe(sample.target, stable_for, now);
+                } else {
+                    target_tracker = StabilityTracker::new(now);
+                }
+                let target_ready = sample.target_eligible
+                    && sample.target_network_quiet
+                    && target_tracker.dom_stable
+                    && target_tracker.text_stable;
+                sample.readiness.target_dom_stable = target_tracker.dom_stable;
+                sample.readiness.target_text_stable = target_tracker.text_stable;
+                if target_ready {
+                    sample.readiness.target_content = ReadinessState::Ready;
+                }
+                let network = ctx.collector.quiet_snapshot(idle_for).await;
+                let satisfied = target_ready && (!strict || network.quiet);
+                sample.readiness.wait_satisfied = satisfied;
+                outcome.network_quiet = Some(network.quiet);
+                outcome.dom_stable = Some(body_tracker.dom_stable);
+                outcome.text_stable = Some(body_tracker.text_stable);
+                outcome.readiness = Some(sample.readiness);
+                if satisfied {
+                    outcome.wait_satisfied_by = Some(
+                        if strict {
+                            "network_quiet_dom_text_stable"
+                        } else {
+                            "selector_stable"
+                        }
+                        .into(),
+                    );
+                    outcome.capture_reason = "wait_satisfied".into();
+                    outcome.readiness_timed_out = false;
+                    return Ok(outcome);
+                }
+            }
+            Ok(Err(error)) if error.error_code == ErrorCode::InvalidArgument => return Err(error),
+            Err(_) if budget < Duration::from_millis(500) => {
+                // The final sample ran out of wait budget, not evidence.
+                // Preserve the last completed sample and its raw signals.
+                if outcome.readiness.is_none() {
+                    outcome.readiness =
+                        Some(super::readiness::unknown_readiness(ctx.collector, selector).await);
+                }
+                if let Some(readiness) = outcome.readiness.as_mut() {
+                    readiness.timed_out = true;
+                }
+                return Ok(outcome);
+            }
+            _ => {
+                body_tracker = StabilityTracker::new(now);
+                target_tracker = StabilityTracker::new(now);
+                outcome.dom_stable = Some(false);
+                outcome.text_stable = Some(false);
+                if let Some(readiness) = outcome.readiness.as_mut() {
+                    readiness.observation_complete = false;
+                    readiness.target_content = ReadinessState::Unknown;
+                    readiness.target_dom_stable = false;
+                    readiness.target_text_stable = false;
+                }
+            }
         }
         sleep_until_or_deadline(wait_deadline, Duration::from_millis(100)).await;
     }
@@ -363,48 +433,87 @@ async fn wait_for_load(
     }
 }
 
-async fn capture_page_metrics(
-    conn: &Connection,
-    session_id: &str,
-    deadline: &FetchDeadline,
-) -> Result<PageMetrics, Error> {
-    let r = cdp_send(
-        conn,
-        session_id,
-        "Runtime.evaluate",
-        &serde_json::json!({
-            "expression": PAGE_METRICS_JS,
-            "returnByValue": true,
-        }),
-        "wait_readiness",
-        deadline,
-    )
-    .await?;
-    let s = r["result"]["value"].as_str().unwrap_or("{}");
-    let v: Value = serde_json::from_str(s).unwrap_or(Value::Null);
-    Ok(PageMetrics {
-        text_len: v["text_len"].as_u64().unwrap_or(0) as usize,
-        text_hash: v["text_hash"].as_u64().unwrap_or(0) as u32,
-        node_count: v["node_count"].as_u64().unwrap_or(0) as usize,
-        html_hash: v["html_hash"].as_u64().unwrap_or(0) as u32,
-    })
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-const PAGE_METRICS_JS: &str = r#"(() => {
-  const text = document.body ? document.body.innerText : '';
-  const html = document.documentElement ? document.documentElement.outerHTML : '';
-  function hash(s) {
-    let h = 2166136261;
-    for (let i = 0; i < s.length; i++) {
-      h ^= s.charCodeAt(i);
-      h = Math.imul(h, 16777619);
+    #[tokio::test]
+    async fn idle_wait_sees_networkidle_replayed_before_the_enable_response() {
+        use crate::sdk::fetch::result::TraceRenderMode;
+        use futures::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(message)) = ws.next().await {
+                let Message::Text(text) = message else {
+                    continue;
+                };
+                let request: serde_json::Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(request["method"], "Page.setLifecycleEventsEnabled");
+                // The page already went idle: the browser replays the event
+                // ahead of the response, and sends nothing after it.
+                let replay = serde_json::json!({
+                    "method": "Page.lifecycleEvent",
+                    "params": {"name": "networkIdle"},
+                    "sessionId": "page",
+                });
+                let response = serde_json::json!({"id": request["id"], "result": {}});
+                for frame in [replay, response] {
+                    ws.send(Message::Text(frame.to_string().into()))
+                        .await
+                        .unwrap();
+                }
+            }
+        });
+        let conn = Connection::connect(&format!("ws://{addr}"), None)
+            .await
+            .unwrap();
+        let deadline = FetchDeadline::new(Duration::from_secs(2), TraceRenderMode::Always);
+        wait_for_network_idle(&conn, "page", Duration::from_secs(2), &deadline)
+            .await
+            .unwrap();
+        conn.close();
+        peer.await.unwrap();
     }
-    return h >>> 0;
-  }
-  return JSON.stringify({
-    text_len: text.length,
-    text_hash: hash(text),
-    node_count: document.getElementsByTagName('*').length,
-    html_hash: hash(html)
-  });
-})()"#;
+
+    fn metrics(dom_hash: u32, text_hash: u32) -> PageMetrics {
+        PageMetrics {
+            text_len: 10,
+            text_hash,
+            node_count: 10,
+            dom_hash,
+        }
+    }
+
+    #[test]
+    fn dom_and_text_have_independent_stability_windows() {
+        let now = Instant::now();
+        let stable_for = Duration::from_millis(500);
+        for changing_dom in [true, false] {
+            let mut tracker = StabilityTracker::new(now);
+            tracker.observe(metrics(1, 1), stable_for, now);
+            tracker.observe(metrics(1, 1), stable_for, now + stable_for);
+            assert!(tracker.dom_stable && tracker.text_stable);
+            let changed = if changing_dom {
+                metrics(2, 1)
+            } else {
+                metrics(1, 2)
+            };
+            tracker.observe(changed.clone(), stable_for, now + stable_for * 2);
+            assert_eq!(tracker.dom_stable, !changing_dom);
+            assert_eq!(tracker.text_stable, changing_dom);
+            tracker.observe(
+                changed.clone(),
+                stable_for,
+                now + stable_for * 2 + stable_for / 2,
+            );
+            assert_eq!(tracker.dom_stable, !changing_dom);
+            assert_eq!(tracker.text_stable, changing_dom);
+            tracker.observe(changed, stable_for, now + stable_for * 3);
+            assert!(tracker.dom_stable && tracker.text_stable);
+        }
+    }
+}

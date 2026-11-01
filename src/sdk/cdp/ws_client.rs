@@ -94,9 +94,11 @@ impl Connection {
 
     /// Open a CDP connection to `ws://endpoint/cdp` (or `wss://`),
     /// attaching the optional bearer token via the `?token_secret=` query
-    /// parameter (the `_secret` suffix lets AFDATA redaction scrub it).
+    /// parameter (the `_secret` suffix is what CLI output redacts).
     pub async fn connect(endpoint_ws_url: &str, token: Option<&str>) -> Result<Self, Error> {
-        // Append ?token_secret= if needed.
+        // Append ?token_secret= if needed. Every message below names the
+        // caller's endpoint rather than this URL: the token is afhttp's own
+        // credential, and an SDK error is the caller's to log.
         let url = match token {
             Some(t) => append_query_pairs(endpoint_ws_url, &[("token_secret", t)])?,
             None => endpoint_ws_url.to_string(),
@@ -105,7 +107,7 @@ impl Connection {
         let uri: Uri = url.parse().map_err(|e| {
             Error::new(
                 ErrorCode::InvalidEndpoint,
-                format!("CDP url {:?}: {e}", redacted_endpoint_url(&url)),
+                format!("CDP url {endpoint_ws_url}: {e}"),
             )
         })?;
         let secure = uri
@@ -121,27 +123,30 @@ impl Connection {
             let host = uri.host().ok_or_else(|| {
                 Error::new(
                     ErrorCode::InvalidEndpoint,
-                    format!("CDP url has no host: {:?}", redacted_endpoint_url(&url)),
+                    format!("CDP url has no host: {endpoint_ws_url}"),
                 )
             })?;
+            // `Authority::host` keeps an IPv6 literal's brackets, which
+            // neither IP parsing nor DNS accepts.
+            let host = host.trim_start_matches('[').trim_end_matches(']');
             let port = uri.port_u16().unwrap_or(80);
             let stream = tokio::net::TcpStream::connect((host, port))
                 .await
                 .map_err(|e| {
                     Error::new(
                         ErrorCode::HostUnreachable,
-                        format!("CDP connect {}: {e}", redacted_endpoint_url(&url)),
+                        format!("CDP connect {endpoint_ws_url}: {e}"),
                     )
                 })?;
             let (ws, _resp) = tokio_tungstenite::client_async(request, stream)
                 .await
-                .map_err(|e| cdp_connect_error("CDP websocket", &url, e))?;
+                .map_err(|e| cdp_connect_error("CDP websocket", endpoint_ws_url, e))?;
             return Ok(Self::from_ws(ws));
         }
         // wss:// — keep the TLS-capable connector.
         let (ws, _resp) = tokio_tungstenite::connect_async(request)
             .await
-            .map_err(|e| cdp_connect_error("CDP connect", &url, e))?;
+            .map_err(|e| cdp_connect_error("CDP connect", endpoint_ws_url, e))?;
         Ok(Self::from_ws(ws))
     }
 
@@ -340,15 +345,23 @@ impl Connection {
 
     /// Wait for a CDP event matching `predicate` (true = matches).
     /// Returns `cdp_timeout` if `timeout` elapses first.
-    pub async fn wait_event<F>(
-        &self,
+    pub async fn wait_event<F>(&self, timeout: Duration, predicate: F) -> Result<CdpEvent, Error>
+    where
+        F: FnMut(&CdpEvent) -> bool,
+    {
+        Self::wait_event_on(self.subscribe(), timeout, predicate).await
+    }
+
+    /// [`Self::wait_event`] on a receiver subscribed earlier, for events a
+    /// command emits before its own response arrives.
+    pub async fn wait_event_on<F>(
+        mut rx: broadcast::Receiver<CdpEvent>,
         timeout: Duration,
         mut predicate: F,
     ) -> Result<CdpEvent, Error>
     where
         F: FnMut(&CdpEvent) -> bool,
     {
-        let mut rx = self.subscribe();
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -374,6 +387,13 @@ impl Connection {
 
     pub fn close(&self) {
         let _ = self.tx.send(OutMsg::Close);
+    }
+
+    /// True once the transport is gone: the reader saw the socket end (or an
+    /// unreadable message) or the writer could no longer send. Nothing sent
+    /// on a closed connection is ever answered.
+    pub fn is_closed(&self) -> bool {
+        self._reader.is_finished() || self._writer.is_finished()
     }
 }
 
@@ -417,22 +437,9 @@ async fn dispatch(msg: Value, pending: &PendingMap, events: &broadcast::Sender<C
     }
 }
 
-fn redacted_endpoint_url(url: &str) -> String {
-    // An invalid or whitespace-containing endpoint may have no complete URL
-    // span for prose redaction. Hide it before debug formatting escapes it.
-    if url.chars().any(char::is_whitespace) || url::Url::parse(url).is_err() {
-        return "***".to_string();
-    }
-    crate::shared::redact::redact_url(url)
-}
-
 fn append_query_pairs(url: &str, pairs: &[(&str, &str)]) -> Result<String, Error> {
-    let mut parsed = url::Url::parse(url).map_err(|e| {
-        Error::new(
-            ErrorCode::InvalidEndpoint,
-            format!("CDP url {:?}: {e}", redacted_endpoint_url(url)),
-        )
-    })?;
+    let mut parsed = url::Url::parse(url)
+        .map_err(|e| Error::new(ErrorCode::InvalidEndpoint, format!("CDP url {url}: {e}")))?;
     {
         let mut query = parsed.query_pairs_mut();
         for (key, value) in pairs {
@@ -448,10 +455,12 @@ fn build_ws_request(url: &str) -> Result<Request<()>, Error> {
     // The bearer token is already baked into the URL as `?token_secret=` by the
     // caller; a bearer header would also work, but axum's WebSocketUpgrade
     // ignores it for the upgrade handshake.
+    // Not named in the message: by now `url` carries afhttp's own token, and
+    // the caller already knows which endpoint it passed.
     let uri: Uri = url.parse().map_err(|e| {
         Error::new(
             ErrorCode::InvalidEndpoint,
-            format!("CDP url {:?}: {e}", redacted_endpoint_url(url)),
+            format!("CDP url is not a valid request URI: {e}"),
         )
     })?;
     let host = uri.authority().map(|a| a.as_str()).unwrap_or("localhost");
@@ -474,14 +483,13 @@ fn build_ws_request(url: &str) -> Result<Request<()>, Error> {
 }
 
 fn cdp_connect_error(context: &str, url: &str, err: tungstenite::Error) -> Error {
-    let redacted = redacted_endpoint_url(url);
     if let tungstenite::Error::Http(resp) = err {
         let status = resp.status();
         if let Some(bytes) = resp.body().as_ref() {
             if let Ok(remote) = serde_json::from_slice::<Error>(bytes) {
                 return Error::new(
                     remote.error_code,
-                    format!("{context} {redacted}: HTTP {status}: {}", remote.detail),
+                    format!("{context} {url}: HTTP {status}: {}", remote.detail),
                 )
                 .with_retryable(remote.retryable);
             }
@@ -489,18 +497,18 @@ fn cdp_connect_error(context: &str, url: &str, err: tungstenite::Error) -> Error
             if !body.is_empty() {
                 return Error::new(
                     ErrorCode::HostUnreachable,
-                    format!("{context} {redacted}: HTTP {status}: {body}"),
+                    format!("{context} {url}: HTTP {status}: {body}"),
                 );
             }
         }
         return Error::new(
             ErrorCode::HostUnreachable,
-            format!("{context} {redacted}: HTTP {status}"),
+            format!("{context} {url}: HTTP {status}"),
         );
     }
     Error::new(
         ErrorCode::HostUnreachable,
-        format!("{context} {redacted}: {err}"),
+        format!("{context} {url}: {err}"),
     )
 }
 
@@ -531,6 +539,23 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.error_code, ErrorCode::CdpUnavailable);
         assert!(conn.pending.lock().await.replies.is_empty());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !conn.is_closed() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a connection whose reader exited reports closed");
+    }
+
+    #[tokio::test]
+    async fn open_connection_is_not_closed() {
+        use tokio_tungstenite::tungstenite::protocol::Role;
+        let (stream, _peer) = tokio::io::duplex(1024);
+        let ws = WebSocketStream::from_raw_socket(stream, Role::Client, None).await;
+        let conn = Connection::from_ws(ws);
+        tokio::task::yield_now().await;
+        assert!(!conn.is_closed());
     }
 
     #[tokio::test]
@@ -604,86 +629,51 @@ mod tests {
             .expect("read until transport closes");
     }
 
-    fn assert_no_endpoint_canaries(err: &Error) {
-        let json = serde_json::to_string(err).expect("serialize error");
-        for text in [&err.detail, &err.to_string(), &json] {
-            assert!(!text.contains("password-canary"), "password leaked: {text}");
-            assert!(!text.contains("query-canary"), "query leaked: {text}");
-            assert!(
-                !text.contains("legacy-canary"),
-                "legacy query leaked: {text}"
-            );
-        }
-    }
-
     #[test]
     fn query_pairs_are_percent_encoded() {
         let url = append_query_pairs("ws://localhost:9222/cdp", &[("token", "a+b&c%20")]).unwrap();
         assert_eq!(url, "ws://localhost:9222/cdp?token=a%2Bb%26c%2520");
     }
 
-    // The bearer travels as `?token_secret=`; AFDATA redaction must scrub it
-    // before the failed-connect URL reaches the error envelope.
     #[tokio::test]
-    async fn connect_error_redacts_token_secret() {
-        // Port 1 refuses fast, so we exercise the map_err path deterministically.
-        let err = Connection::connect("ws://127.0.0.1:1/cdp", Some("supersecret"))
-            .await
-            .err()
-            .expect("connect to closed port must fail");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("token_secret=***"),
-            "token not redacted: {msg}"
-        );
-        assert!(!msg.contains("supersecret"), "raw token leaked: {msg}");
-    }
-
-    #[tokio::test]
-    async fn refused_cdp_endpoint_redacts_userinfo_and_query() {
+    async fn refused_cdp_endpoint_is_host_unreachable() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
         let port = listener.local_addr().expect("local address").port();
         drop(listener);
-        let err = Connection::connect(
-            &format!("ws://reader:password-canary@127.0.0.1:{port}/cdp?api_key=legacy-canary"),
-            Some("query-canary"),
-        )
-        .await
-        .err()
-        .expect("closed endpoint must fail");
-        assert_no_endpoint_canaries(&err);
+        let err = Connection::connect(&format!("ws://127.0.0.1:{port}/cdp"), Some("token-canary"))
+            .await
+            .err()
+            .expect("closed endpoint must fail");
         assert_eq!(err.error_code, ErrorCode::HostUnreachable);
-        assert!(err.detail.contains("token_secret=***"));
-        assert!(err.detail.contains("api_key=***"));
+        // The endpoint is the caller's and comes back as given; the token is
+        // afhttp's own and does not.
+        assert!(
+            err.detail.contains(&format!("ws://127.0.0.1:{port}/cdp")),
+            "{}",
+            err.detail
+        );
+        assert!(!err.detail.contains("token-canary"), "{}", err.detail);
     }
 
     #[test]
-    fn malformed_cdp_url_redacts_append_and_request_errors() {
-        let append_err = append_query_pairs(
-            "ws://reader:password-canary@127.0.0.1:invalid/cdp?token_secret=query-canary",
-            &[("profile", "review")],
-        )
-        .expect_err("invalid port must fail URL append");
+    fn malformed_cdp_url_is_an_invalid_endpoint() {
+        let append_err = append_query_pairs("ws://127.0.0.1:invalid/cdp", &[("profile", "review")])
+            .expect_err("invalid port must fail URL append");
         assert_eq!(append_err.error_code, ErrorCode::InvalidEndpoint);
-        assert_no_endpoint_canaries(&append_err);
 
-        let request_err = build_ws_request(
-            "ws://reader:password-canary@127.0.0.1/cdp path?token_secret=query-canary",
-        )
-        .expect_err("whitespace must fail request URI parsing");
+        let request_err = build_ws_request("ws://127.0.0.1/cdp path")
+            .expect_err("whitespace must fail request URI parsing");
         assert_eq!(request_err.error_code, ErrorCode::InvalidEndpoint);
-        assert_no_endpoint_canaries(&request_err);
     }
 
     #[tokio::test]
-    async fn cdp_endpoint_without_host_redacts_query() {
-        let err = Connection::connect("/cdp?token_secret=query-canary", None)
+    async fn cdp_endpoint_without_host_is_an_invalid_endpoint() {
+        let err = Connection::connect("/cdp", None)
             .await
             .err()
             .expect("relative endpoint must fail");
         assert_eq!(err.error_code, ErrorCode::InvalidEndpoint);
         assert!(err.detail.contains("has no host"));
-        assert_no_endpoint_canaries(&err);
     }
 
     #[test]
@@ -704,7 +694,5 @@ mod tests {
         );
         assert_eq!(err.error_code, ErrorCode::ProfileLocked);
         assert!(err.detail.contains("contabo.com"), "{}", err.detail);
-        assert!(err.detail.contains("token_secret=***"), "{}", err.detail);
-        assert!(!err.detail.contains("supersecret"), "{}", err.detail);
     }
 }

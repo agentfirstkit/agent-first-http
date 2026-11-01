@@ -29,7 +29,7 @@ pub fn default_root() -> PathBuf {
 }
 
 /// Validate a profile name. Allowed: ASCII alphanumerics plus `-`, `_`,
-/// `.` (but never starting with `.`), max 64 chars. Rejects Windows
+/// `.` (but never starting or ending with `.`), max 64 chars. Rejects Windows
 /// reserved device names so a profile created on Linux cannot become a
 /// poisoned path when the directory is read on Windows.
 ///
@@ -54,6 +54,14 @@ pub fn validate_name(name: &str) -> Result<(), Error> {
         return Err(Error::new(
             ErrorCode::ProfileInvalidName,
             "profile name cannot start with '.'",
+        ));
+    }
+    // Windows strips a trailing dot, so `work.` and `work` would be one
+    // directory there and two everywhere else.
+    if name.ends_with('.') {
+        return Err(Error::new(
+            ErrorCode::ProfileInvalidName,
+            "profile name cannot end with '.'",
         ));
     }
     for c in name.chars() {
@@ -211,6 +219,15 @@ mod tests {
             validate_name(".hidden").err().map(|e| e.error_code),
             Some(ErrorCode::ProfileInvalidName)
         );
+        // Windows strips the trailing dot: `work.` would be `work` there.
+        for name in ["work.", "work.."] {
+            assert_eq!(
+                validate_name(name).err().map(|e| e.error_code),
+                Some(ErrorCode::ProfileInvalidName),
+                "{name}"
+            );
+        }
+        assert!(validate_name("work.v2").is_ok());
     }
 
     #[test]

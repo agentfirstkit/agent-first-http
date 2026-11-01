@@ -13,8 +13,9 @@ use std::str::FromStr;
 
 use crate::shared::error::{Error, ErrorCode};
 
-/// Parsed endpoint. Round-trip-safe: any input that parses also formats
-/// back to the canonical string with [`Endpoint::as_str`].
+/// Parsed endpoint. Paths, queries, and fragments after the authority are
+/// dropped; [`Endpoint::http_base`] and [`Endpoint::cdp_ws_url`] derive the
+/// URLs actually dialed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Endpoint {
     Ws {
@@ -73,7 +74,7 @@ impl Endpoint {
                 let _ = path;
                 Err(Error::new(
                     ErrorCode::InvalidEndpoint,
-                    "unix: endpoints are not supported on this platform; use tcp:127.0.0.1:<port>",
+                    "unix: endpoints are not supported on this platform; use ws://127.0.0.1:<port>",
                 ))
             }
         } else {
@@ -122,21 +123,44 @@ impl FromStr for Endpoint {
 }
 
 fn split_host_port(rest: &str, default_port: u16) -> Result<(String, u16), Error> {
-    let rest = rest.split('/').next().unwrap_or(rest);
-    if rest.is_empty() {
+    if rest.is_empty() || rest.starts_with('/') {
         return Err(Error::new(
             ErrorCode::InvalidEndpoint,
             "endpoint missing host",
         ));
     }
-    if let Some((host, port)) = rest.rsplit_once(':') {
-        let port: u16 = port
-            .parse()
-            .map_err(|_| Error::new(ErrorCode::InvalidEndpoint, "endpoint port not a u16"))?;
-        Ok((host.to_string(), port))
-    } else {
-        Ok((rest.to_string(), default_port))
+    // Parse an authority with the URL parser so bracketed IPv6 hosts and
+    // query/fragment boundaries have the same meaning as the derived URLs.
+    // Use the matching default scheme to retain explicit non-default ports.
+    let scheme = if default_port == 443 { "https" } else { "http" };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    if authority.ends_with(':') {
+        return Err(Error::new(
+            ErrorCode::InvalidEndpoint,
+            "endpoint port must be a u16",
+        ));
     }
+    if rest
+        .chars()
+        .any(|ch| ch.is_whitespace() || ch.is_control() || ch == '\\')
+    {
+        return Err(Error::new(
+            ErrorCode::InvalidEndpoint,
+            "endpoint contains invalid URL characters",
+        ));
+    }
+    let parsed = url::Url::parse(&format!("{scheme}://{rest}"))
+        .map_err(|_| Error::new(ErrorCode::InvalidEndpoint, "invalid endpoint authority"))?;
+    if authority.contains('@') {
+        return Err(Error::new(
+            ErrorCode::InvalidEndpoint,
+            "endpoint credentials must be supplied separately",
+        ));
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| Error::new(ErrorCode::InvalidEndpoint, "endpoint missing host"))?;
+    Ok((host.to_owned(), parsed.port().unwrap_or(default_port)))
 }
 
 #[cfg(test)]
@@ -204,6 +228,53 @@ mod tests {
     fn rejects_bad_port() {
         let err = Endpoint::parse("ws://host:notnum").err();
         assert_eq!(err.map(|e| e.error_code), Some(ErrorCode::InvalidEndpoint),);
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn unix_endpoint_error_suggests_a_parseable_endpoint() {
+        let error = Endpoint::parse("unix:/run/afhttp.sock").unwrap_err();
+        assert_eq!(error.error_code, ErrorCode::InvalidEndpoint);
+        assert!(error.detail.contains("ws://127.0.0.1:<port>"));
+        assert!(Endpoint::parse("ws://127.0.0.1:9222").is_ok());
+    }
+
+    #[test]
+    fn ipv6_and_url_boundaries_produce_valid_origin_urls() {
+        for (endpoint, expected) in [
+            ("ws://[::1]", "http://[::1]:80"),
+            ("wss://[::1]", "https://[::1]:443"),
+            ("wss://[::1]:80/path", "https://[::1]:80"),
+            ("http://[2001:db8::1]:8080", "http://[2001:db8::1]:8080"),
+            (
+                "https://host.example?query=value",
+                "https://host.example:443",
+            ),
+            ("ws://host.example#fragment", "http://host.example:80"),
+        ] {
+            let parsed = Endpoint::parse(endpoint).expect("valid endpoint");
+            assert_eq!(parsed.http_base(), expected);
+            assert!(url::Url::parse(&parsed.cdp_ws_url()).is_ok());
+        }
+    }
+
+    #[test]
+    fn invalid_authorities_fail_before_connecting() {
+        for endpoint in [
+            "ws:///host",
+            "ws://:80",
+            "ws://host:",
+            "wss://[::1]:/path",
+            "ws://@host",
+            "ws://[::1",
+            "ws://host name:80",
+            "ws://host\\other",
+            "ws://reader:password-canary@host:80",
+        ] {
+            let error = Endpoint::parse(endpoint).expect_err("invalid authority");
+            assert_eq!(error.error_code, ErrorCode::InvalidEndpoint);
+            assert!(!error.to_string().contains("password-canary"));
+        }
     }
 
     #[test]

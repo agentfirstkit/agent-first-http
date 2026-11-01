@@ -19,7 +19,7 @@ use crate::shared::error::{Error, ErrorCode};
 use crate::shared::ids::{RequestId, TabId};
 use crate::shared::time::duration_ms;
 
-use super::{cdp_send_no_session, finish_target};
+use super::{cdp_send_no_session, finish_failed_target, finish_target};
 
 pub(super) struct DownloadNavigation {
     pub(super) builder: FetchBuilder,
@@ -37,6 +37,7 @@ pub(super) struct DownloadNavigation {
     pub(super) escalation_reason: Option<String>,
     pub(super) target_id: String,
     pub(super) session_id: String,
+    pub(super) main_frame_id: Option<String>,
     pub(super) created_target: bool,
     pub(super) deadline: FetchDeadline,
 }
@@ -59,28 +60,55 @@ pub(super) async fn finish_download_navigation(
         escalation_reason,
         target_id,
         session_id,
+        main_frame_id,
         created_target,
         deadline,
     } = ctx;
     let Some(download_dir) = download_dir else {
-        finish_target(&conn, &target_id, &session_id, created_target).await;
+        finish_failed_target(
+            &conn,
+            &target_id,
+            &session_id,
+            created_target && !builder.keep_tab_open,
+            &deadline,
+        )
+        .await;
         return Err(Error::new(
             ErrorCode::ArtifactCaptureFailed,
             "navigation became a download, but the host profile download directory was unavailable",
         ));
     };
-    let downloaded =
-        match wait_for_download_with_deadline(&download_dir, &downloads_before, &deadline).await {
-            Ok(file) => file,
-            Err(e) => {
-                finish_target(&conn, &target_id, &session_id, created_target).await;
-                return Err(e);
-            }
-        };
+    // The download directory is the profile's, shared by every fetch on it:
+    // only a file named for this tab's download is this fetch's.
+    let expected_name = download_start
+        .as_ref()
+        .and_then(|start| start.suggested_filename.as_deref());
+    let downloaded = match wait_for_download_with_deadline(
+        &download_dir,
+        &downloads_before,
+        expected_name,
+        &deadline,
+    )
+    .await
+    {
+        Ok(file) => file,
+        Err(e) => {
+            finish_failed_target(
+                &conn,
+                &target_id,
+                &session_id,
+                created_target && !builder.keep_tab_open,
+                &deadline,
+            )
+            .await;
+            return Err(e);
+        }
+    };
     let main_entry = network_collector
-        .wait_for_main_status(Duration::from_millis(
-            builder.readiness.observe_main_wait_ms,
-        ))
+        .wait_for_main_status(
+            Duration::from_millis(builder.readiness.observe_main_wait_ms),
+            main_frame_id.as_deref(),
+        )
         .await;
     deadline.update_trace(|trace| {
         trace.render_decision = RenderDecision::Browser;
@@ -98,9 +126,7 @@ pub(super) async fn finish_download_navigation(
     });
     let mut result = FetchResult::new(request_id, builder.url.clone(), deadline.snapshot());
     result.status = main_entry.as_ref().and_then(|e| e.status).unwrap_or(0);
-    // A download can never be a wall, so a created target always closes at
-    // the end of this path; only a caller-named tab survives to be reported.
-    result.tab_id = (!created_target).then(|| TabId::new(target_id.clone()));
+    result.tab_id = Some(TabId::new(target_id.clone()));
     result.download_file = Some(downloaded.path.clone());
     result.download_bytes = Some(downloaded.bytes);
     result.download_filename = Some(downloaded.filename);
@@ -123,7 +149,16 @@ pub(super) async fn finish_download_navigation(
     } else {
         let _ = network_collector.finish().await;
     }
-    finish_target(&conn, &target_id, &session_id, created_target).await;
+    if finish_target(&conn, &target_id, &session_id, created_target).await {
+        result.tab_id = None;
+    } else if created_target {
+        result.warnings.push(crate::sdk::fetch::result::Warning {
+            artifact: Artifact::RenderedHtml,
+            code: ErrorCode::CdpError,
+            detail: "completed download retained its tab because safe cleanup failed".into(),
+        });
+        finish_target(&conn, &target_id, &session_id, false).await;
+    }
     deadline.update_trace(|trace| {
         trace.duration_ms = duration_ms(start.elapsed());
     });
@@ -136,7 +171,11 @@ pub(super) async fn configure_download_capture(
     conn: &Connection,
     deadline: &FetchDeadline,
 ) -> Option<PathBuf> {
-    let info = client.profile_info().await.ok()?;
+    let remaining = deadline.remaining("configure_download_capture").ok()?;
+    let info = tokio::time::timeout(remaining, client.profile_info())
+        .await
+        .ok()?
+        .ok()?;
     let profile_dir = info.path.as_ref()?;
     let download_dir = profile_dir.join("downloads");
     tokio::fs::create_dir_all(&download_dir).await.ok()?;
@@ -159,14 +198,38 @@ pub(super) async fn configure_download_capture(
 #[derive(Debug, Clone)]
 pub(super) struct DownloadStart {
     url: Option<String>,
+    suggested_filename: Option<String>,
+}
+
+/// What identifies this fetch's tab in download events. `Page.*` events
+/// carry the session; `Browser.downloadWillBegin` carries only the frame,
+/// which for a navigation download is the tab's root frame.
+pub(super) struct DownloadFrames<'a> {
+    pub(super) session_id: &'a str,
+    pub(super) target_id: &'a str,
+    pub(super) main_frame_id: Option<&'a str>,
+}
+
+impl DownloadFrames<'_> {
+    fn owns(&self, event: &CdpEvent) -> bool {
+        match event.method.as_str() {
+            "Page.downloadWillBegin" => event.session_id.as_deref() == Some(self.session_id),
+            "Browser.downloadWillBegin" => event
+                .params
+                .get("frameId")
+                .and_then(|v| v.as_str())
+                .is_some_and(|frame| frame == self.target_id || Some(frame) == self.main_frame_id),
+            _ => false,
+        }
+    }
 }
 
 pub(super) async fn wait_for_download_start(
     rx: &mut broadcast::Receiver<CdpEvent>,
     timeout: Duration,
-    session_id: &str,
+    frames: &DownloadFrames<'_>,
 ) -> Option<DownloadStart> {
-    if let Some(start) = poll_download_start(rx, session_id) {
+    if let Some(start) = poll_download_start(rx, frames) {
         return Some(start);
     }
     if timeout.is_zero() {
@@ -180,7 +243,7 @@ pub(super) async fn wait_for_download_start(
         }
         match tokio::time::timeout(remaining, rx.recv()).await {
             Ok(Ok(event)) => {
-                if let Some(start) = download_start_from_event(&event, session_id) {
+                if let Some(start) = download_start_from_event(&event, frames) {
                     return Some(start);
                 }
             }
@@ -192,12 +255,12 @@ pub(super) async fn wait_for_download_start(
 
 fn poll_download_start(
     rx: &mut broadcast::Receiver<CdpEvent>,
-    session_id: &str,
+    frames: &DownloadFrames<'_>,
 ) -> Option<DownloadStart> {
     loop {
         match rx.try_recv() {
             Ok(event) => {
-                if let Some(start) = download_start_from_event(&event, session_id) {
+                if let Some(start) = download_start_from_event(&event, frames) {
                     return Some(start);
                 }
             }
@@ -209,19 +272,24 @@ fn poll_download_start(
     }
 }
 
-fn download_start_from_event(event: &CdpEvent, session_id: &str) -> Option<DownloadStart> {
-    match event.method.as_str() {
-        "Browser.downloadWillBegin" => {}
-        "Page.downloadWillBegin" if event.session_id.as_deref() == Some(session_id) => {}
-        "Page.downloadWillBegin" => return None,
-        _ => return None,
+fn download_start_from_event(
+    event: &CdpEvent,
+    frames: &DownloadFrames<'_>,
+) -> Option<DownloadStart> {
+    if !frames.owns(event) {
+        return None;
     }
-    Some(DownloadStart {
-        url: event
+    let field = |name: &str| {
+        event
             .params
-            .get("url")
+            .get(name)
             .and_then(|v| v.as_str())
-            .map(str::to_string),
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+    };
+    Some(DownloadStart {
+        url: field("url"),
+        suggested_filename: field("suggestedFilename"),
     })
 }
 
@@ -258,11 +326,18 @@ pub(super) async fn snapshot_download_dir(dir: &Path) -> std::io::Result<BTreeSe
 async fn wait_for_download_with_deadline(
     dir: &Path,
     before: &BTreeSet<PathBuf>,
+    expected_name: Option<&str>,
     deadline: &FetchDeadline,
 ) -> Result<CompletedDownload, Error> {
     deadline
         .run_result("capture_download", ErrorCode::NavigationTimeout, async {
-            wait_for_download_file(dir, before, deadline.remaining("capture_download")?).await
+            wait_for_download_file(
+                dir,
+                before,
+                expected_name,
+                deadline.remaining("capture_download")?,
+            )
+            .await
         })
         .await
 }
@@ -270,6 +345,7 @@ async fn wait_for_download_with_deadline(
 async fn wait_for_download_file(
     dir: &Path,
     before: &BTreeSet<PathBuf>,
+    expected_name: Option<&str>,
     timeout: Duration,
 ) -> Result<CompletedDownload, Error> {
     let deadline = Instant::now() + timeout;
@@ -280,7 +356,7 @@ async fn wait_for_download_file(
                 format!("download did not complete in {}", dir.display()),
             ));
         }
-        if let Some(path) = newest_completed_download(dir, before).await {
+        if let Some(path) = newest_completed_download(dir, before, expected_name).await {
             let size1 = tokio::fs::metadata(&path).await.map(|m| m.len()).ok();
             tokio::time::sleep(Duration::from_millis(100)).await;
             let size2 = tokio::fs::metadata(&path).await.map(|m| m.len()).ok();
@@ -303,12 +379,27 @@ async fn wait_for_download_file(
     }
 }
 
-async fn newest_completed_download(dir: &Path, before: &BTreeSet<PathBuf>) -> Option<PathBuf> {
+/// The newest new, finished file in `dir`. With `expected_name` (the
+/// download's suggested filename) only that name, or the browser's
+/// de-duplicated `name (N).ext` form of it, qualifies.
+async fn newest_completed_download(
+    dir: &Path,
+    before: &BTreeSet<PathBuf>,
+    expected_name: Option<&str>,
+) -> Option<PathBuf> {
     let mut read_dir = tokio::fs::read_dir(dir).await.ok()?;
     let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
     while let Ok(Some(entry)) = read_dir.next_entry().await {
         let path = entry.path();
         if before.contains(&path) || path.extension().and_then(|e| e.to_str()) == Some("crdownload")
+        {
+            continue;
+        }
+        if let Some(expected) = expected_name
+            && !path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|name| is_download_named(name, expected))
         {
             continue;
         }
@@ -330,6 +421,21 @@ async fn newest_completed_download(dir: &Path, before: &BTreeSet<PathBuf>) -> Op
     newest.map(|(_, path)| path)
 }
 
+/// `name` is `expected`, or `expected` with a ` (N)` the browser inserted
+/// before the extension because the name was taken.
+fn is_download_named(name: &str, expected: &str) -> bool {
+    if name == expected {
+        return true;
+    }
+    let (stem, ext) = match expected.rfind('.') {
+        Some(dot) if dot > 0 => expected.split_at(dot),
+        _ => (expected, ""),
+    };
+    name.strip_circumfix(stem, ext)
+        .and_then(|middle| middle.strip_circumfix(" (", ')'))
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,7 +449,7 @@ mod tests {
         let deadline = FetchDeadline::new(Duration::from_millis(200), TraceRenderMode::Always);
         tokio::time::sleep(Duration::from_millis(150)).await;
         let started = Instant::now();
-        let error = wait_for_download_with_deadline(dir.path(), &BTreeSet::new(), &deadline)
+        let error = wait_for_download_with_deadline(dir.path(), &BTreeSet::new(), None, &deadline)
             .await
             .unwrap_err();
         assert_eq!(error.error_code, ErrorCode::NavigationTimeout);
@@ -366,7 +472,65 @@ mod tests {
             &navigate,
             Some(&DownloadStart {
                 url: Some("https://example.test/file.bin".into()),
+                suggested_filename: None,
             }),
         ));
+    }
+
+    #[test]
+    fn download_events_from_other_tabs_are_ignored() {
+        let frames = DownloadFrames {
+            session_id: "mine",
+            target_id: "TARGET",
+            main_frame_id: Some("ROOT"),
+        };
+        let event = |method: &str, session: Option<&str>, frame: &str| CdpEvent {
+            method: method.into(),
+            session_id: session.map(str::to_string),
+            params: serde_json::json!({
+                "frameId": frame, "guid": "g1", "url": "https://example.test/f.bin",
+                "suggestedFilename": "f.bin",
+            }),
+        };
+        for (ev, owned) in [
+            (event("Browser.downloadWillBegin", None, "TARGET"), true),
+            (event("Browser.downloadWillBegin", None, "ROOT"), true),
+            (event("Browser.downloadWillBegin", None, "OTHER"), false),
+            (event("Page.downloadWillBegin", Some("mine"), "x"), true),
+            (
+                event("Page.downloadWillBegin", Some("other"), "TARGET"),
+                false,
+            ),
+        ] {
+            let start = download_start_from_event(&ev, &frames);
+            assert_eq!(start.is_some(), owned, "{ev:?}");
+            if let Some(start) = start {
+                assert_eq!(start.suggested_filename.as_deref(), Some("f.bin"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn only_the_expected_download_name_is_taken_from_the_shared_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("report.pdf"), "old").unwrap();
+        let before = snapshot_download_dir(dir.path()).await.unwrap();
+        std::fs::write(dir.path().join("report (1).pdf"), "mine").unwrap();
+        // Another fetch's download, written later, is newer but not ours.
+        std::fs::write(dir.path().join("other.bin"), "theirs").unwrap();
+        let found = newest_completed_download(dir.path(), &before, Some("report.pdf"))
+            .await
+            .unwrap();
+        assert_eq!(found, dir.path().join("report (1).pdf"));
+        for (name, expected, matches) in [
+            ("a.tar.gz", "a.tar.gz", true),
+            ("a.tar (2).gz", "a.tar.gz", true),
+            ("README (3)", "README", true),
+            ("report (x).pdf", "report.pdf", false),
+            ("report ().pdf", "report.pdf", false),
+            ("report.pdf.exe", "report.pdf", false),
+        ] {
+            assert_eq!(is_download_named(name, expected), matches, "{name}");
+        }
     }
 }
