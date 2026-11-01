@@ -1548,7 +1548,7 @@ async fn browser_navigation_download_timeout_uses_whole_fetch_budget() {
         .fetch(format!("{}/unfinished-download.bin", fixture.base_url()))
         .render(RenderMode::Always)
         .wait(Wait::Load)
-        .timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(4))
         .want([Artifact::Body])
         .out_dir(tmp.path().to_path_buf())
         .send_detailed()
@@ -1559,8 +1559,10 @@ async fn browser_navigation_download_timeout_uses_whole_fetch_budget() {
         agent_first_http::shared::error::ErrorCode::NavigationTimeout,
         "{error:?}"
     );
+    // The fixture answers after 1s; a budget restarted by the download would
+    // run to at least 5s.
     assert!(
-        started.elapsed() < Duration::from_millis(2800),
+        started.elapsed() < Duration::from_millis(4800),
         "download reset the fetch budget: {:?}",
         started.elapsed()
     );

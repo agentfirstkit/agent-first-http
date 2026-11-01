@@ -346,8 +346,10 @@ pub async fn spawn() -> Fixture {
 async fn unfinished_download_bin() -> Response {
     use futures::StreamExt;
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    // A full kilobyte, so a browser that sniffs a download's first bytes
+    // before converting the navigation has them; then the body never ends.
     let chunks = futures::stream::once(async {
-        Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"partial download"))
+        Ok::<_, std::io::Error>(axum::body::Bytes::from_static(&[b'x'; 1024]))
     })
     .chain(futures::stream::pending());
     Response::builder()
